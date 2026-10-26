@@ -369,6 +369,7 @@ mod tests {
             chapter_mode: "embed".into(),
             range: None,
             keystroke_overlay: None,
+            renderer: "auto".into(),
         }
     }
 

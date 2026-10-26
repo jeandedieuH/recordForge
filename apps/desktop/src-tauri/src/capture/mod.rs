@@ -25,6 +25,10 @@ pub mod macos_sck;
 pub mod manifest;
 pub mod media;
 pub mod metrics;
+/// Bi-planar NV12 packing for the native frame producers. Pure Rust so the
+/// layout rules are tested on every host; only the unix producers call it.
+#[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
+pub(crate) mod nv12;
 pub mod outputs;
 pub mod permissions;
 pub mod preview_server;

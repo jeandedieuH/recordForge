@@ -706,6 +706,13 @@ export type ExportRange = z.infer<typeof exportRangeSchema>
 export const exportEncoderSchema = z.enum(["auto", "software"])
 export type ExportEncoderPreference = z.infer<typeof exportEncoderSchema>
 
+// Compositor selection (ADR 018). `auto` uses the native GPU compositor once the
+// Phase 5 parity gate (G5) holds and the compatibility FFmpeg graph until then;
+// `gpu` asks for the GPU path explicitly and still degrades per-feature, and
+// `compatibility` pins the FFmpeg renderer.
+export const exportRendererSchema = z.enum(["auto", "gpu", "compatibility"])
+export type ExportRendererPreference = z.infer<typeof exportRendererSchema>
+
 // Chapter export mode for embedding MP4 chapters or writing a YouTube timestamp sidecar.
 export const renderChapterModeSchema = z.enum(["embed", "sidecar", "both", "none"])
 export type RenderChapterMode = z.infer<typeof renderChapterModeSchema>
@@ -724,6 +731,7 @@ export const exportSettingsSchema = z.object({
   preset: exportPresetSchema.default("default-mp4"),
   codec: z.enum(["h264", "hevc", "gif", "webp"]).default("h264"),
   encoder: exportEncoderSchema.default("auto"),
+  renderer: exportRendererSchema.default("auto"),
   container: z.enum(["mp4", "gif", "webp"]).default("mp4"),
   captionMode: renderCaptionModeSchema.default("burn-in"),
   chapterMode: renderChapterModeSchema.default("embed"),

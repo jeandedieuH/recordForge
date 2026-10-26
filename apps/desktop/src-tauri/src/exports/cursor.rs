@@ -1394,52 +1394,142 @@ pub(crate) fn unpremultiply_rgba(data: &mut [u8]) {
     }
 }
 
-/// Same conversion as `unpremultiply_rgba`, restricted to the bounding box of
-/// pixels with non-zero alpha. Alpha-0 pixels are left untouched either way,
-/// and drawn content dominates only a small screen rect on most frames, so
-/// bounding the pass avoids unpremultiplying millions of already-transparent
-/// pixels per frame. `stride_w` is the row stride in pixels.
-pub(crate) fn unpremultiply_rgba_bounded(data: &mut [u8], stride_w: usize) {
-    let stride = stride_w.saturating_mul(4);
-    if stride == 0 || data.len() < stride {
+/// Bytes in one `yuva420p` plane of `width`×`height`: full-resolution luma and
+/// alpha plus 2×2-subsampled chroma (2.5 bytes per pixel instead of RGBA's 4).
+pub(crate) fn yuva420p_len(width: u32, height: u32) -> usize {
+    let (w, h) = (width as usize, height as usize);
+    let chroma = (w / 2) * (h / 2);
+    w * h * 2 + chroma * 2
+}
+
+/// BT.601 limited-range RGB→YUV tables in 16.16 fixed point, split per channel
+/// so a pixel costs three table lookups and two adds instead of six multiplies.
+struct Bt601Tables {
+    y_r: [i32; 256],
+    y_g: [i32; 256],
+    y_b: [i32; 256],
+    u_r: [i32; 256],
+    u_g: [i32; 256],
+    u_b: [i32; 256],
+    v_r: [i32; 256],
+    v_g: [i32; 256],
+    v_b: [i32; 256],
+}
+
+fn bt601_tables() -> &'static Bt601Tables {
+    static TABLES: std::sync::OnceLock<Bt601Tables> = std::sync::OnceLock::new();
+    TABLES.get_or_init(|| {
+        let mut tables = Bt601Tables {
+            y_r: [0; 256],
+            y_g: [0; 256],
+            y_b: [0; 256],
+            u_r: [0; 256],
+            u_g: [0; 256],
+            u_b: [0; 256],
+            v_r: [0; 256],
+            v_g: [0; 256],
+            v_b: [0; 256],
+        };
+        const SCALE: f64 = 65536.0;
+        // swscale's BT.601 coefficients scaled to the 219/224 limited ranges.
+        let y = [0.256_788_2, 0.504_129_4, 0.097_905_9];
+        let u = [-0.148_223_5, -0.290_992_2, 0.439_215_7];
+        let v = [0.439_215_7, -0.367_788_2, -0.071_427_5];
+        for value in 0..256 {
+            let level = value as f64;
+            tables.y_r[value] = (level * y[0] * SCALE).round() as i32;
+            tables.y_g[value] = (level * y[1] * SCALE).round() as i32;
+            tables.y_b[value] = (level * y[2] * SCALE).round() as i32;
+            tables.u_r[value] = (level * u[0] * SCALE).round() as i32;
+            tables.u_g[value] = (level * u[1] * SCALE).round() as i32;
+            tables.u_b[value] = (level * u[2] * SCALE).round() as i32;
+            tables.v_r[value] = (level * v[0] * SCALE).round() as i32;
+            tables.v_g[value] = (level * v[1] * SCALE).round() as i32;
+            tables.v_b[value] = (level * v[2] * SCALE).round() as i32;
+        }
+        tables
+    })
+}
+
+/// Convert a premultiplied RGBA plane into the `yuva420p` layout FFmpeg's
+/// `overlay` blends directly: full-resolution Y and A plus 2×2-subsampled U/V
+/// in BT.601 limited range.
+///
+/// This folds the previously separate unpremultiply pass into the conversion
+/// and lets the export ship 2.5 bytes per pixel instead of 4 — the overlay
+/// filter then no longer auto-inserts a per-plane swscale RGBA→YUVA420P.
+/// Dimensions must be even (callers align plane rects to the chroma grid).
+pub(crate) fn rgba_to_yuva420p(src: &[u8], width: u32, height: u32, dst: &mut [u8]) {
+    let (w, h) = (width as usize, height as usize);
+    if w == 0 || h == 0 || !w.is_multiple_of(2) || !h.is_multiple_of(2) {
         return;
     }
-    let mut rows = data.chunks_exact(stride);
-    let mut top = usize::MAX;
-    let mut bottom = 0usize;
-    let mut left = usize::MAX;
-    let mut right = 0usize;
-    for (row, row_bytes) in rows.by_ref().enumerate() {
-        let mut row_left = usize::MAX;
-        let mut row_right = 0usize;
-        for (col, pixel) in row_bytes.as_chunks::<4>().0.iter().enumerate() {
-            if pixel[3] != 0 {
-                row_left = row_left.min(col);
-                row_right = col + 1;
-            }
-        }
-        if row_left != usize::MAX {
-            top = top.min(row);
-            bottom = row + 1;
-            left = left.min(row_left);
-            right = right.max(row_right);
-        }
-    }
-    if top == usize::MAX {
+    if src.len() < w * h * 4 || dst.len() < yuva420p_len(width, height) {
         return;
     }
+    let tables = bt601_tables();
     let inv_lut = inv_alpha_lut();
-    for row_bytes in data[top * stride..bottom * stride].chunks_exact_mut(stride) {
-        for pixel in row_bytes[left * 4..right * 4].as_chunks_mut::<4>().0 {
-            let alpha = pixel[3] as usize;
-            if alpha > 0 && alpha < 255 {
-                let inv = inv_lut[alpha];
-                pixel[0] = (pixel[0] as f32 * inv).min(255.0) as u8;
-                pixel[1] = (pixel[1] as f32 * inv).min(255.0) as u8;
-                pixel[2] = (pixel[2] as f32 * inv).min(255.0) as u8;
+    let y_size = w * h;
+    let (cw, ch) = (w / 2, h / 2);
+    let c_size = cw * ch;
+    let (y_plane, rest) = dst.split_at_mut(y_size);
+    let (u_plane, rest) = rest.split_at_mut(c_size);
+    let (v_plane, a_plane) = rest.split_at_mut(c_size);
+
+    for row in 0..ch {
+        for col in 0..cw {
+            let mut u_sum = 0i32;
+            let mut v_sum = 0i32;
+            for dy in 0..2 {
+                let src_row = &src[((row * 2 + dy) * w + col * 2) * 4..][..8];
+                for dx in 0..2 {
+                    let pixel = &src_row[dx * 4..dx * 4 + 4];
+                    let alpha = pixel[3] as usize;
+                    let (red, green, blue) = if alpha > 0 && alpha < 255 {
+                        let inv = inv_lut[alpha];
+                        (
+                            (pixel[0] as f32 * inv).min(255.0) as u8,
+                            (pixel[1] as f32 * inv).min(255.0) as u8,
+                            (pixel[2] as f32 * inv).min(255.0) as u8,
+                        )
+                    } else {
+                        (pixel[0], pixel[1], pixel[2])
+                    };
+                    let (r, g, b) = (red as usize, green as usize, blue as usize);
+                    let index = (row * 2 + dy) * w + col * 2 + dx;
+                    // 16 + the 219-scaled luma, rounded to the nearest level.
+                    y_plane[index] =
+                        ((tables.y_r[r] + tables.y_g[g] + tables.y_b[b] + (16 << 16) + (1 << 15))
+                            >> 16)
+                            .clamp(16, 235) as u8;
+                    a_plane[index] = swscale_alpha(pixel[3]);
+                    u_sum += tables.u_r[r] + tables.u_g[g] + tables.u_b[b];
+                    v_sum += tables.v_r[r] + tables.v_g[g] + tables.v_b[b];
+                }
             }
+            // Average the four 16.16 chroma samples in the block, then offset
+            // into the limited 16..240 chroma range.
+            let chroma_index = row * cw + col;
+            u_plane[chroma_index] = chroma_level(u_sum);
+            v_plane[chroma_index] = chroma_level(v_sum);
         }
     }
+}
+
+/// Round one 2×2 chroma block sum (four 16.16 samples) into 8-bit U/V.
+fn chroma_level(sum: i32) -> u8 {
+    // `sum` is at a (4 * 65536) scale. Adding half a level before the
+    // arithmetic shift rounds half up for either sign; 128 then centers the
+    // limited-range chroma plane.
+    (((128 << 18) + sum + (1 << 17)) >> 18).clamp(16, 240) as u8
+}
+
+/// swscale's alpha transfer for RGBA→YUVA420P: it scales by 255/254 with a
+/// fixed 126/254 bias, so 128 becomes 129 while 127 stays 127. Matching it
+/// keeps the blend weight (and therefore every semi-transparent pixel) equal
+/// to the RGBA transport this replaced.
+fn swscale_alpha(alpha: u8) -> u8 {
+    (((alpha as u32) * 255 + 126) / 254).min(255) as u8
 }
 
 /// Generates a grayscale anti-aliased rounded rectangle mask PNG for fast hardware/SIMD compositing with alphamerge.
@@ -2008,6 +2098,91 @@ mod tests {
                 && by1 >= y1 as f64 + 1.0,
             "bounds {bx0},{by0}..{bx1},{by1} miss drawn pixels {x0},{y0}..{x1},{y1}"
         );
+    }
+
+    #[test]
+    fn rgba_to_yuva420p_matches_swscale_bt601_levels() {
+        // Reference values from FFmpeg 9.0.1 `format=yuva420p` on solid
+        // colours (see docs/benchmarks/phase-2-results.md).
+        let colours: [[u8; 3]; 4] = [[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 255]];
+        let (width, height) = (8u32, 2u32);
+        let mut rgba = vec![0u8; (width * height * 4) as usize];
+        for (block, colour) in colours.iter().enumerate() {
+            for dy in 0..2u32 {
+                for dx in 0..2u32 {
+                    let x = block as u32 * 2 + dx;
+                    let index = ((dy * width + x) * 4) as usize;
+                    rgba[index] = colour[0];
+                    rgba[index + 1] = colour[1];
+                    rgba[index + 2] = colour[2];
+                    rgba[index + 3] = 255;
+                }
+            }
+        }
+        let mut plane = vec![0u8; yuva420p_len(width, height)];
+        rgba_to_yuva420p(&rgba, width, height, &mut plane);
+
+        let y_size = (width * height) as usize;
+        let c_size = ((width / 2) * (height / 2)) as usize;
+        let a_offset = y_size + c_size * 2;
+        assert_eq!(plane[0], 81);
+        assert_eq!(plane[y_size], 90);
+        assert_eq!(plane[y_size + c_size], 240);
+        assert_eq!(plane[2], 145);
+        assert_eq!(plane[y_size + 1], 54);
+        assert_eq!(plane[y_size + c_size + 1], 34);
+        assert_eq!(plane[4], 41);
+        assert_eq!(plane[y_size + 2], 240);
+        assert_eq!(plane[y_size + c_size + 2], 110);
+        assert_eq!(plane[6], 235);
+        assert_eq!(plane[y_size + 3], 128);
+        assert_eq!(plane[y_size + c_size + 3], 128);
+        assert!(plane[a_offset..].iter().all(|alpha| *alpha == 255));
+    }
+
+    #[test]
+    fn rgba_to_yuva420p_unpremultiplies_and_keeps_transparency_neutral() {
+        // Premultiplied 50% white with alpha 128 must unpremultiply to white
+        // before the colour conversion; a fully transparent pixel stays at the
+        // neutral black level for both luma and chroma.
+        let (width, height) = (4u32, 2u32);
+        let mut rgba = vec![0u8; (width * height * 4) as usize];
+        for pixel in 0..(width * height) as usize {
+            let premultiplied = if pixel % 2 == 0 {
+                [128, 128, 128, 128]
+            } else {
+                [0, 0, 0, 0]
+            };
+            rgba[pixel * 4..pixel * 4 + 4].copy_from_slice(&premultiplied);
+        }
+        let mut plane = vec![0u8; yuva420p_len(width, height)];
+        rgba_to_yuva420p(&rgba, width, height, &mut plane);
+
+        let y_size = (width * height) as usize;
+        let c_size = ((width / 2) * (height / 2)) as usize;
+        let a_offset = y_size + c_size * 2;
+        assert_eq!(plane[0], 235, "premultiplied white unpremultiplies first");
+        assert_eq!(plane[1], 16, "transparent pixel keeps the black level");
+        assert_eq!(plane[a_offset], 129, "matches swscale's alpha transfer");
+        assert_eq!(plane[a_offset + 1], 0);
+        assert!(plane[y_size..y_size + c_size]
+            .iter()
+            .all(|chroma| *chroma == 128));
+    }
+
+    #[test]
+    fn swscale_alpha_scales_by_255_over_254() {
+        // Reference values captured from FFmpeg 9.0.1 RGBA→YUVA420P (the whole
+        // 0..=255 table matches this formula).
+        assert_eq!(swscale_alpha(0), 0);
+        assert_eq!(swscale_alpha(1), 1);
+        assert_eq!(swscale_alpha(64), 64);
+        assert_eq!(swscale_alpha(127), 127);
+        assert_eq!(swscale_alpha(128), 129);
+        assert_eq!(swscale_alpha(129), 130);
+        assert_eq!(swscale_alpha(200), 201);
+        assert_eq!(swscale_alpha(254), 255);
+        assert_eq!(swscale_alpha(255), 255);
     }
 
     #[test]

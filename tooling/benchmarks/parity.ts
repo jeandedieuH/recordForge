@@ -5,12 +5,23 @@
  * presence/duration. Use it to guard export-pipeline changes behind stored
  * baseline renders.
  *
- *   bun run tooling/benchmarks/parity.ts <reference> <candidate> [--mean 50] [--min 45] [--fps N]
+ *   bun run tooling/benchmarks/parity.ts <reference> <candidate> [--profile strict|renderer] [--mean 50] [--min 45] [--fps N] [--suffix _gpu] [--skip-missing]
+ *
+ * Comparisons are only meaningful when both sides were rendered with the same
+ * encode segmentation: a chunked x264 render and a single-pass render of the
+ * same frames differ by ~46 dB from per-chunk rate control alone. Generate
+ * compatibility baselines with `export-synth-spec.ts --single-pass` when the
+ * candidate is the (always single-pass) GPU renderer. `--skip-missing` reports
+ * a plan only the reference rendered as SKIP instead of MISSING, which is what
+ * the GPU matrix needs while it covers a subset of the ablations.
  *
  * Both args are files, or both are directories — directory mode compares
  * every `render_*.mp4` present in either directory by file name (a file
- * missing on one side is a failure). Exits 1 on any failed pair, 0 when
- * every pair passes.
+ * missing on one side is a failure). `--suffix` strips a variant suffix from
+ * candidate names before pairing, so a matrix rendered with `--renderer gpu`
+ * (`render_abl-plain_chunked_gpu.mp4`) pairs with its compatibility baseline
+ * (`render_abl-plain_chunked.mp4`). Exits 1 on any failed pair, 0 when every
+ * pair passes.
  *
  * ffmpeg/ffprobe resolve like export-synth-spec.ts: repo sidecars first,
  * RF_FFMPEG/RF_FFPROBE override.
@@ -31,10 +42,55 @@ interface ParityArgs {
   mean: number
   min: number
   fps?: number
+  suffix?: string
+  profile: Profile
+  skipMissing: boolean
+}
+
+/**
+ * `strict` — two renders that must agree to encoder-noise only (same resampler,
+ * same segmentation; e.g. a refactor of the FFmpeg graph).
+ *
+ * `renderer` — two *different compositors* of the same plan. Resampling kernels
+ * cannot match bit for bit (swscale's bicubic vs a shader's Catmull-Rom), so the
+ * gate is the measured resampler ceiling instead of identity: on the synthetic
+ * fixture any FFmpeg luma kernel swapped for swscale's default bicubic scores
+ * ~43-48 dB, and reverting our own resampler to bilinear scores no better. Pass
+ * counts and audio must still be exact, and every frame must clear the floor —
+ * the three real bugs the gate caught (a 1-texel sampling offset, a wrong
+ * RGB→YUV chroma matrix and half-width chroma packing) all scored under 15 dB.
+ */
+interface Profile {
+  name: "strict" | "renderer"
+  mean: number
+  min: number
+  note: string
+}
+
+const PROFILES: Record<Profile["name"], Profile> = {
+  strict: {
+    name: "strict",
+    mean: 50,
+    min: 45,
+    note: "same compositor, same segmentation",
+  },
+  renderer: {
+    name: "renderer",
+    mean: 40,
+    min: 28,
+    note: "different compositors; resampler kernel differs by design",
+  },
 }
 
 function parseArgs(argv: string[]): ParityArgs {
-  const args: ParityArgs = { reference: "", candidate: "", mean: 50, min: 45 }
+  const args: ParityArgs = {
+    reference: "",
+    candidate: "",
+    mean: 50,
+    min: 45,
+    profile: PROFILES.strict,
+    skipMissing: false,
+  }
   const positional: string[] = []
   for (let i = 0; i < argv.length; i++) {
     switch (argv[i]) {
@@ -47,6 +103,24 @@ function parseArgs(argv: string[]): ParityArgs {
       case "--fps":
         args.fps = Number(argv[++i])
         break
+      case "--suffix":
+        args.suffix = argv[++i] ?? ""
+        break
+      case "--skip-missing":
+        args.skipMissing = true
+        break
+      case "--profile": {
+        const name = (argv[++i] ?? "") as Profile["name"]
+        const profile = PROFILES[name]
+        if (!profile) {
+          console.error(`--profile must be one of: ${Object.keys(PROFILES).join(", ")}`)
+          process.exit(2)
+        }
+        args.profile = profile
+        args.mean = profile.mean
+        args.min = profile.min
+        break
+      }
       default:
         if (argv[i].startsWith("--")) {
           console.error(`unknown option: ${argv[i]}`)
@@ -56,7 +130,9 @@ function parseArgs(argv: string[]): ParityArgs {
     }
   }
   if (positional.length !== 2 || !Number.isFinite(args.mean) || !Number.isFinite(args.min)) {
-    console.error("usage: parity.ts <reference> <candidate> [--mean 50] [--min 45] [--fps N]")
+    console.error(
+      "usage: parity.ts <reference> <candidate> [--profile strict|renderer] [--mean 50] [--min 45] [--fps N] [--suffix _gpu]",
+    )
     process.exit(2)
   }
   args.reference = resolve(positional[0])
@@ -241,23 +317,29 @@ function collectPairs(reference: string, candidate: string): Pair[] {
   if (!refIsDir) {
     return [{ name: basename(candidate), reference, candidate }]
   }
-  const refFiles = new Set(
-    readdirSync(reference).filter((f) => f.startsWith("render_") && f.endsWith(".mp4")),
-  )
-  const candFiles = new Set(
-    readdirSync(candidate).filter((f) => f.startsWith("render_") && f.endsWith(".mp4")),
-  )
-  const names = [...new Set([...refFiles, ...candFiles])].sort()
+  const isRender = (file: string) =>
+    (file.startsWith("render_") || file.startsWith("render-")) && file.endsWith(".mp4")
+  const refFiles = new Set(readdirSync(reference).filter(isRender))
+  const candFiles = new Set(readdirSync(candidate).filter(isRender))
+  // A variant candidate (`render_abl-plain_chunked_gpu.mp4`) pairs with its
+  // baseline (`render_abl-plain_chunked.mp4`) by stripping the suffix.
+  const suffix = args.suffix ?? ""
+  const pairName = (file: string) =>
+    suffix && file.endsWith(`${suffix}.mp4`) ? `${file.slice(0, -suffix.length - 4)}.mp4` : file
+  const names = [...new Set([...refFiles, ...candFiles].map(pairName))].sort()
   if (names.length === 0) {
-    console.error(`no render_*.mp4 files in ${reference} or ${candidate}`)
+    console.error(`no render_*.mp4 / render-*.mp4 files in ${reference} or ${candidate}`)
     process.exit(2)
   }
-  return names.map((name) => ({
-    name,
-    reference: join(reference, name),
-    candidate: join(candidate, name),
-    missing: !(refFiles.has(name) && candFiles.has(name)),
-  }))
+  return names.map((name) => {
+    const candFile = [...candFiles].find((file) => pairName(file) === name)
+    return {
+      name,
+      reference: join(reference, name),
+      candidate: join(candidate, candFile ?? name),
+      missing: !(refFiles.has(name) && candFile !== undefined),
+    }
+  })
 }
 
 // --- run ----------------------------------------------------------------------
@@ -271,6 +353,10 @@ let failed = false
 
 for (const pair of pairs) {
   if (pair.missing) {
+    if (args.skipMissing) {
+      rows.push(`| ${pair.name} | - | - | - | - | - | SKIP: not rendered |`)
+      continue
+    }
     failed = true
     rows.push(`| ${pair.name} | - | - | - | - | - | MISSING |`)
     continue
@@ -323,6 +409,7 @@ for (const pair of pairs) {
 }
 
 console.log(`\nparity: ${args.candidate} vs ${args.reference}`)
+console.log(`profile: ${args.profile.name} (${args.profile.note})`)
 console.log(rows.join("\n"))
 console.log(
   failed

@@ -18,6 +18,9 @@ const MIN_INTERVAL_MS: u64 = 500;
 /// Hard cap on frames so very long recordings cannot produce an oversized
 /// sprite sheet regardless of the requested interval.
 const MAX_FRAME_COUNT: u64 = 480;
+/// Native recordings encode with a one-second GOP (`-g fps` at capture), so a
+/// sample interval at or above this is guaranteed to land on a keyframe.
+const NATIVE_GOP_MS: u64 = 1000;
 
 /// Resolve the effective thumbnail spacing for a recording.
 ///
@@ -52,6 +55,35 @@ fn build_thumbnail_filter(interval_ms: u64, columns: u32, rows: u32, count: u32)
     )
 }
 
+/// Build the sprite-sheet FFmpeg command. `keyframe_only` drops non-keyframes
+/// at the decoder: valid only for inputs whose GOP is known to be shorter than
+/// the sample interval (native recordings), and only once the interval is at
+/// least one second (see `NATIVE_GOP_MS`).
+fn build_sprite_command(
+    ffmpeg_path: &str,
+    input: &Path,
+    sprite_path: &Path,
+    filter: &str,
+    keyframe_only: bool,
+) -> std::process::Command {
+    let mut command = crate::process::create_command(ffmpeg_path);
+    command.arg("-y");
+    if keyframe_only {
+        command.args(["-skip_frame", "nokey"]);
+    }
+    command
+        .arg("-i")
+        .arg(input)
+        .args(["-vf", filter])
+        .arg("-an")
+        .arg("-frames:v")
+        .arg("1")
+        .arg("-q:v")
+        .arg("3")
+        .arg(sprite_path);
+    command
+}
+
 /// Generate a thumbnail sprite and manifest.
 #[instrument(skip(ffmpeg_path, input, output_dir, metadata))]
 pub fn generate_thumbnails(
@@ -60,6 +92,7 @@ pub fn generate_thumbnails(
     output_dir: &Path,
     metadata: &MediaMetadata,
     thumbnail_interval_sec: u64,
+    keyframe_only: bool,
 ) -> Result<(PathBuf, PathBuf)> {
     std::fs::create_dir_all(output_dir)
         .map_err(|e| InternalError::Storage(format!("create thumbnail dir: {e}")))?;
@@ -88,20 +121,14 @@ pub fn generate_thumbnails(
 
     let filter = build_thumbnail_filter(interval_ms, columns, rows, count);
 
-    let mut command = crate::process::create_command(ffmpeg_path);
-    command
-        .arg("-y")
-        .arg("-i")
-        .arg(input)
-        .args(["-vf", &filter])
-        .arg("-an")
-        .arg("-frames:v")
-        .arg("1")
-        .arg("-q:v")
-        .arg("3")
-        .arg(&sprite_path);
+    let keyframe_only = keyframe_only && interval_ms >= NATIVE_GOP_MS;
+    let mut command =
+        build_sprite_command(ffmpeg_path, input, &sprite_path, &filter, keyframe_only);
 
-    info!(interval_ms, count, "generating thumbnail sprite");
+    info!(
+        interval_ms,
+        count, keyframe_only, "generating thumbnail sprite"
+    );
 
     let output = command
         .output()
@@ -232,6 +259,44 @@ mod tests {
         assert!(filter.contains("tpad=stop_mode=add:stop=9:color=black"));
         assert!(filter.contains("tile=10x5:nb_frames=50:color=black"));
         assert!(filter.contains("fps=1000/2000"));
+    }
+
+    #[test]
+    fn keyframe_only_decoding_is_an_input_option() {
+        let filter = build_thumbnail_filter(1000, 10, 1, 1);
+        let command = build_sprite_command(
+            "ffmpeg",
+            Path::new("in.mp4"),
+            Path::new("sprite.jpg"),
+            &filter,
+            true,
+        );
+        let args: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect();
+        let skip = args
+            .iter()
+            .position(|arg| arg == "-skip_frame")
+            .expect("keyframe decoding requested");
+        let input = args
+            .iter()
+            .position(|arg| arg == "-i")
+            .expect("input present");
+        assert_eq!(args[skip + 1], "nokey");
+        assert!(
+            skip < input,
+            "`-skip_frame` is an input option and must precede `-i`"
+        );
+
+        let full = build_sprite_command(
+            "ffmpeg",
+            Path::new("in.mp4"),
+            Path::new("sprite.jpg"),
+            &filter,
+            false,
+        );
+        assert!(full.get_args().all(|arg| arg != "-skip_frame"));
     }
 
     #[test]

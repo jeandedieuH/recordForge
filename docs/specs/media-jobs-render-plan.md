@@ -219,7 +219,7 @@ The render engine builds an FFmpeg complex filter graph from the render plan:
 4. **Speed and audio**: `setpts=PTS/speed`, `atempo`, `amix`, `volume`, `afade`.
 5. **Webcam PiP**: independently resolved input, trim, speed, crop, shape, border, shadow, and `overlay=enable`.
 6. **Canvas/effects**: `pad`, zoom crop, privacy mask filters, and caption burn-in — cues carry a px-resolved `CaptionLayout` written to ASS and rendered by libass (`subtitles` filter, Inter embedded; DirectWrite on Windows).
-7. **Cursor**: telemetry is resolved as a project asset and composited into RGBA frames in Rust.
+7. **Cursor**: telemetry is resolved as a project asset and rasterized in Rust into a `yuva420p` plate stream (BT.601 limited range) that FFmpeg blends without a per-plane swscale.
 
 ### 5.3 Zoom and cursor camera model
 
@@ -228,8 +228,9 @@ One camera model is shared by the preview, the FFmpeg `zoompan` graph, and the R
 - **Camera-shot bridging.** `resolveCameraShots` (`packages/editor-core/src/camera-shots.ts`) treats two enabled zoom segments separated by ≤ `ZOOM_BRIDGE_GAP_MS` (800 ms) as one continuous shot: the first segment holds its target through the gap (`transitionOutMs` → 0) and the next pans in from `fromTarget`/`fromScale` baked at plan build (`media-core/src/render-plan.ts`). Follow-cursor shots resolve their bridge pose through the cursor engine before baking.
 - **Log-space crop interpolation (Z6).** Crop width travels in log space — `w(p) = wA·(wB/wA)^p` — while the center glides around the screen-fixed point `f = (cB·sB − cA·sA)/(sB − sA)`; near-equal zoom levels have no usable fixed point and degrade to a linear pan. `interpolate_crop` (Rust) and `interpolateCrop` (`editor-core/src/composition.ts`) are the same math, and `build_zoompan_expressions` emits the equivalent symbolic `z`/`x`/`y` expressions FFmpeg evaluates per frame.
 - **Integer zoompan crop + cursor registration.** FFmpeg's `zoompan` quantizes its crop to integers and snaps the origin to the chroma grid. `zoompan_integer_crop` reproduces that selection (`(int)(in_w/zoom)`, clamped, `x &= ~((1<<log2_chroma)-1)`) so the cursor is composited onto the exact pixels `sws_scale` samples — the cursor maps source points into the integer crop via the same center-aligned `sws_scale` mapping.
-- **Pixel-format normalization.** `format=yuv420p` is inserted immediately before every `zoompan`, pinning the chroma-subsample origin snap to 1 px in each axis so the registration model stays exact. A `setpts` re-anchoring follows `zoompan` when the pass runs on absolute-PTS-shifted inputs, since zoompan emits its own 0-based grid.
-- **Cursor compositing.** One `cursor_engine::CursorEngine` per telemetry asset (`Arc<Mutex>`, shared across cursor ranges of the same capture) feeds `CursorRenderer`, which rasterizes into RGBA frames streamed to FFmpeg's stdin. Rasterization caches bitmaps by quarter-pixel phase so subpixel placement does not re-rasterize. Click effects and the spotlight are anti-aliased primitives driven by engine-emitted `expand`/`fade` progress; the spotlight dim is always black (the cursor `shadowColor` must not tint it).
+- **Pixel-format normalization.** `format=yuv420p` is inserted immediately before the zoom stage, pinning the chroma-subsample origin snap to 1 px in each axis so the registration model stays exact. A `setpts` re-anchoring restores the absolute timeline when the pass runs on absolute-PTS-shifted inputs, since both `zoompan` and the piecewise `concat` emit their own 0-based grid.
+- **Piecewise zoom.** A pass classifies every frame as identity (pass through), hold (a constant integer crop → `crop` + cached-context `scale`) or transition (animated → `zoompan`), then joins the runs with `split`/`trim`/`concat` (≤ 8 branches, otherwise one `zoompan`). Hold frames use `zoompan_integer_crop`, so the cursor registration numbers are unchanged.
+- **Cursor compositing.** One `cursor_engine::CursorEngine` per telemetry asset (`Arc<Mutex>`, shared across cursor ranges of the same capture) feeds `CursorRenderer`, which rasterizes into a `yuva420p` plane streamed to FFmpeg's stdin (`rgba_to_yuva420p` folds in the unpremultiply step). Rasterization caches bitmaps by quarter-pixel phase so subpixel placement does not re-rasterize. Click effects and the spotlight are anti-aliased primitives driven by engine-emitted `expand`/`fade` progress; the spotlight dim is always black (the cursor `shadowColor` must not tint it).
 
 ### 5.4 Current gaps
 
@@ -253,6 +254,55 @@ How a compiled render plan reaches FFmpeg processes:
 - **Shared per-export state.** Probe results (`ProbeCache`) and generated plates (`PlateCache` — background, side-by-side background, canvas mask, camera shadow/mask/border) are cached across chunk passes and the hardware→software retry; owned temp files are dropped with the cache.
 - **Memory bounds.** The stdin rawvideo feed queues `clamp(96 MiB / frame_bytes, 4, 32)` frames, and each chunk pass caps `-filter_complex_threads`/`-threads` at `max(2, cores/workers)` so parallel FFmpeg processes don't oversubscribe. Cursor feeders and the writer stop on cancel or the shared halt flag.
 - **Disk safety.** Before rendering, `ensure_export_disk_space` requires a deliberately low bound (`estimate_export_bytes` at 0.01 bpp + 64 MiB) free on the output drive; chunked mode additionally requires 0.05 bpp + 256 MiB on the temp drive and falls back to a single pass otherwise. FFmpeg diagnostics matching "no space left on device" / "not enough space on the disk" / "disk full" surface as a `Storage` error telling the user to free space. At startup a background thread sweeps `STALE_EXPORT_TEMP_PREFIXES` entries older than 24 h from the temp dir.
+
+### 5.6 Native GPU compositor (ADR 018)
+
+`ExportSettings.renderer` (`auto` | `gpu` | `compatibility`) selects the
+compositor. `auto` stays on the FFmpeg graph until the Phase 5 G5 gate flips;
+`RECORDFORGE_EXPORT_GPU=1` opts `auto` in for A/B benchmarks.
+
+`gpu::plan_limitations` is the feature gate. G0 covers a full-canvas screen
+plane with optional zoom and nothing that needs a shader milestone; canvas
+framing, cursor, overlay items, camera/side-by-side, masks, keystrokes,
+burned-in captions, timeline gaps, non-MP4/H.264 delivery and non-4×2-grid
+canvases all keep the compatibility renderer. Explicit `gpu` requests outside
+the gate degrade with a logged reason rather than failing the export, and a
+runtime failure (no hardware adapter, device loss, sidecar error) falls back
+once to the FFmpeg renderer — mirroring the hardware→software encoder retry.
+
+The pipeline is three processes: an FFmpeg **decode sidecar** (the same
+`trim`/`setpts`/`fps`/`scale`/`pad`/`concat` chain, emitting `rawvideo`/`nv12`
+on stdout; `-hwaccel auto` is opt-in via
+`RECORDFORGE_EXPORT_GPU_DECODE_HWACCEL=1` because every frame is downloaded
+anyway), a **wgpu compositor** (`YUV→RGB` at BT.601 limited through an integer
+crop from `zoompan_integer_crop`, Catmull-Rom bicubic sampling, an
+`Rgba16Float` canvas, then a compute `RGB→NV12` pass that writes a storage
+buffer byte-identical to the encoder's expected pixel format), and an FFmpeg
+**encode sidecar** reading that NV12 on stdin plus the existing semantic audio
+graph. Identity-zoom frames never touch the GPU: they are forwarded from
+decoder to encoder untouched, which is also bit-exact against the compatibility
+path's identity runs.
+
+The wgpu device, adapter and both pipelines are process-wide and cached
+(`RECORDFORGE_EXPORT_GPU_CACHE=0` disables reuse), so only the size-dependent
+planes, render target and readback buffers are allocated per export. Readback
+runs through a three-buffer host-visible ring: a submit returns the frame that
+has been on the GPU longest, which lets the GPU compose while the CPU copies and
+feeds the encoder. Decode and encode sidecar queues hold 8 and 6 frames by
+default (`RECORDFORGE_EXPORT_GPU_DECODE_QUEUE` / `_ENCODE_QUEUE`).
+
+Software adapters (CPU device type, WARP/llvmpipe/SwiftShader) are rejected so
+the GPU path can never silently become a slower software path.
+
+**Parity.** The GPU renderer is compared against a compatibility render of the
+same plan *with the same encode segmentation* (`export-synth-spec.ts
+--single-pass`), because chunked and single-pass x264 encodes of identical
+frames differ by ~46 dB from per-chunk rate control alone. `parity.ts
+--profile renderer` uses that budget: identity/plate-free plans must stay
+bit-exact, and composited plans must stay above the measured resampler ceiling
+(no alternative swscale kernel scores better than ~48 dB against swscale's
+default bicubic on the synthetic fixture).
+
 
 ---
 

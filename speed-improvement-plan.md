@@ -203,10 +203,122 @@ Priority follows the GPU-first decision: Phase 0 runs first; Phase 1 and the Pha
   opt-in (`RECORDFORGE_EXPORT_ZOOM_SNAP=1`) because the measured matrix
   preferred the uniform grid. All 11 software baseline renders pass parity at
   100 dB. Numbers and validation: `docs/benchmarks/phase-1-results.md`.
-- **Phase 2** — partial (2026-10-25): 2.1 cursor tile ships in `union` mode
-  (parity-exact; `sendcmd` per-frame tiling is implemented but opt-in while its
-  moving-plane shadow parity issue is investigated). 2.2 YUVA transport, 2.3
-  piecewise zoom and 2.4 chunk retuning remain.
-- **Phase 3** — partial (2026-10-25): 3.1 parallel webcam finalize and 3.2
-  single-segment hard-link publish + duplicate-sync removal shipped. 3.3–3.7
-  remain. Results: `docs/benchmarks/phase-2-results.md`.
+- **Phase 2** — complete (2026-10-26):
+  - 2.1 cursor tile ships in `union` mode (parity-exact). The `sendcmd`
+    per-frame variant is implemented but opt-in, and is now known to be
+    unusable: on the pinned FFmpeg 9.0.1 the graph dispatches `sendcmd`
+    commands ahead of `overlay`'s blend, so positions land 1–3 frames early
+    (non-deterministically). Evidence and reproduction:
+    `docs/benchmarks/phase-2-results.md`.
+  - 2.2 ships `yuva420p` planes converted in Rust (BT.601 limited, folded
+    unpremultiply, swscale-matched alpha transfer): −37.5 % plate bytes, no
+    per-plane swscale. Conversion fidelity vs FFmpeg on the real items plane:
+    luma 12 pixels of 1.13 M differ, alpha byte-exact, chroma only on fully
+    transparent blocks. Parity (`parity.ts`, 11 specs, HEAD reference):
+    plate-free specs **100 dB** (bit-identical), cursor 65.64/46.26 dB (PASS),
+    item-bearing specs 43–48 dB — below the legacy gate because the old RGBA
+    path globally round-tripped every frame through a higher-chroma blend even
+    with the overlay disabled (measured: legacy items vs plain at a hidden-items
+    frame is 43.3 dB). Gate update to a plate-transparency invariant is the
+    follow-up; the new output is closer to the source, not further.
+  - 2.3 piecewise zoom ships identity / hold (`crop`+`scale`) / transition
+    (`zoompan`) runs joined with `split`/`trim`/`concat` (≤8 branches, then
+    fallback). 99 dB parity vs `zoompan`; end-to-end A/B on `abl-zoom` is
+    3–10 % faster (see the results doc for the loaded-machine caveat). Opt out
+    with `RECORDFORGE_EXPORT_ZOOM_PIECES=0`.
+  - The parity run caught and fixed a real bug: `concat` re-bases to
+    microseconds, so the last frame of a multi-piece chunk landed 1 µs before
+    the background overlay and `shortest=1` dropped it (896/900 frames). The
+    joined stream is now re-gridded with `settb=1/fps,setpts=N<abs>`; every spec
+    emits exactly 900 frames.
+  - 2.4 measured but unchanged: decode/encode dominate, so the chunk knobs are
+    not the bottleneck; the YUVA transport already relaxes the memory-bound
+    worker/window caps.
+- **Phase 3** — complete (2026-10-26): 3.1 parallel webcam finalize and 3.2
+  single-segment hard-link publish + duplicate-sync removal (2026-10-25);
+  3.4 concurrent camera/thumbnail/audio prepare stages; 3.5 keyframe-only
+  thumbnails for native recordings (`-skip_frame nokey` when the sample
+  interval ≥ 1 s). 3.6 needed no change — the audio derivative is a stream copy
+  and the waveform is already the only decode. 3.3 (webcam stream copy) stays
+  deferred with 4.1 because it needs the signed camera offset in the data model;
+  3.7 is optional and moot. Results: `docs/benchmarks/phase-2-results.md`.
+- **Phase 4** — implemented 2026-10-26 (`docs/benchmarks/phase-4-results.md`):
+  - 4.1 aspect-preserving output geometry ships: `RecordingProfile::for_source_bounds`
+    is pinned per session, so window/region/odd-aspect captures are no longer
+    letterboxed. This also fixes cursor registration on those sources (the
+    telemetry transform had no letterbox offset) and makes them eligible for
+    the zero-copy GPU path.
+  - 4.2 Quick Sync zero-copy ships and is measured: `hwmap=derive_device=qsv`
+    + `vpp_qsv=…:out_range=tv` into `h264_qsv` costs 0.38–0.63 CPU-s per 5 s of
+    1080p30 capture versus 3.4 for the CPU chain (5–9× less). `scale_d3d11`
+    (NVENC/AMF/MF) fails to initialise on the baseline laptop's Intel iGPU, so
+    that path remains unmeasured; the existing GPU→CPU retry covers it.
+  - 4.3 macOS ScreenCaptureKit now streams NV12 (`420v`) at the output size
+    with a BGRA fallback, and 4.5 offers PipeWire NV12 (behind
+    `RECORDFORGE_CAPTURE_PIPEWIRE_NV12=1`). Both are **unverified on hardware**:
+    no macOS or Wayland host was available. Their packing is covered by
+    platform-neutral unit tests, and both degrade to the previous behaviour.
+  - 4.4 shipped only the NV12 graph tail (required by QSV/MF, neutral on NVENC).
+    The scale-threading hypothesis was measured and **rejected** on the baseline
+    machine; it stays behind `RECORDFORGE_CAPTURE_SCALE_THREADS=1`.
+  - Note for 3.3: 4.1 changed the *output geometry*, not the camera timeline, so
+    the webcam stream-copy still needs its own data-model change (the signed
+    start offset in the project's camera clip).
+- **Phase 5** — G0 landed 2026-10-26 (`docs/benchmarks/phase-5-results.md`,
+  ADR 018); its four follow-ups are closed (2026-10-26, see the Phase 5 bullet
+  above), G1–G5 planned:
+  - New `exports/gpu/` module: `decode` (FFmpeg NV12 sidecar reusing the
+    compatibility chain), `compositor` (wgpu: BT.601 YUV→RGB, integer
+    `zoompan_integer_crop` sampling, Catmull-Rom bicubic, `Rgba16Float` canvas,
+    compute RGB→NV12 into a storage buffer), `encode` (FFmpeg stdin NV12 +
+    the existing audio graph/mux flags). Two shaders in `gpu/shaders/`.
+  - `ExportSettings.renderer` (`auto`|`gpu`|`compatibility`) wired through the
+    contracts schema, the project store and the export sheet. `auto` stays on
+    the FFmpeg renderer until G5; `RECORDFORGE_EXPORT_GPU=1` opts it in.
+  - `gpu::plan_limitations` gates every not-yet-ported feature. Explicit `gpu`
+    requests outside the gate degrade with a logged reason; runtime failures
+    (no hardware adapter, device loss, sidecar error) fall back once to the
+    FFmpeg renderer.
+  - Identity-zoom frames bypass the GPU entirely (decoder → encoder), so the
+    plain passthrough case never touches a shader.
+  - **G0 does not clear the parity gate**, so the GPU renderer stays opt-in and
+    `auto` keeps the FFmpeg path: `abl-plain` renders frame-exact with exact
+    audio and visually identical frames but 45.8 dB mean / 43.8 dB min (gate
+    50/45), and `abl-zoom` is 41.6 mean / 8.7 min at the first transition edge.
+    The gate caught a silent shader-compile failure (all composed frames were
+    flat green); setup now runs inside a device error scope and an all-zero
+    first frame aborts to the compatibility renderer.
+  - Benchmarks: `export-synth-spec.ts --renderer gpu` emits the gate-compatible
+    ablations, `parity.ts --suffix _gpu` pairs variant renders with their
+    baselines. Measured 1.14–1.28× faster than the compatibility renderer
+    (3.2–3.6× realtime with NVENC vs 2.8×) end-to-end on a 30 s clip; the
+    steady-state pipeline is 6.4× realtime, with ~3–5 s of fixed wgpu/ffprobe
+    setup dominating short exports. `-hwaccel auto` decode was measured 3.3 s
+    slower and is now opt-in; the backend is pinned to one native API per
+    platform.
+  - Parity closed 2026-10-26 — and it was a *methodology* problem plus three
+    real shader bugs, not an encode-input problem:
+    - The reported ~46 dB "encode-input delta" was comparing a **chunked**
+      compatibility render against the **single-pass** GPU render. Two x264
+      passes over identical frames, cut differently, differ by ~46 dB from
+      per-chunk rate control alone. With `--single-pass` on both sides,
+      passthrough frames are **bit-identical (100 dB)**.
+    - `nv12_encode.wgsl` had a wrong RGB→YUV chroma matrix (missing the
+      `Kb·B` / `Kr·R` term) and wrote chroma words at `id.x / 2` for even
+      `id.x` only, stretching half of each chroma row over the whole row.
+      `composite.wgsl`'s Catmull-Rom taps started at `base` instead of
+      `base − 1`, shifting every sampled frame one texel right. Together these
+      produced the 8.7 dB zoom-transition frame and the "compositor is wrong"
+      reading; `abl-zoom` is now **53.20 dB mean / 30.88 dB min**, at the
+      measured swscale-kernel ceiling (no alternative FFmpeg kernel scores
+      better than ~48 dB against swscale's default bicubic).
+    - `parity.ts --profile strict|renderer` and
+      `export-synth-spec.ts --single-pass` make the comparison rule explicit;
+      the GPU unit tests pin identity sampling, crop position, the chroma block
+      boundary, ring ordering and the transition crop quantisation.
+  - Device/adapter/pipelines are now process-wide (`RECORDFORGE_EXPORT_GPU_CACHE=0`
+    disables), readback runs through a three-buffer async ring, and the sidecar
+    queues are 8/6 frames (`RECORDFORGE_EXPORT_GPU_DECODE_QUEUE`/`_ENCODE_QUEUE`).
+    The second export in a process pays 0 ms for wgpu setup instead of ~1.8 s.
+  - G1–G3 (canvas frame, cursor/items, camera/masks/keystrokes,
+    captions/HEVC/cap) are still not implemented; they are the next milestone.

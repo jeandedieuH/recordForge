@@ -436,7 +436,11 @@ fn try_run_pipewire_loop(
 fn video_input_from_format(info: &VideoInfoRaw) -> Option<PipeWireVideoInput> {
     let format = info.format();
     // `VideoFormat` is a newtype-with-consts, so compare rather than match.
-    let pixel_format = if format == VideoFormat::BGRx || format == VideoFormat::BGRA {
+    let pixel_format = if format == VideoFormat::NV12 {
+        // Bi-planar: 1.5 bytes per pixel instead of 4 and no conversion in the
+        // encoder. `pack_frame` joins both planes for `rawvideo`.
+        "nv12"
+    } else if format == VideoFormat::BGRx || format == VideoFormat::BGRA {
         "bgra"
     } else if format == VideoFormat::RGBx || format == VideoFormat::RGBA {
         "rgba"
@@ -471,23 +475,17 @@ fn video_input_from_format(info: &VideoInfoRaw) -> Option<PipeWireVideoInput> {
 }
 
 /// Copy a stream buffer into a tightly-packed frame. Stride padding is
-/// stripped so `rawvideo` sees a contiguous W×H×BPP image.
+/// stripped so `rawvideo` sees a contiguous image for the negotiated format.
 fn pack_frame(
     buffer: &mut pipewire::buffer::Buffer<'_>,
     input: &PipeWireVideoInput,
 ) -> Option<PackedFrame> {
+    if input.pixel_format == "nv12" {
+        return pack_nv12_frame(buffer, input);
+    }
     let datas = buffer.datas_mut();
     let data = datas.first_mut()?;
-    // `chunk()` borrows the Data immutably while `data()` needs &mut — copy
-    // the scalar fields out first so the mutable borrow can proceed.
-    let (offset, stride) = {
-        let chunk = data.chunk();
-        (chunk.offset() as usize, chunk.stride())
-    };
-    if stride <= 0 {
-        return None;
-    }
-    let stride = stride as usize;
+    let (offset, stride) = plane_geometry(data)?;
     let bytes = data.data()?;
     if offset >= bytes.len() {
         return None;
@@ -515,6 +513,76 @@ fn pack_frame(
         return None;
     }
     Some(PackedFrame(packed))
+}
+
+/// Join a bi-planar NV12 buffer's luma and chroma planes into the contiguous
+/// layout FFmpeg's `rawvideo` demuxer expects.
+///
+/// Compositors expose the planes either as two `spa_data` entries or as one
+/// allocation whose chroma plane follows the luma plane. Both layouts are
+/// accepted; the shared `nv12` helper does the row copy and rejects malformed
+/// geometry (odd sizes, short planes).
+fn pack_nv12_frame(
+    buffer: &mut pipewire::buffer::Buffer<'_>,
+    input: &PipeWireVideoInput,
+) -> Option<PackedFrame> {
+    let datas = buffer.datas_mut();
+    if datas.is_empty() {
+        return None;
+    }
+    if datas.len() >= 2 {
+        // Two disjoint mutable borrows: the planes are separate data entries.
+        let (luma_data, chroma_data) = datas.split_at_mut(1);
+        let luma_data = &mut luma_data[0];
+        let chroma_data = &mut chroma_data[0];
+        let (luma_offset, luma_stride) = plane_geometry(luma_data)?;
+        let (chroma_offset, chroma_stride) = plane_geometry(chroma_data)?;
+        let luma = super::nv12::Nv12Plane {
+            data: &*luma_data.data()?,
+            offset: luma_offset,
+            stride: luma_stride,
+        };
+        let chroma = super::nv12::Nv12Plane {
+            data: &*chroma_data.data()?,
+            offset: chroma_offset,
+            stride: chroma_stride,
+        };
+        let packed = super::nv12::pack_nv12(luma, chroma, input.width, input.height)?;
+        return Some(PackedFrame(packed));
+    }
+
+    // Single allocation: the chroma plane starts one luma-plane stride after
+    // the first row's offset.
+    let data = &mut datas[0];
+    let (offset, stride) = plane_geometry(data)?;
+    let bytes = &*data.data()?;
+    let chroma_offset = offset.checked_add(stride.checked_mul(input.height as usize)?)?;
+    let packed = super::nv12::pack_nv12(
+        super::nv12::Nv12Plane {
+            data: bytes,
+            offset,
+            stride,
+        },
+        super::nv12::Nv12Plane {
+            data: bytes,
+            offset: chroma_offset,
+            stride,
+        },
+        input.width,
+        input.height,
+    )?;
+    Some(PackedFrame(packed))
+}
+
+/// `(offset, stride)` of one `spa_data` plane. A non-positive stride cannot be
+/// packed.
+fn plane_geometry(data: &pipewire::spa::buffer::Data) -> Option<(usize, usize)> {
+    let chunk = data.chunk();
+    let stride = chunk.stride();
+    if stride <= 0 {
+        return None;
+    }
+    Some((chunk.offset() as usize, stride as usize))
 }
 
 /// Translate `SPA_META_Cursor` into the shared cursor snapshot.
@@ -586,6 +654,12 @@ fn compute_region_crop(
 
 /// Build the `EnumFormat` offer: raw video, BGRx-first format choices, any
 /// size and framerate so the compositor picks what it already renders.
+///
+/// NV12 is offered first — 1.5 bytes per pixel instead of 4 and no encoder-side
+/// conversion — but only when `RECORDFORGE_CAPTURE_PIPEWIRE_NV12` is set: the
+/// bi-planar packing has no Wayland host to validate against yet, and a wrong
+/// negotiation would otherwise silently break screen capture on every
+/// PipeWire session.
 fn build_enum_format_pod(target_fps: i32) -> Vec<u8> {
     let r = Rectangle {
         width: 1920,
@@ -615,6 +689,11 @@ fn build_enum_format_pod(target_fps: i32) -> Vec<u8> {
         VideoFormat::BGR.as_raw(),
         VideoFormat::RGB.as_raw(),
     ];
+    let mut formats: Vec<u32> = formats.to_vec();
+    if pipewire_nv12_offered() {
+        formats.insert(0, VideoFormat::NV12.as_raw());
+    }
+    let formats = formats.as_slice();
 
     let format_obj = Object {
         type_: SpaTypes::ObjectParamFormat.as_raw(),
@@ -673,6 +752,11 @@ fn build_enum_format_pod(target_fps: i32) -> Vec<u8> {
 /// serialized pod bytes; the caller keeps them alive for `update_params`.
 fn build_buffers_pod(input: &PipeWireVideoInput) -> Vec<u8> {
     use libspa_sys as sys;
+    if input.pixel_format == "nv12" {
+        // Bi-planar: one data block per plane (luma, then chroma at half
+        // height). Sizes are computed from the plane geometry, not w × h × bpp.
+        return build_nv12_buffers_pod(input);
+    }
     let bpp: u32 = match input.pixel_format {
         "bgra" | "rgba" => 4,
         "bgr24" | "rgb24" => 3,
@@ -738,6 +822,89 @@ fn build_buffers_pod(input: &PipeWireVideoInput) -> Vec<u8> {
     )
     .expect("serialize buffers pod");
     cursor.into_inner()
+}
+
+/// `ParamBuffers` for a bi-planar NV12 stream: two data blocks — luma at full
+/// height, chroma at half height — with the plane strides.
+fn build_nv12_buffers_pod(input: &PipeWireVideoInput) -> Vec<u8> {
+    use libspa_sys as sys;
+    if input.width == 0 || input.height == 0 || !input.height.is_multiple_of(2) {
+        return Vec::new();
+    }
+    let stride = input.width as i32;
+    let luma_size = stride * input.height as i32;
+    let chroma_size = stride * (input.height as i32 / 2);
+    let buffers_obj = Object {
+        type_: SpaTypes::ObjectParamBuffers.as_raw(),
+        id: ParamType::Buffers.as_raw(),
+        properties: vec![
+            Property::new(
+                sys::SPA_PARAM_BUFFERS_buffers,
+                Value::Choice(ChoiceValue::Int(Choice(
+                    ChoiceFlags::empty(),
+                    ChoiceEnum::Range {
+                        default: 4,
+                        min: 2,
+                        max: 8,
+                    },
+                ))),
+            ),
+            // One data block per plane. Sizing the buffer for the whole frame
+            // keeps the allocation valid whether the compositor splits the
+            // planes into one allocation or two; `pack_nv12_frame` reads each
+            // plane's own chunk offset/stride.
+            Property::new(sys::SPA_PARAM_BUFFERS_blocks, Value::Int(2)),
+            Property::new(
+                sys::SPA_PARAM_BUFFERS_size,
+                Value::Choice(ChoiceValue::Int(Choice(
+                    ChoiceFlags::empty(),
+                    ChoiceEnum::Range {
+                        default: luma_size + chroma_size,
+                        min: 4096,
+                        max: i32::MAX,
+                    },
+                ))),
+            ),
+            Property::new(
+                sys::SPA_PARAM_BUFFERS_stride,
+                Value::Choice(ChoiceValue::Int(Choice(
+                    ChoiceFlags::empty(),
+                    ChoiceEnum::Range {
+                        default: stride,
+                        min: 0,
+                        max: i32::MAX,
+                    },
+                ))),
+            ),
+            Property::new(
+                sys::SPA_PARAM_BUFFERS_dataType,
+                Value::Choice(ChoiceValue::Int(Choice(
+                    ChoiceFlags::empty(),
+                    ChoiceEnum::Flags {
+                        default: (1 << sys::SPA_DATA_MemFd) | (1 << sys::SPA_DATA_MemPtr),
+                        flags: vec![1 << sys::SPA_DATA_MemFd, 1 << sys::SPA_DATA_MemPtr],
+                    },
+                ))),
+            ),
+        ],
+    };
+    let (cursor, _) = PodSerializer::serialize(
+        std::io::Cursor::new(Vec::new()),
+        &Value::Object(buffers_obj),
+    )
+    .expect("serialize nv12 buffers pod");
+    cursor.into_inner()
+}
+
+/// Whether the NV12 offer is enabled (`RECORDFORGE_CAPTURE_PIPEWIRE_NV12=1`).
+///
+/// Off by default: the bi-planar packing is unit-tested but unverified against
+/// a live compositor, and this is the one Phase 4 item that would change Linux
+/// capture behaviour on machines we cannot test.
+fn pipewire_nv12_offered() -> bool {
+    std::env::var("RECORDFORGE_CAPTURE_PIPEWIRE_NV12")
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "on"))
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -809,5 +976,28 @@ mod tests {
         let bytes = build_buffers_pod(&input);
         assert!(!bytes.is_empty());
         assert!(Pod::from_bytes(&bytes).is_some());
+    }
+
+    #[test]
+    fn nv12_buffers_pod_serializes_with_two_blocks() {
+        let input = PipeWireVideoInput {
+            pixel_format: "nv12",
+            width: 1920,
+            height: 1080,
+            framerate_num: 30,
+            framerate_den: 1,
+            crop: None,
+            read_fd: 0,
+        };
+        let bytes = build_buffers_pod(&input);
+        assert!(!bytes.is_empty());
+        assert!(Pod::from_bytes(&bytes).is_some());
+
+        // Odd frame heights cannot be NV12.
+        let odd = PipeWireVideoInput {
+            height: 1081,
+            ..input
+        };
+        assert!(build_buffers_pod(&odd).is_empty());
     }
 }

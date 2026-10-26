@@ -351,6 +351,126 @@ pub(crate) fn window_needs_zoom(
     false
 }
 
+/// One contiguous run of output frames that share a zoom treatment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ZoomPieceKind {
+    /// Full frame sampled 1:1 — pass the frames through untouched.
+    Identity,
+    /// A fixed integer crop scaled back to the output size. `zoompan`
+    /// reallocates its SwsContext and rescales single-threaded every frame;
+    /// `crop` + `scale` cache one context and slice across cores.
+    Hold { x: u32, y: u32, w: u32, h: u32 },
+    /// Animated crop: only `zoompan` can vary the sampled rect per frame.
+    Transition,
+}
+
+/// One classified run, in absolute output-frame indices (`start` inclusive,
+/// `end` exclusive).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ZoomPiece {
+    pub start_frame: u64,
+    pub end_frame: u64,
+    pub kind: ZoomPieceKind,
+}
+
+/// Upper bound on piecewise branches per pass. Every branch costs a `split`
+/// output, a `trim` and a `concat` input; beyond a handful the graph bookkeeping
+/// outweighs the zoompan savings, so the caller falls back to one zoompan.
+pub(crate) const MAX_ZOOM_PIECES: usize = 8;
+
+/// Classify `[first_frame, first_frame + frame_count)` into identity, steady
+/// ("hold") and transition runs so the graph can skip `zoompan` where the
+/// sampled rectangle does not change.
+///
+/// Returns `None` when the window gains nothing (a single pass-through run) or
+/// needs more than `MAX_ZOOM_PIECES` branches.
+pub(crate) fn classify_zoom_pieces(
+    zoom_segments: &[RenderPlanZoomSegment],
+    canvas: &cursor::RenderCanvas,
+    first_frame: u64,
+    frame_count: u64,
+    screen_w: f64,
+    screen_h: f64,
+) -> Option<Vec<ZoomPiece>> {
+    if frame_count == 0 {
+        return None;
+    }
+    let fps = canvas.fps.max(1) as f64;
+    // Pass 1: the integer crop each frame samples (None = identity).
+    let crops: Vec<Option<(u32, u32, u32, u32)>> = (0..frame_count)
+        .map(|offset| {
+            let output_ms = (first_frame + offset) as f64 * 1000.0 / fps;
+            let state = evaluate_zoom_transform(
+                zoom_segments,
+                canvas.width,
+                canvas.height,
+                canvas.padding,
+                output_ms,
+            );
+            if zoom_transform_is_identity(&state, canvas.width, canvas.height) {
+                None
+            } else {
+                Some(zoompan_integer_crop(
+                    (state.crop_x, state.crop_y, state.crop_w, state.crop_h),
+                    screen_w.max(1.0),
+                    screen_h.max(1.0),
+                    canvas.width as f64,
+                    canvas.height as f64,
+                    1,
+                    1,
+                ))
+            }
+        })
+        .collect();
+
+    // Pass 2: a frame is "hold" when its crop matches either neighbour, so a
+    // step into a new zoom level lands in the steady run instead of creating a
+    // one-frame transition branch of its own.
+    let mut pieces: Vec<ZoomPiece> = Vec::new();
+    for (offset, crop) in crops.iter().enumerate() {
+        let kind = match crop {
+            None => ZoomPieceKind::Identity,
+            Some(crop) => {
+                let previous_matches = offset > 0 && crops[offset - 1] == Some(*crop);
+                let next_matches = crops.get(offset + 1) == Some(&Some(*crop));
+                if previous_matches || next_matches {
+                    ZoomPieceKind::Hold {
+                        x: crop.0,
+                        y: crop.1,
+                        w: crop.2,
+                        h: crop.3,
+                    }
+                } else {
+                    ZoomPieceKind::Transition
+                }
+            }
+        };
+        let frame = first_frame + offset as u64;
+        match pieces.last_mut() {
+            Some(piece) if piece.kind == kind && piece.end_frame == frame => {
+                piece.end_frame = frame + 1;
+            }
+            _ => pieces.push(ZoomPiece {
+                start_frame: frame,
+                end_frame: frame + 1,
+                kind,
+            }),
+        }
+        if pieces.len() > MAX_ZOOM_PIECES {
+            return None;
+        }
+    }
+
+    // A single steady run is still worth a `crop` + `scale`: the whole window
+    // samples one fixed rect, so `zoompan` would only re-allocate its context
+    // every frame. A single identity/transition run keeps the old single stage.
+    match pieces.as_slice() {
+        [piece] if matches!(piece.kind, ZoomPieceKind::Hold { .. }) => Some(pieces),
+        [_, _, ..] => Some(pieces),
+        _ => None,
+    }
+}
+
 /// Frame indices where enabled zoom regions begin and end, for chunk-boundary
 /// snapping. A region contributes `start` (first zoomed frame) and `end`
 /// (first frame after it), both clamped to `total_frames`.
@@ -1607,6 +1727,179 @@ mod tests {
             keyframes: None,
             motion_plan: None,
         }
+    }
+
+    #[test]
+    fn zoom_pieces_split_identity_hold_and_identity_runs() {
+        let canvas = cursor::RenderCanvas {
+            width: 1_920,
+            height: 1_080,
+            fps: 30,
+            ..Default::default()
+        };
+        // Immediate step to 2x between 1 s and 3 s: the steady crop needs no
+        // zoompan at all.
+        let segments = vec![zoom_segment(
+            "hold",
+            1_000,
+            3_000,
+            RenderCropFloat {
+                x: 480.0,
+                y: 270.0,
+                width: 960.0,
+                height: 540.0,
+            },
+            2.0,
+            "linear",
+            0,
+            0,
+            None,
+        )];
+        let pieces = classify_zoom_pieces(&segments, &canvas, 0, 120, 1_920.0, 1_080.0)
+            .expect("piecewise classification");
+        assert_eq!(pieces.len(), 3, "identity / hold / identity");
+        assert_eq!(pieces[0].kind, ZoomPieceKind::Identity);
+        assert_eq!((pieces[0].start_frame, pieces[0].end_frame), (0, 30));
+        assert_eq!(
+            pieces[1].kind,
+            ZoomPieceKind::Hold {
+                x: 480,
+                y: 270,
+                w: 960,
+                h: 540
+            }
+        );
+        assert_eq!((pieces[1].start_frame, pieces[1].end_frame), (30, 90));
+        assert_eq!(pieces[2].kind, ZoomPieceKind::Identity);
+        assert_eq!((pieces[2].start_frame, pieces[2].end_frame), (90, 120));
+        // Frames tile the window exactly, with no gaps or overlap.
+        for pair in pieces.windows(2) {
+            assert_eq!(pair[0].end_frame, pair[1].start_frame);
+        }
+    }
+
+    #[test]
+    fn zoom_pieces_keep_animated_frames_as_transitions() {
+        let canvas = cursor::RenderCanvas {
+            width: 1_920,
+            height: 1_080,
+            fps: 30,
+            ..Default::default()
+        };
+        let segments = vec![zoom_segment(
+            "eased",
+            1_000,
+            3_000,
+            RenderCropFloat {
+                x: 480.0,
+                y: 270.0,
+                width: 960.0,
+                height: 540.0,
+            },
+            2.0,
+            "cinematic",
+            500,
+            500,
+            None,
+        )];
+        let pieces = classify_zoom_pieces(&segments, &canvas, 0, 120, 1_920.0, 1_080.0)
+            .expect("piecewise classification");
+        // Identity → animated in → steady hold → animated out → identity.
+        assert_eq!(pieces[0].kind, ZoomPieceKind::Identity);
+        assert!(
+            pieces
+                .iter()
+                .any(|piece| piece.kind == ZoomPieceKind::Transition),
+            "the eased in/out phases must stay on zoompan"
+        );
+        assert!(
+            pieces
+                .iter()
+                .any(|piece| matches!(piece.kind, ZoomPieceKind::Hold { .. })),
+            "the steady middle of the zoom must use crop+scale"
+        );
+        let covered: u64 = pieces
+            .iter()
+            .map(|piece| piece.end_frame - piece.start_frame)
+            .sum();
+        assert_eq!(covered, 120);
+    }
+
+    #[test]
+    fn zoom_pieces_keep_a_whole_window_hold_as_one_run() {
+        let canvas = cursor::RenderCanvas {
+            width: 1_920,
+            height: 1_080,
+            fps: 30,
+            ..Default::default()
+        };
+        // A window entirely inside a steady 2x zoom: one hold run is enough to
+        // drop zoompan, even though there is nothing to splice.
+        let segments = vec![zoom_segment(
+            "steady",
+            0,
+            10_000,
+            RenderCropFloat {
+                x: 480.0,
+                y: 270.0,
+                width: 960.0,
+                height: 540.0,
+            },
+            2.0,
+            "linear",
+            0,
+            0,
+            None,
+        )];
+        let pieces = classify_zoom_pieces(&segments, &canvas, 0, 150, 1_920.0, 1_080.0)
+            .expect("whole-window hold");
+        assert_eq!(pieces.len(), 1);
+        assert_eq!(
+            pieces[0].kind,
+            ZoomPieceKind::Hold {
+                x: 480,
+                y: 270,
+                w: 960,
+                h: 540
+            }
+        );
+    }
+
+    #[test]
+    fn zoom_pieces_fall_back_when_the_graph_would_explode() {
+        let canvas = cursor::RenderCanvas {
+            width: 1_920,
+            height: 1_080,
+            fps: 30,
+            ..Default::default()
+        };
+        // Alternating short zoom levels change the crop every 200 ms, giving
+        // many runs: the caller must fall back to one zoompan stage.
+        let segments = (0..8)
+            .map(|index| {
+                let start = index * 200;
+                zoom_segment(
+                    &format!("step-{index}"),
+                    start,
+                    start + 200,
+                    RenderCropFloat {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 640.0 - index as f64 * 20.0,
+                        height: 360.0,
+                    },
+                    1.0,
+                    "linear",
+                    0,
+                    0,
+                    None,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            classify_zoom_pieces(&segments, &canvas, 0, 90, 1_920.0, 1_080.0).is_none(),
+            "piecewise zoom is bounded by MAX_ZOOM_PIECES"
+        );
     }
 
     #[test]

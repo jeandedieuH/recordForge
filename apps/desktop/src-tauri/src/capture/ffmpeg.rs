@@ -700,6 +700,23 @@ fn build_screen_command(
     // fragment is finalized. Keeping this FFmpeg process video-only prevents a
     // DirectShow audio failure from taking down the screen capture.
     let use_ddagrab = ddagrab_target.is_some();
+
+    // Prefer the GPU-resident pipeline when the whole chain qualifies;
+    // otherwise keep the CPU `hwdownload` filter and report that backend.
+    let gpu_filter = gpu_screen_filter(config, profile, encoder, use_ddagrab);
+
+    if gpu_filter.is_some() && encoder == "h264_qsv" {
+        // Quick Sync frames are derived from the D3D11 capture device, so both
+        // devices must be initialised. `-init_hw_device` is a global option and
+        // therefore has to precede the input it applies to.
+        command.args([
+            "-init_hw_device",
+            "d3d11va=dx",
+            "-init_hw_device",
+            "qsv=qs@dx",
+        ]);
+    }
+
     let (cpu_backend, screen_crop) = add_screen_video_input(
         &mut command,
         ffmpeg_path,
@@ -709,18 +726,16 @@ fn build_screen_command(
         external_video_input,
     );
 
-    // Prefer the GPU-resident pipeline when the whole chain qualifies;
-    // otherwise keep the CPU `hwdownload` filter and report that backend.
-    let (video_filter, backend) = match gpu_screen_filter(config, profile, encoder, use_ddagrab) {
+    let (video_filter, backend) = match gpu_filter {
         Some(filter) => (filter, "ddagrab-gpu"),
         None => (
             build_video_filter(
                 &config.source,
                 profile,
+                encoder,
                 use_ddagrab,
                 external_video_input,
                 screen_crop,
-                super::encoder::is_vaapi_encoder(encoder),
             ),
             cpu_backend,
         ),
@@ -735,7 +750,7 @@ fn build_screen_command(
         encoder,
         false,
         profile.fps as f64,
-        backend == "ddagrab-gpu",
+        screen_pix_fmt(encoder, backend),
     );
 
     command.args([
@@ -1500,11 +1515,11 @@ fn system_dpi() -> u32 {
 }
 
 /// Offer a fully GPU-resident scale+encode pipeline only when the whole
-/// chain supports it: ddagrab D3D11 frames in, a D3D11-capable encoder,
-/// matching aspect ratio (scaling must never distort), and even dimensions
-/// for NV12. Anything else keeps the CPU `hwdownload` filter path. Returning
-/// `None` is the compatibility verdict — the runtime start may still fall
-/// back if the GPU graph fails to produce frames.
+/// chain supports it: ddagrab D3D11 frames in, a D3D11- or Quick-Sync-capable
+/// encoder, matching aspect ratio (scaling must never distort), and even
+/// dimensions for NV12. Anything else keeps the CPU `hwdownload` filter path.
+/// Returning `None` is the compatibility verdict — the runtime start may still
+/// fall back if the GPU graph fails to produce frames.
 fn gpu_screen_filter(
     config: &RecordingConfig,
     profile: &RecordingProfile,
@@ -1515,7 +1530,7 @@ fn gpu_screen_filter(
     if !cfg!(windows)
         || !config.gpu_screen_capture
         || !use_ddagrab
-        || !matches!(encoder, "h264_nvenc" | "h264_amf" | "h264_mf")
+        || !matches!(encoder, "h264_nvenc" | "h264_amf" | "h264_mf" | "h264_qsv")
         || b.width <= 0
         || b.height <= 0
         || profile.width <= 0
@@ -1524,32 +1539,83 @@ fn gpu_screen_filter(
         || b.height % 2 != 0
         || profile.width % 2 != 0
         || profile.height % 2 != 0
-        || i64::from(b.width) * i64::from(profile.height)
-            != i64::from(b.height) * i64::from(profile.width)
+        || !aspect_fit_within_a_pixel(b, profile.width, profile.height)
     {
         return None;
     }
-    Some(format!(
-        "[0:v]scale_d3d11=width={}:height={}:format=nv12[vout]",
-        profile.width, profile.height
-    ))
+    Some(match encoder {
+        // Quick Sync needs its own device derived from the D3D11 one. The VPP
+        // stage also converts the full-range BGRA desktop into limited-range
+        // NV12 — `scale_qsv` keeps the full-range tag, which plays back washed
+        // out on players that honour it.
+        "h264_qsv" => format!(
+            "[0:v]hwmap=derive_device=qsv,vpp_qsv=w={}:h={}:format=nv12:out_range=tv[vout]",
+            profile.width, profile.height
+        ),
+        _ => format!(
+            "[0:v]scale_d3d11=width={}:height={}:format=nv12[vout]",
+            profile.width, profile.height
+        ),
+    })
+}
+
+/// Whether scaling `bounds` straight to `width`×`height` deviates from the
+/// fit filter's aspect-preserving result by less than a pixel on each axis.
+///
+/// The GPU graphs have no pad stage, so they can only be used when the output
+/// geometry already matches the source aspect — `RecordingProfile::for_source_bounds`
+/// makes that the normal case for window/region captures. Even-rounded output
+/// sizes leave at most a fraction of a pixel of residual; anything larger must
+/// letterbox (CPU path) rather than distort.
+fn aspect_fit_within_a_pixel(bounds: Bounds, width: i32, height: i32) -> bool {
+    if bounds.width <= 0 || bounds.height <= 0 || width <= 0 || height <= 0 {
+        return false;
+    }
+    let scale = (f64::from(width) / f64::from(bounds.width))
+        .min(f64::from(height) / f64::from(bounds.height));
+    let residual = |target: i32, source: i32| f64::from(target) - f64::from(source) * scale;
+    let (dw, dh) = (
+        residual(width, bounds.width),
+        residual(height, bounds.height),
+    );
+    (-0.5..1.5).contains(&dw) && (-0.5..1.5).contains(&dh)
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
 fn build_video_filter(
     source: &CaptureSource,
     profile: &RecordingProfile,
+    encoder: &str,
     use_ddagrab: bool,
     external_video_input: Option<&PipeWireVideoInput>,
     screen_crop: Option<Bounds>,
-    vaapi: bool,
 ) -> String {
-    let fit_filter = source
-        .bounds
-        .build_aspect_fit_filter(profile.width, profile.height);
+    // ScreenCaptureKit can deliver NV12 already at the final size: there is
+    // nothing left to crop, scale, pad or convert, so the graph is a no-op
+    // passthrough instead of a full-frame swscale copy per frame.
+    #[cfg(target_os = "macos")]
+    if external_video_input.is_some_and(|input| {
+        input.pixel_format == "nv12"
+            && input.crop.is_none()
+            && input.width == profile.width.max(1) as u32
+            && input.height == profile.height.max(1) as u32
+    }) {
+        return "[0:v]null[vout]".to_string();
+    }
+
+    let threads = scale_threads(profile);
+    let fit_filter =
+        source
+            .bounds
+            .build_aspect_fit_filter_threads(profile.width, profile.height, threads);
     // VAAPI encoders only take hw frames, so the graph's final stage uploads.
-    let upload = if vaapi {
+    // Other hardware encoders take NV12 natively: ending the graph with an
+    // explicit conversion keeps the single RGB→YUV pass inside the graph and
+    // saves the encoder wrapper from doing its own.
+    let tail = if super::encoder::is_vaapi_encoder(encoder) {
         format!(",{VAAPI_UPLOAD}")
+    } else if encoder_prefers_nv12(encoder) {
+        ",format=nv12".to_string()
     } else {
         String::new()
     };
@@ -1566,7 +1632,7 @@ fn build_video_filter(
             ));
         }
         chain.push_str(&format!("fps={},", profile.fps));
-        return format!("[0:v]{chain}{fit_filter}{upload}[vout]");
+        return format!("[0:v]{chain}{fit_filter}{tail}[vout]");
     }
 
     // Backends that only ingest whole displays (avfoundation `Capture screen
@@ -1579,10 +1645,47 @@ fn build_video_filter(
     if use_ddagrab {
         // ddagrab emits D3D11 hardware frames; download to system memory as
         // bgra before aspect-preserving scale and letterboxing (fixes P0.5).
-        format!("[0:v]hwdownload,format=bgra,{fit_filter}{upload}[vout]")
+        format!("[0:v]hwdownload,format=bgra,{fit_filter}{tail}[vout]")
     } else {
-        format!("[0:v]{crop_filter}{fit_filter}{upload}[vout]")
+        format!("[0:v]{crop_filter}{fit_filter}{tail}[vout]")
     }
+}
+
+/// `scale` thread count for the compatibility path, if it should be raised.
+///
+/// libswscale defaults to one thread, but extra threads did **not** pay off on
+/// the baseline machine: 1440p60 and 4K→1080p both stayed flat or regressed
+/// (measured, see `docs/benchmarks/phase-4-results.md`) — the stage is
+/// memory-bound and the capture source already saturates the memory bus. The
+/// knob stays opt-in so other hardware can be measured without changing
+/// defaults. `0` lets swscale pick the count.
+fn scale_threads(profile: &RecordingProfile) -> Option<usize> {
+    let enabled = std::env::var("RECORDFORGE_CAPTURE_SCALE_THREADS")
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "on"))
+        .unwrap_or(false);
+    (enabled && scale_threads_worth_trying(profile)).then_some(0)
+}
+
+/// Output sizes where multithreaded swscale is at least plausible: large
+/// frames or high output rates.
+fn scale_threads_worth_trying(profile: &RecordingProfile) -> bool {
+    profile.width >= 2560 || profile.height >= 1440 || profile.fps >= 60
+}
+
+/// Whether `encoder` consumes system-memory NV12 frames natively.
+///
+/// VAAPI is excluded on purpose: its upload stage already produces NV12 hw
+/// frames. Software encoders keep yuv420p.
+fn encoder_prefers_nv12(encoder: &str) -> bool {
+    matches!(
+        encoder,
+        "h264_nvenc"
+            | "h264_amf"
+            | "h264_qsv"
+            | "h264_mf"
+            | "h264_videotoolbox"
+            | "hevc_videotoolbox"
+    )
 }
 
 /// Fragmented-MP4 mux flags for a live capture segment.
@@ -1618,39 +1721,65 @@ pub(crate) fn add_video_encoder(
     is_webcam: bool,
     output_fps: f64,
 ) {
-    add_video_encoder_for_frames(command, profile, encoder, is_webcam, output_fps, false);
+    // The webcam graph already ends in a system format it chose, so only Media
+    // Foundation's negotiated hardware format is forced here. Screen captures
+    // go through `screen_pix_fmt` instead, where the RGB→YUV conversion is part
+    // of the graph anyway.
+    let pix_fmt = if super::encoder::is_vaapi_encoder(encoder) {
+        // VAAPI frames are created by the graph's upload stage.
+        None
+    } else if encoder == "h264_mf" {
+        Some("nv12")
+    } else {
+        Some("yuv420p")
+    };
+    add_video_encoder_for_frames(command, profile, encoder, is_webcam, output_fps, pix_fmt);
 }
 
-/// `gpu_frames` marks a D3D11-resident pipeline (ddagrab → scale_d3d11): the
-/// encoder consumes `d3d11` frames directly instead of downloaded system
-/// memory. Only reached when `gpu_screen_filter` already qualified the chain.
+/// `-pix_fmt` for a screen capture, or `None` when the filter graph owns the
+/// frame format.
+///
+/// `backend` is the concrete input backend the graph was built with
+/// (`ddagrab-gpu` when the frames never leave the GPU).
+fn screen_pix_fmt(encoder: &str, backend: &str) -> Option<&'static str> {
+    if backend == "ddagrab-gpu" {
+        // The graph hands the encoder D3D11 frames (scale_d3d11) or Quick Sync
+        // frames (hwmap/vpp_qsv); forcing a system format would pull them
+        // back and undo the zero-copy pipeline.
+        return if encoder == "h264_qsv" {
+            None
+        } else {
+            Some("d3d11")
+        };
+    }
+    if super::encoder::is_vaapi_encoder(encoder) {
+        // VAAPI frames are created by the graph's upload stage.
+        return None;
+    }
+    Some(if encoder_prefers_nv12(encoder) {
+        "nv12"
+    } else {
+        "yuv420p"
+    })
+}
+
+/// `pix_fmt` marks the frame format the encoder consumes; `None` leaves the
+/// format to the graph (hardware frames the encoder reads directly).
 fn add_video_encoder_for_frames(
     command: &mut Command,
     profile: &RecordingProfile,
     encoder: &str,
     is_webcam: bool,
     output_fps: f64,
-    gpu_frames: bool,
+    pix_fmt: Option<&'static str>,
 ) {
     command.arg("-c:v").arg(encoder);
     // Media Foundation only exposes hardware encoding when explicitly asked.
     if encoder == "h264_mf" {
         command.args(["-hw_encoding", "1"]);
     }
-    // GPU pipelines hand D3D11 frames to the encoder; CPU pipelines feed NV12
-    // (MF hardware) or yuv420p (software encoders). VAAPI frames are created by
-    // the graph's upload stage and must not be forced back to a system format.
-    if !super::encoder::is_vaapi_encoder(encoder) {
-        command.args([
-            "-pix_fmt",
-            if gpu_frames {
-                "d3d11"
-            } else if encoder == "h264_mf" {
-                "nv12"
-            } else {
-                "yuv420p"
-            },
-        ]);
+    if let Some(pix_fmt) = pix_fmt {
+        command.args(["-pix_fmt", pix_fmt]);
     }
     command.args(["-r", &format!("{output_fps}")]);
 
@@ -2487,26 +2616,53 @@ mod tests {
     #[test]
     fn ddagrab_filter_downloads_hardware_frames() {
         let source = region_source(0, 0, 800, 600);
-        let filter = build_video_filter(&source, &test_profile(), true, None, None, false);
+        let filter = build_video_filter(&source, &test_profile(), "libx264", true, None, None);
         assert!(filter.starts_with("[0:v]hwdownload,format=bgra,"));
 
-        let gdigrab_filter = build_video_filter(&source, &test_profile(), false, None, None, false);
+        let gdigrab_filter =
+            build_video_filter(&source, &test_profile(), "libx264", false, None, None);
         assert!(gdigrab_filter.starts_with("[0:v]scale="));
     }
 
     #[test]
     fn vaapi_filter_uploads_the_final_stage() {
         let source = region_source(0, 0, 800, 600);
-        let filter = build_video_filter(&source, &test_profile(), false, None, None, true);
+        let filter = build_video_filter(&source, &test_profile(), "h264_vaapi", false, None, None);
         // The upload must be the last stage: h264_vaapi only takes hw frames.
         assert!(
             filter.ends_with(&format!(",{VAAPI_UPLOAD}[vout]")),
             "{filter}"
         );
         // Software encoding is byte-identical to the pre-VAAPI graph.
-        let software = build_video_filter(&source, &test_profile(), false, None, None, false);
+        let software = build_video_filter(&source, &test_profile(), "libx264", false, None, None);
         assert!(!software.contains("hwupload"));
         assert!(software.ends_with("[vout]"));
+        // Hardware encoders take NV12: one conversion, at the end of the graph.
+        let nvenc = build_video_filter(&source, &test_profile(), "h264_nvenc", false, None, None);
+        assert!(nvenc.ends_with(",format=nv12[vout]"), "{nvenc}");
+        assert!(software.ends_with("[vout]"), "{software}");
+        assert!(!software.contains("format=nv12"), "{software}");
+    }
+
+    #[test]
+    fn scale_threads_stay_opt_in_and_only_for_large_outputs() {
+        let source = region_source(0, 0, 1280, 720);
+        let mut profile = test_profile();
+        profile.width = 1920;
+        profile.height = 1080;
+        profile.fps = 30;
+        // The default graph stays single-threaded: measurement showed no win.
+        let filter = build_video_filter(&source, &profile, "libx264", false, None, None);
+        assert!(!filter.contains(":threads="), "{filter}");
+
+        assert!(!scale_threads_worth_trying(&profile));
+        profile.width = 2560;
+        profile.height = 1440;
+        assert!(scale_threads_worth_trying(&profile));
+        profile.width = 1920;
+        profile.height = 1080;
+        profile.fps = 60;
+        assert!(scale_threads_worth_trying(&profile));
     }
 
     #[test]
@@ -3138,6 +3294,42 @@ mod tests {
         );
     }
 
+    /// Quick Sync derives its device from the D3D11 capture device and scales
+    /// through VPP, which also converts the full-range desktop to limited-range
+    /// NV12 (`scale_qsv` would keep the full-range tag).
+    #[test]
+    #[cfg(windows)]
+    fn gpu_filter_derives_a_qsv_device_for_qsv_encoders() {
+        let config = gpu_screen_test_config(1920, 1080);
+        let profile = gpu_screen_test_profile();
+        assert_eq!(
+            gpu_screen_filter(&config, &profile, "h264_qsv", true).as_deref(),
+            Some(
+                "[0:v]hwmap=derive_device=qsv,vpp_qsv=w=1280:h=720:format=nv12:out_range=tv[vout]"
+            )
+        );
+    }
+
+    /// A window recorded through `RecordingProfile::for_source_bounds` has an
+    /// even-rounded aspect that is within a fraction of a pixel of the source,
+    /// which is the case the GPU path must accept instead of letterboxing.
+    #[test]
+    #[cfg(windows)]
+    fn gpu_filter_accepts_even_rounded_source_aspects() {
+        let profile = gpu_screen_test_profile();
+        // 1366×768 recorded at 1280×720 (the even-rounded fit of the source).
+        let config = gpu_screen_test_config(1366, 768);
+        assert!(gpu_screen_filter(&config, &profile, "h264_mf", true).is_some());
+
+        let mut profile = profile;
+        profile.width = 1280;
+        profile.height = 700;
+        assert!(
+            gpu_screen_filter(&config, &profile, "h264_mf", true).is_none(),
+            "an aspect mismatch must stay on the CPU path"
+        );
+    }
+
     #[test]
     #[cfg(not(windows))]
     fn gpu_filter_never_qualifies_off_windows() {
@@ -3177,8 +3369,10 @@ mod tests {
             true
         )
         .is_none());
-        // Software and non-D3D11 encoders never see the GPU filter.
+        // Software encoders never see the GPU filter; Quick Sync qualifies
+        // through its own derived-device graph instead of `scale_d3d11`.
         assert!(gpu_screen_filter(&config, &profile, "libx264", true).is_none());
+        #[cfg(not(windows))]
         assert!(gpu_screen_filter(&config, &profile, "h264_qsv", true).is_none());
         // The user-facing toggle vetoes the pipeline entirely.
         let mut disabled = gpu_screen_test_config(1920, 1080);
@@ -3193,17 +3387,60 @@ mod tests {
         let profile = test_profile();
 
         let mut command = Command::new("ffmpeg");
-        add_video_encoder_for_frames(&mut command, &profile, "h264_mf", false, 30.0, true);
+        add_video_encoder_for_frames(
+            &mut command,
+            &profile,
+            "h264_mf",
+            false,
+            30.0,
+            screen_pix_fmt("h264_mf", "ddagrab-gpu"),
+        );
         let debug = format!("{command:?}");
         assert!(debug.contains("\"-hw_encoding\" \"1\""));
         assert!(debug.contains("\"-pix_fmt\" \"d3d11\""));
         assert!(!debug.contains("nv12"));
 
         let mut command = Command::new("ffmpeg");
-        add_video_encoder_for_frames(&mut command, &profile, "h264_nvenc", false, 30.0, true);
+        add_video_encoder_for_frames(
+            &mut command,
+            &profile,
+            "h264_nvenc",
+            false,
+            30.0,
+            screen_pix_fmt("h264_nvenc", "ddagrab-gpu"),
+        );
         let debug = format!("{command:?}");
         assert!(debug.contains("\"-pix_fmt\" \"d3d11\""));
         assert!(!debug.contains("-hw_encoding"));
+
+        // Quick Sync reads the derived QSV frames directly: any `-pix_fmt`
+        // here would pull the graph back to system memory.
+        let mut command = Command::new("ffmpeg");
+        add_video_encoder_for_frames(
+            &mut command,
+            &profile,
+            "h264_qsv",
+            false,
+            30.0,
+            screen_pix_fmt("h264_qsv", "ddagrab-gpu"),
+        );
+        let debug = format!("{command:?}");
+        assert!(!debug.contains("-pix_fmt"), "{debug}");
+    }
+
+    #[test]
+    fn cpu_chains_feed_hardware_encoders_nv12() {
+        for encoder in ["h264_nvenc", "h264_amf", "h264_qsv", "h264_videotoolbox"] {
+            assert_eq!(
+                screen_pix_fmt(encoder, "ddagrab-cpu"),
+                Some("nv12"),
+                "{encoder}"
+            );
+        }
+        assert_eq!(screen_pix_fmt("libx264", "gdigrab"), Some("yuv420p"));
+        // VAAPI frames come from the graph's upload stage.
+        assert_eq!(screen_pix_fmt("h264_vaapi", "x11grab"), None);
+        assert_eq!(screen_pix_fmt("hevc_vaapi", "x11grab"), None);
     }
 
     #[test]

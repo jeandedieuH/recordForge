@@ -25,8 +25,25 @@ pub struct Bounds {
 impl Bounds {
     /// Compute aspect-preserving scale and pad filter string for FFmpeg (fixes P0.5 aspect distortion).
     pub fn build_aspect_fit_filter(&self, target_width: i32, target_height: i32) -> String {
+        self.build_aspect_fit_filter_threads(target_width, target_height, None)
+    }
+
+    /// [`Self::build_aspect_fit_filter`] with an explicit swscale thread count.
+    ///
+    /// libswscale is single-threaded unless told otherwise, and the scale stage
+    /// is the largest per-frame CPU cost of the capture compatibility path.
+    /// `Some(0)` lets swscale pick the count itself.
+    pub fn build_aspect_fit_filter_threads(
+        &self,
+        target_width: i32,
+        target_height: i32,
+        threads: Option<usize>,
+    ) -> String {
+        let threads = threads
+            .map(|threads| format!(":threads={threads}"))
+            .unwrap_or_default();
         format!(
-            "scale=w={target_width}:h={target_height}:force_original_aspect_ratio=decrease,pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2:color=black"
+            "scale=w={target_width}:h={target_height}:force_original_aspect_ratio=decrease{threads},pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2:color=black"
         )
     }
 }

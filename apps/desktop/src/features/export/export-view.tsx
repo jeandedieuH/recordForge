@@ -3,6 +3,7 @@ import type {
   ExportEncoderPreference,
   ExportPreset,
   ExportRange,
+  ExportRendererPreference,
   InstantShareSettings,
   JobDelivery,
   MediaJob,
@@ -73,6 +74,7 @@ interface ExportViewProps {
   onPresetChange?: (preset: ExportPreset) => void
   onCodecChange?: (codec: "h264" | "hevc" | "gif" | "webp") => void
   onEncoderChange?: (encoder: ExportEncoderPreference) => void
+  onRendererChange?: (renderer: ExportRendererPreference) => void
   /** Display name of the detected hardware encoder, or null when none was found. */
   hardwareEncoderName?: string | null
   onRangeChange?: (range: ExportRange | undefined) => void
@@ -312,6 +314,7 @@ export function ExportView({
   onPresetChange,
   onCodecChange,
   onEncoderChange,
+  onRendererChange,
   hardwareEncoderName = null,
   onRangeChange,
   exportJob = null,
@@ -813,6 +816,32 @@ export function ExportView({
                           {hardwareEncoderName} detected and will be used by Auto
                         </span>
                       ) : null}
+                    </label>
+                    <label className="flex flex-col gap-1.5 text-xs text-subtle-foreground">
+                      Renderer
+                      <Select
+                        value={exportSettings?.renderer ?? "auto"}
+                        onValueChange={(value) =>
+                          onRendererChange?.(value as ExportRendererPreference)
+                        }
+                        disabled={isRunning}
+                      >
+                        <SelectTrigger
+                          aria-label="Export renderer"
+                          className="border-border bg-background text-xs text-foreground"
+                        >
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="auto">Auto</SelectItem>
+                          <SelectItem value="gpu">GPU compositor (experimental)</SelectItem>
+                          <SelectItem value="compatibility">FFmpeg compatibility</SelectItem>
+                        </SelectContent>
+                      </Select>
+                      <span className="text-[11px] text-subtle-foreground">
+                        GPU compositing is used only for exports it fully supports; anything else
+                        renders on the FFmpeg path automatically.
+                      </span>
                     </label>
                   </>
                 ) : null}

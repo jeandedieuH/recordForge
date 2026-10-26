@@ -39,6 +39,17 @@ fn standalone_video_stream_index(metadata: &media_db::MediaMetadata) -> i32 {
         .saturating_add(1)
 }
 
+/// Human-readable message for a join panic from one of the concurrent prepare
+/// stages, so a worker crash still fails the job with a diagnosable reason.
+fn stage_panic_message(stage: &str, panic: &(dyn std::any::Any + Send)) -> String {
+    let detail = panic
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("unknown panic");
+    format!("{stage} stage panicked: {detail}")
+}
+
 /// Options for a prepare job.
 ///
 /// Persisted in `media_jobs.options` so deduplication and crash-resume can
@@ -1560,289 +1571,418 @@ impl Worker {
             return self.finish_cancelled();
         }
 
-        // Prefer the recorder's standalone webcam asset. The legacy branch
-        // below keeps older recordings with a secondary video stream editable.
+        // ---- Stage group: camera tracks, thumbnail sprite, audio derivatives.
+        //
+        // Each stage only reads the finalized files and spawns its own FFmpeg
+        // process, so they run concurrently: stop-to-editor becomes
+        // max(stage) instead of their sum. Every stage returns the derivative
+        // paths it produced; database writes stay on this thread after join.
+        self.set_progress(0.46, "derivatives")?;
+        let derivatives_started = Instant::now();
+
+        struct StageOutputs {
+            video_tracks: Vec<MediaVideoTrackOutput>,
+            audio_tracks: Vec<MediaAudioTrackOutput>,
+            /// `(path, derivative kind, strict)` — `strict` keeps the
+            /// historical behavior where a failed derivative row fails the
+            /// prepare (the camera stage only warns).
+            derivatives: Vec<(String, &'static str, bool)>,
+        }
+
         let standalone_webcam_path = work_dir.join("webcam.mp4");
-        if standalone_webcam_path.is_file() {
-            self.set_progress(0.46, "camera track")?;
-            if cancel.load(Ordering::Relaxed) {
-                return self.finish_cancelled();
-            }
-            let stage_started = Instant::now();
-            let webcam_metadata = probe_media(
-                &self.ffprobe_path.to_string_lossy(),
-                &standalone_webcam_path,
-                &self.options.recording_id,
-            )?;
-            let stream = webcam_metadata
-                .streams
-                .iter()
-                .find(|stream| stream.kind == "video")
-                .ok_or_else(|| {
-                    InternalError::Media("standalone webcam has no video stream".into())
-                })?;
+        let ffmpeg = self.ffmpeg_path.to_string_lossy().to_string();
+        let ffprobe = self.ffprobe_path.to_string_lossy().to_string();
+        let recording_id = self.options.recording_id.clone();
+        let job_id = self.job_id.clone();
+        let thumbnail_interval_sec = self.options.thumbnail_interval_sec;
+        let force = self.options.force;
 
-            let webcam_thumb_dir = derivative_dir(&work_dir, "thumbnails_webcam");
-            let (webcam_thumb_dir_str, webcam_thumb_manifest_str) = match generate_thumbnails(
-                &self.ffmpeg_path.to_string_lossy(),
-                &standalone_webcam_path,
-                &webcam_thumb_dir,
-                &webcam_metadata,
-                self.options.thumbnail_interval_sec,
-            ) {
-                Ok((sprite, manifest)) => {
-                    let _ = self.record_derivative(&sprite.to_string_lossy(), "thumbnail");
-                    let _ = self.record_derivative(&manifest.to_string_lossy(), "thumbnail");
-                    (
-                        Some(webcam_thumb_dir.to_string_lossy().to_string()),
-                        Some(manifest.to_string_lossy().to_string()),
-                    )
-                }
-                Err(e) => {
-                    tracing::warn!("failed to generate webcam thumbnail sprite: {e}");
-                    (None, None)
-                }
-            };
+        let joined = std::thread::scope(|scope| {
+            let camera = {
+                let ffmpeg = ffmpeg.clone();
+                let ffprobe = ffprobe.clone();
+                let cancel = cancel.clone();
+                let work_dir = work_dir.clone();
+                let metadata = metadata.clone();
+                let recording_id = recording_id.clone();
+                let job_id = job_id.clone();
+                let webcam_path = standalone_webcam_path.clone();
+                let input_path = input_path.clone();
+                scope.spawn(move || -> Result<StageOutputs> {
+                    let started = Instant::now();
+                    let mut tracks = Vec::new();
+                    let mut derivatives = Vec::new();
+                    if webcam_path.is_file() {
+                        let webcam_metadata = probe_media(&ffprobe, &webcam_path, &recording_id)?;
+                        let stream = webcam_metadata
+                            .streams
+                            .iter()
+                            .find(|stream| stream.kind == "video")
+                            .ok_or_else(|| {
+                                InternalError::Media(
+                                    "standalone webcam has no video stream".into(),
+                                )
+                            })?;
 
-            outputs.video_tracks.push(MediaVideoTrackOutput {
-                stream_index: standalone_video_stream_index(&metadata),
-                title: "Webcam".into(),
-                video_path: standalone_webcam_path.to_string_lossy().to_string(),
-                width: stream.width,
-                height: stream.height,
-                thumbnail_dir: webcam_thumb_dir_str,
-                thumbnail_manifest_path: webcam_thumb_manifest_str,
-            });
-            info!(
-                job_id = %self.job_id,
-                stage = "camera_track",
-                elapsed_ms = stage_started.elapsed().as_millis() as u64,
-                "prepare: stage finished"
-            );
-        } else {
-            let secondary_video_streams = metadata
-                .streams
-                .iter()
-                .filter(|stream| stream.kind == "video")
-                .skip(1)
-                .collect::<Vec<_>>();
-            if !secondary_video_streams.is_empty() {
-                self.set_progress(0.46, "camera tracks")?;
-                let video_dir = derivative_dir(&work_dir, "video");
-                for stream in secondary_video_streams {
-                    if cancel.load(Ordering::Relaxed) {
-                        return self.finish_cancelled();
-                    }
-                    let stage_started = Instant::now();
-                    let title = stream
-                        .title
-                        .clone()
-                        .unwrap_or_else(|| format!("Camera {}", stream.index));
-                    let video_path = video_dir.join(format!("stream_{:03}.mp4", stream.index));
-                    if self.options.force || !video_path.is_file() {
-                        if let Err(error) = extract_video_track(
-                            &self.ffmpeg_path.to_string_lossy(),
-                            &input_path,
-                            stream.index,
-                            &video_path,
-                            cancel.clone(),
-                        ) {
-                            return self.fail(&format!("video track {}: {error}", stream.index));
+                        let webcam_thumb_dir = derivative_dir(&work_dir, "thumbnails_webcam");
+                        let (webcam_thumb_dir_str, webcam_thumb_manifest_str) =
+                            match generate_thumbnails(
+                                &ffmpeg,
+                                &webcam_path,
+                                &webcam_thumb_dir,
+                                &webcam_metadata,
+                                thumbnail_interval_sec,
+                                // Camera capture uses a one-second GOP, so
+                                // keyframes alone cover any sample interval the
+                                // sprite grid asks for.
+                                true,
+                            ) {
+                                Ok((sprite, manifest)) => {
+                                    derivatives.push((
+                                        sprite.to_string_lossy().to_string(),
+                                        "thumbnail",
+                                        false,
+                                    ));
+                                    derivatives.push((
+                                        manifest.to_string_lossy().to_string(),
+                                        "thumbnail",
+                                        false,
+                                    ));
+                                    (
+                                        Some(webcam_thumb_dir.to_string_lossy().to_string()),
+                                        Some(manifest.to_string_lossy().to_string()),
+                                    )
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "failed to generate webcam thumbnail sprite: {e}"
+                                    );
+                                    (None, None)
+                                }
+                            };
+
+                        tracks.push(MediaVideoTrackOutput {
+                            stream_index: standalone_video_stream_index(&metadata),
+                            title: "Webcam".into(),
+                            video_path: webcam_path.to_string_lossy().to_string(),
+                            width: stream.width,
+                            height: stream.height,
+                            thumbnail_dir: webcam_thumb_dir_str,
+                            thumbnail_manifest_path: webcam_thumb_manifest_str,
+                        });
+                    } else {
+                        let secondary_video_streams = metadata
+                            .streams
+                            .iter()
+                            .filter(|stream| stream.kind == "video")
+                            .skip(1)
+                            .collect::<Vec<_>>();
+                        if !secondary_video_streams.is_empty() {
+                            let video_dir = derivative_dir(&work_dir, "video");
+                            for stream in secondary_video_streams {
+                                if cancel.load(Ordering::Relaxed) {
+                                    break;
+                                }
+                                let title = stream
+                                    .title
+                                    .clone()
+                                    .unwrap_or_else(|| format!("Camera {}", stream.index));
+                                let video_path =
+                                    video_dir.join(format!("stream_{:03}.mp4", stream.index));
+                                if force || !video_path.is_file() {
+                                    extract_video_track(
+                                        &ffmpeg,
+                                        &input_path,
+                                        stream.index,
+                                        &video_path,
+                                        cancel.clone(),
+                                    )?;
+                                }
+                                derivatives.push((
+                                    video_path.to_string_lossy().to_string(),
+                                    "video",
+                                    true,
+                                ));
+
+                                let stream_thumb_dir = derivative_dir(
+                                    &work_dir,
+                                    &format!("thumbnails_stream_{}", stream.index),
+                                );
+                                let stream_metadata =
+                                    probe_media(&ffprobe, &video_path, &recording_id)
+                                        .unwrap_or_else(|_| metadata.clone());
+
+                                let (stream_thumb_dir_str, stream_thumb_manifest_str) =
+                                    match generate_thumbnails(
+                                        &ffmpeg,
+                                        &video_path,
+                                        &stream_thumb_dir,
+                                        &stream_metadata,
+                                        thumbnail_interval_sec,
+                                        // Stream-copied from the native
+                                        // capture, so the recorded one-second
+                                        // GOP still applies.
+                                        true,
+                                    ) {
+                                        Ok((sprite, manifest)) => {
+                                            derivatives.push((
+                                                sprite.to_string_lossy().to_string(),
+                                                "thumbnail",
+                                                false,
+                                            ));
+                                            derivatives.push((
+                                                manifest.to_string_lossy().to_string(),
+                                                "thumbnail",
+                                                false,
+                                            ));
+                                            (
+                                                Some(
+                                                    stream_thumb_dir
+                                                        .to_string_lossy()
+                                                        .to_string(),
+                                                ),
+                                                Some(
+                                                    manifest.to_string_lossy().to_string(),
+                                                ),
+                                            )
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                "failed to generate stream {} thumbnail sprite: {e}",
+                                                stream.index
+                                            );
+                                            (None, None)
+                                        }
+                                    };
+
+                                tracks.push(MediaVideoTrackOutput {
+                                    stream_index: stream.index,
+                                    title,
+                                    video_path: video_path.to_string_lossy().to_string(),
+                                    width: stream.width,
+                                    height: stream.height,
+                                    thumbnail_dir: stream_thumb_dir_str,
+                                    thumbnail_manifest_path: stream_thumb_manifest_str,
+                                });
+                            }
                         }
                     }
-                    self.record_derivative(&video_path.to_string_lossy(), "video")?;
-
-                    let stream_thumb_dir =
-                        derivative_dir(&work_dir, &format!("thumbnails_stream_{}", stream.index));
-                    let stream_metadata = probe_media(
-                        &self.ffprobe_path.to_string_lossy(),
-                        &video_path,
-                        &self.options.recording_id,
-                    )
-                    .unwrap_or_else(|_| metadata.clone());
-
-                    let (stream_thumb_dir_str, stream_thumb_manifest_str) =
-                        match generate_thumbnails(
-                            &self.ffmpeg_path.to_string_lossy(),
-                            &video_path,
-                            &stream_thumb_dir,
-                            &stream_metadata,
-                            self.options.thumbnail_interval_sec,
-                        ) {
-                            Ok((sprite, manifest)) => {
-                                let _ =
-                                    self.record_derivative(&sprite.to_string_lossy(), "thumbnail");
-                                let _ = self
-                                    .record_derivative(&manifest.to_string_lossy(), "thumbnail");
-                                (
-                                    Some(stream_thumb_dir.to_string_lossy().to_string()),
-                                    Some(manifest.to_string_lossy().to_string()),
-                                )
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "failed to generate stream {} thumbnail sprite: {e}",
-                                    stream.index
-                                );
-                                (None, None)
-                            }
-                        };
-
-                    outputs.video_tracks.push(MediaVideoTrackOutput {
-                        stream_index: stream.index,
-                        title,
-                        video_path: video_path.to_string_lossy().to_string(),
-                        width: stream.width,
-                        height: stream.height,
-                        thumbnail_dir: stream_thumb_dir_str,
-                        thumbnail_manifest_path: stream_thumb_manifest_str,
-                    });
+                    let elapsed_ms = started.elapsed().as_millis() as u64;
                     info!(
-                        job_id = %self.job_id,
-                        stage = "camera_track",
-                        stream_index = stream.index,
-                        elapsed_ms = stage_started.elapsed().as_millis() as u64,
+                        job_id = %job_id,
+                        stage = "camera_tracks",
+                        elapsed_ms,
                         "prepare: stage finished"
                     );
-                }
-            }
-        }
-
-        // Stage: thumbnail sprite.
-        self.set_progress(0.50, "thumbnails")?;
-        let thumbnail_dir = derivative_dir(&work_dir, "thumbnails");
-        let thumbnail_sprite_path = thumbnail_dir.join("sprite.jpg");
-        let thumbnail_manifest_path = thumbnail_dir.join("thumbnails.json");
-        let thumbnails_started = Instant::now();
-        if !cancel.load(Ordering::Relaxed) {
-            if regenerate_derivatives
-                || !thumbnail_sprite_path.is_file()
-                || !thumbnail_manifest_path.is_file()
-            {
-                match generate_thumbnails(
-                    &self.ffmpeg_path.to_string_lossy(),
-                    &input_path,
-                    &thumbnail_dir,
-                    &metadata,
-                    self.options.thumbnail_interval_sec,
-                ) {
-                    Ok((sprite, manifest)) => {
-                        outputs.thumbnail_dir = Some(thumbnail_dir.to_string_lossy().to_string());
-                        outputs.thumbnail_manifest_path =
-                            Some(manifest.to_string_lossy().to_string());
-                        self.record_derivative(&sprite.to_string_lossy(), "thumbnail")?;
-                        self.record_derivative(&manifest.to_string_lossy(), "thumbnail")?;
+                    Ok(StageOutputs {
+                        video_tracks: tracks,
+                        audio_tracks: Vec::new(),
+                        derivatives,
+                    })
+                })
+            };
+            let thumbnails = {
+                let ffmpeg = ffmpeg.clone();
+                let cancel = cancel.clone();
+                let work_dir = work_dir.clone();
+                let input_path = input_path.clone();
+                let metadata = metadata.clone();
+                let job_id = job_id.clone();
+                scope.spawn(move || -> Result<Option<(String, String, bool)>> {
+                    let started = Instant::now();
+                    if cancel.load(Ordering::Relaxed) {
+                        return Ok(None);
                     }
-                    Err(e) => return self.fail(&format!("thumbnails: {e}")),
-                }
-            } else {
-                outputs.thumbnail_dir = Some(thumbnail_dir.to_string_lossy().to_string());
-                outputs.thumbnail_manifest_path =
-                    Some(thumbnail_manifest_path.to_string_lossy().to_string());
-            }
-            info!(
-                job_id = %self.job_id,
-                stage = "thumbnails",
-                elapsed_ms = thumbnails_started.elapsed().as_millis() as u64,
-                "prepare: stage finished"
-            );
-        }
+                    let thumbnail_dir = derivative_dir(&work_dir, "thumbnails");
+                    let thumbnail_sprite_path = thumbnail_dir.join("sprite.jpg");
+                    let thumbnail_manifest_path = thumbnail_dir.join("thumbnails.json");
+                    let result = if regenerate_derivatives
+                        || !thumbnail_sprite_path.is_file()
+                        || !thumbnail_manifest_path.is_file()
+                    {
+                        let (sprite, manifest) = generate_thumbnails(
+                            &ffmpeg,
+                            &input_path,
+                            &thumbnail_dir,
+                            &metadata,
+                            thumbnail_interval_sec,
+                            // Native recording: capture encodes with a
+                            // one-second GOP.
+                            true,
+                        )?;
+                        Some((
+                            sprite.to_string_lossy().to_string(),
+                            manifest.to_string_lossy().to_string(),
+                            true,
+                        ))
+                    } else {
+                        Some((
+                            thumbnail_sprite_path.to_string_lossy().to_string(),
+                            thumbnail_manifest_path.to_string_lossy().to_string(),
+                            false,
+                        ))
+                    };
+                    info!(
+                        job_id = %job_id,
+                        stage = "thumbnails",
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        "prepare: stage finished"
+                    );
+                    Ok(result)
+                })
+            };
+            let audio = {
+                let ffmpeg = ffmpeg.clone();
+                let cancel = cancel.clone();
+                let work_dir = work_dir.clone();
+                let input_path = input_path.clone();
+                let metadata = metadata.clone();
+                let job_id = job_id.clone();
+                scope.spawn(move || -> Result<StageOutputs> {
+                    let started = Instant::now();
+                    let mut tracks = Vec::new();
+                    let mut derivatives = Vec::new();
+                    if !metadata.has_audio {
+                        return Ok(StageOutputs {
+                            video_tracks: Vec::new(),
+                            audio_tracks: tracks,
+                            derivatives,
+                        });
+                    }
+                    let audio_dir = derivative_dir(&work_dir, "audio");
+                    let waveform_dir = derivative_dir(&work_dir, "waveform");
+                    let audio_streams = metadata
+                        .streams
+                        .iter()
+                        .filter(|stream| stream.kind == "audio")
+                        .collect::<Vec<_>>();
+
+                    for (track_index, stream) in audio_streams.iter().enumerate() {
+                        if cancel.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        let title = stream
+                            .title
+                            .clone()
+                            .filter(|value| value != "SoundHandler")
+                            .unwrap_or_else(|| {
+                                if track_index == 0 {
+                                    "Microphone".into()
+                                } else if track_index == 1 {
+                                    "System Audio".into()
+                                } else {
+                                    format!("Audio {}", track_index + 1)
+                                }
+                            });
+                        let audio_path = audio_dir.join(format!("stream_{:03}.wav", stream.index));
+                        if force || !audio_path.is_file() {
+                            extract_audio_track(
+                                &ffmpeg,
+                                &input_path,
+                                stream.index,
+                                &audio_path,
+                                cancel.clone(),
+                            )?;
+                        }
+
+                        let track_waveform_dir =
+                            waveform_dir.join(format!("stream_{:03}", stream.index));
+                        let waveform_json = track_waveform_dir.join("waveform.json");
+                        if regenerate_derivatives || !waveform_json.is_file() {
+                            generate_waveform_for_stream(
+                                &ffmpeg,
+                                &input_path,
+                                &track_waveform_dir,
+                                stream.index,
+                                &metadata,
+                                cancel.clone(),
+                            )?;
+                            derivatives.push((
+                                waveform_json.to_string_lossy().to_string(),
+                                "waveform",
+                                true,
+                            ));
+                        }
+
+                        derivatives.push((audio_path.to_string_lossy().to_string(), "audio", true));
+                        tracks.push(MediaAudioTrackOutput {
+                            stream_index: stream.index,
+                            title,
+                            audio_path: audio_path.to_string_lossy().to_string(),
+                            waveform_path: waveform_json.to_string_lossy().to_string(),
+                            waveform_image_path: None,
+                        });
+                    }
+                    info!(
+                        job_id = %job_id,
+                        stage = "audio_tracks",
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        "prepare: stage finished"
+                    );
+                    Ok(StageOutputs {
+                        video_tracks: Vec::new(),
+                        audio_tracks: tracks,
+                        derivatives,
+                    })
+                })
+            };
+
+            (camera.join(), thumbnails.join(), audio.join())
+        });
 
         if cancel.load(Ordering::Relaxed) {
             return self.finish_cancelled();
         }
 
-        // Stage: independent audio assets and per-stream waveforms.
-        if metadata.has_audio {
-            self.set_progress(0.65, "audio tracks")?;
-            let audio_dir = derivative_dir(&work_dir, "audio");
-            let waveform_dir = derivative_dir(&work_dir, "waveform");
-            let audio_streams = metadata
-                .streams
-                .iter()
-                .filter(|stream| stream.kind == "audio")
-                .collect::<Vec<_>>();
+        let camera_stage = match joined.0 {
+            Ok(Ok(stage)) => stage,
+            Ok(Err(error)) => return self.fail(&format!("camera tracks: {error}")),
+            Err(panic) => return self.fail(&stage_panic_message("camera", &*panic)),
+        };
+        let thumbnails = match joined.1 {
+            Ok(Ok(thumbnails)) => thumbnails,
+            Ok(Err(error)) => return self.fail(&format!("thumbnails: {error}")),
+            Err(panic) => return self.fail(&stage_panic_message("thumbnails", &*panic)),
+        };
+        let audio_stage = match joined.2 {
+            Ok(Ok(stage)) => stage,
+            Ok(Err(error)) => return self.fail(&format!("audio tracks: {error}")),
+            Err(panic) => return self.fail(&stage_panic_message("audio", &*panic)),
+        };
 
-            for (track_index, stream) in audio_streams.iter().enumerate() {
-                if cancel.load(Ordering::Relaxed) {
-                    return self.finish_cancelled();
-                }
+        let mut stage_derivatives = camera_stage.derivatives;
+        stage_derivatives.extend(audio_stage.derivatives);
+        outputs.video_tracks = camera_stage.video_tracks;
+        outputs.audio_tracks = audio_stage.audio_tracks;
+        outputs.waveform_path = outputs
+            .audio_tracks
+            .first()
+            .map(|track| track.waveform_path.clone());
 
-                let title = stream
-                    .title
-                    .clone()
-                    .filter(|value| value != "SoundHandler")
-                    .unwrap_or_else(|| {
-                        if track_index == 0 {
-                            "Microphone".into()
-                        } else if track_index == 1 {
-                            "System Audio".into()
-                        } else {
-                            format!("Audio {}", track_index + 1)
-                        }
-                    });
-                let audio_path = audio_dir.join(format!("stream_{:03}.wav", stream.index));
-                if self.options.force || !audio_path.is_file() {
-                    let stage_started = Instant::now();
-                    if let Err(error) = extract_audio_track(
-                        &self.ffmpeg_path.to_string_lossy(),
-                        &input_path,
-                        stream.index,
-                        &audio_path,
-                        cancel.clone(),
-                    ) {
-                        return self.fail(&format!("audio track {}: {error}", stream.index));
-                    }
-                    info!(
-                        job_id = %self.job_id,
-                        stage = "audio_track",
-                        stream_index = stream.index,
-                        elapsed_ms = stage_started.elapsed().as_millis() as u64,
-                        "prepare: stage finished"
-                    );
-                }
-
-                let track_waveform_dir = waveform_dir.join(format!("stream_{:03}", stream.index));
-                let waveform_json = track_waveform_dir.join("waveform.json");
-                if regenerate_derivatives || !waveform_json.is_file() {
-                    let stage_started = Instant::now();
-                    let json = match generate_waveform_for_stream(
-                        &self.ffmpeg_path.to_string_lossy(),
-                        &input_path,
-                        &track_waveform_dir,
-                        stream.index,
-                        &metadata,
-                        cancel.clone(),
-                    ) {
-                        Ok(path) => path,
-                        Err(error) => {
-                            return self.fail(&format!("waveform stream {}: {error}", stream.index))
-                        }
-                    };
-                    self.record_derivative(&json.to_string_lossy(), "waveform")?;
-                    info!(
-                        job_id = %self.job_id,
-                        stage = "waveform",
-                        stream_index = stream.index,
-                        elapsed_ms = stage_started.elapsed().as_millis() as u64,
-                        "prepare: stage finished"
-                    );
-                }
-
-                self.record_derivative(&audio_path.to_string_lossy(), "audio")?;
-                let output = MediaAudioTrackOutput {
-                    stream_index: stream.index,
-                    title,
-                    audio_path: audio_path.to_string_lossy().to_string(),
-                    waveform_path: waveform_json.to_string_lossy().to_string(),
-                    waveform_image_path: None,
-                };
-                if outputs.audio_tracks.is_empty() {
-                    outputs.waveform_path = Some(output.waveform_path.clone());
-                }
-                outputs.audio_tracks.push(output);
+        let thumbnail_dir = derivative_dir(&work_dir, "thumbnails");
+        if let Some((sprite, manifest, regenerated)) = thumbnails {
+            outputs.thumbnail_dir = Some(thumbnail_dir.to_string_lossy().to_string());
+            outputs.thumbnail_manifest_path = Some(manifest.clone());
+            if regenerated {
+                stage_derivatives.push((sprite, "thumbnail", true));
+                stage_derivatives.push((manifest, "thumbnail", true));
             }
         }
+
+        for (path, kind, strict) in stage_derivatives {
+            if strict {
+                self.record_derivative(&path, kind)?;
+            } else {
+                let _ = self.record_derivative(&path, kind);
+            }
+        }
+
+        info!(
+            job_id = %self.job_id,
+            stage = "derivatives",
+            elapsed_ms = derivatives_started.elapsed().as_millis() as u64,
+            "prepare: stage finished"
+        );
 
         if cancel.load(Ordering::Relaxed) {
             return self.finish_cancelled();
@@ -2140,6 +2280,9 @@ impl AssetWorker {
                         &thumbnail_dir,
                         &metadata,
                         5,
+                        // Imported assets have an unknown GOP; keep the full
+                        // decode so no requested frame can be missed.
+                        false,
                     )?
                 } else {
                     (

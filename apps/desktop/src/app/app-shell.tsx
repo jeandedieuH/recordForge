@@ -118,6 +118,7 @@ export function AppShell() {
   const setExportPreset = useTimelineStore((state) => state.setExportPreset)
   const setExportCodec = useTimelineStore((state) => state.setExportCodec)
   const setExportEncoder = useTimelineStore((state) => state.setExportEncoder)
+  const setExportRenderer = useTimelineStore((state) => state.setExportRenderer)
   const setExportRange = useTimelineStore((state) => state.setExportRange)
   const cancelExport = useTimelineStore((state) => state.cancelExport)
   const retryExport = useTimelineStore((state) => state.retryExport)
@@ -605,6 +606,7 @@ export function AppShell() {
                   onPresetChange={setExportPreset}
                   onCodecChange={setExportCodec}
                   onEncoderChange={setExportEncoder}
+                  onRendererChange={setExportRenderer}
                   hardwareEncoderName={hardwareEncoderName}
                   onRangeChange={setExportRange}
                   exportJob={activeExportJob}

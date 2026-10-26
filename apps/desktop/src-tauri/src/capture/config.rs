@@ -18,6 +18,56 @@ pub struct RecordingProfile {
     pub audio_bitrate_kbps: i32,
 }
 
+impl RecordingProfile {
+    /// Adapt this profile's output geometry to the capture source's aspect
+    /// ratio.
+    ///
+    /// Screen frames are scaled into the profile box; when the source aspect
+    /// differs from the profile's the historic graph letterboxes the frame
+    /// (`Bounds::build_aspect_fit_filter`), which wastes encoded pixels, wastes
+    /// capture CPU on the pad stage, and — on Windows — disqualifies the
+    /// zero-copy `scale_d3d11` path, whose graph must never distort
+    /// (`gpu_screen_filter`). Deriving the output size from the source keeps
+    /// the profile's budget (the limiting dimension is unchanged) and removes
+    /// the bars, so window and region captures reach the GPU path too.
+    ///
+    /// Camera profiles are returned untouched: their `width`/`height` is a
+    /// device budget handled by `capture::camera_plan`, not a screen box.
+    pub fn for_source_bounds(&self, bounds: Bounds) -> RecordingProfile {
+        if is_camera_profile(&self.id)
+            || bounds.width <= 1
+            || bounds.height <= 1
+            || self.width <= 1
+            || self.height <= 1
+        {
+            return self.clone();
+        }
+
+        // The source is scaled to fill the profile box, exactly like the fit
+        // filter's `force_original_aspect_ratio=decrease` — but both sides are
+        // derived, so neither gains a letterbox.
+        let scale = (f64::from(self.width) / f64::from(bounds.width))
+            .min(f64::from(self.height) / f64::from(bounds.height));
+        let width = even_dimension(f64::from(bounds.width) * scale);
+        let height = even_dimension(f64::from(bounds.height) * scale);
+        if width == self.width && height == self.height {
+            return self.clone();
+        }
+        RecordingProfile {
+            width,
+            height,
+            ..self.clone()
+        }
+    }
+}
+
+/// Round a dimension to the nearest even value ≥ 2 — H.264 4:2:0 needs even
+/// geometry, and the derived profile must stay encodable on every backend.
+fn even_dimension(value: f64) -> i32 {
+    let rounded = value.round().max(2.0) as i64;
+    (rounded - rounded % 2).max(2) as i32
+}
+
 /// Preview quality preference for the in-app webcam feed.
 ///
 /// The preview is decoded from a second FFmpeg output (MJPEG over stdout), so
@@ -201,6 +251,16 @@ impl RecordingConfig {
     /// Resolve the requested profile to a concrete set of encoder/codec parameters.
     pub fn resolve_profile(&self) -> Option<RecordingProfile> {
         resolve_profile_by_id(&self.profile)
+    }
+
+    /// Resolve the profile and pin its output geometry to the source aspect.
+    ///
+    /// Used by the recorder so the encode size, the cursor telemetry transform
+    /// and the manifest all describe the same frame — see
+    /// [`RecordingProfile::for_source_bounds`].
+    pub fn resolve_profile_for_source(&self) -> Option<RecordingProfile> {
+        self.resolve_profile()
+            .map(|profile| profile.for_source_bounds(self.source.bounds))
     }
 
     /// Effective pixel bounds for the recording. For displays and windows this
@@ -750,5 +810,85 @@ mod tests {
     fn validate_still_rejects_unknown_profiles() {
         let err = validate_error(&screen_config("not-a-profile"));
         assert!(err.contains("unknown profile"));
+    }
+
+    fn bounds(width: i32, height: i32) -> Bounds {
+        Bounds {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        }
+    }
+
+    #[test]
+    fn matching_aspect_keeps_the_profile_geometry() {
+        let balanced = resolve_profile_by_id("balanced").expect("balanced");
+        assert_eq!(balanced.for_source_bounds(bounds(1920, 1080)).width, 1920);
+        assert_eq!(balanced.for_source_bounds(bounds(1920, 1080)).height, 1080);
+        // Same 16:9 at another size: unchanged, because the fit filter upscales
+        // small sources today and that behaviour must not change.
+        let from_720 = balanced.for_source_bounds(bounds(1280, 720));
+        assert_eq!((from_720.width, from_720.height), (1920, 1080));
+        // 4K profile onto a 1080p display still delivers 4K.
+        let ultra = resolve_profile_by_id("ultra-4k").expect("ultra-4k");
+        let from_hd = ultra.for_source_bounds(bounds(1920, 1080));
+        assert_eq!((from_hd.width, from_hd.height), (3840, 2160));
+    }
+
+    #[test]
+    fn mismatched_aspect_fills_the_budget_without_bars() {
+        let balanced = resolve_profile_by_id("balanced").expect("balanced");
+        // 4:3 window into a 1080p budget: height-limited, no side bars.
+        let four_three = balanced.for_source_bounds(bounds(1024, 768));
+        assert_eq!((four_three.width, four_three.height), (1440, 1080));
+        // 16:10 display.
+        let sixteen_ten = balanced.for_source_bounds(bounds(1920, 1200));
+        assert_eq!((sixteen_ten.width, sixteen_ten.height), (1728, 1080));
+        // 21:9 window: width-limited.
+        let ultrawide = balanced.for_source_bounds(bounds(2560, 1080));
+        assert_eq!((ultrawide.width, ultrawide.height), (1920, 810));
+        // Portrait region.
+        let portrait = balanced.for_source_bounds(bounds(600, 900));
+        assert_eq!((portrait.width, portrait.height), (720, 1080));
+    }
+
+    #[test]
+    fn derived_geometry_is_always_even_and_never_degenerate() {
+        let balanced = resolve_profile_by_id("balanced").expect("balanced");
+        for (width, height) in [(1367, 769), (3, 5), (1, 1), (16383, 4096)] {
+            let fitted = balanced.for_source_bounds(bounds(width, height));
+            assert_eq!(fitted.width % 2, 0, "{width}x{height} → {fitted:?}");
+            assert_eq!(fitted.height % 2, 0, "{width}x{height} → {fitted:?}");
+            assert!(fitted.width >= 2 && fitted.height >= 2, "{fitted:?}");
+            // The budget is respected: no dimension exceeds the profile box.
+            assert!(fitted.width <= balanced.width, "{fitted:?}");
+            assert!(fitted.height <= balanced.height, "{fitted:?}");
+        }
+    }
+
+    #[test]
+    fn camera_profiles_keep_their_device_budget() {
+        let camera = resolve_profile_by_id("camera-balanced").expect("camera-balanced");
+        // A 4:3 source must not shrink a camera tier's plan budget.
+        let fitted = camera.for_source_bounds(bounds(640, 480));
+        assert_eq!((fitted.width, fitted.height), (camera.width, camera.height));
+        // Legacy `camera-only` is a SCREEN profile, so it does adapt.
+        let legacy = resolve_profile_by_id("camera-only").expect("camera-only");
+        let adapted = legacy.for_source_bounds(bounds(1024, 768));
+        assert_eq!((adapted.width, adapted.height), (1440, 1080));
+    }
+
+    #[test]
+    fn resolve_profile_for_source_adapts_screen_configs() {
+        let mut config = screen_config("balanced");
+        config.source.kind = "window".into();
+        config.source.bounds = bounds(800, 600);
+        let resolved = config
+            .resolve_profile_for_source()
+            .expect("profile resolves");
+        assert_eq!((resolved.width, resolved.height), (1440, 1080));
+        // The untagged resolver stays the raw profile for UI/benchmark use.
+        assert_eq!(config.resolve_profile().expect("raw").width, 1920);
     }
 }

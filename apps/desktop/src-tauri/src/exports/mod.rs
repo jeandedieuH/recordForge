@@ -20,6 +20,7 @@ mod camera;
 mod captions;
 mod cursor;
 mod encoding;
+mod gpu;
 mod keystrokes;
 
 pub(crate) use camera::build_zoompan_expressions;
@@ -691,6 +692,11 @@ pub struct ExportSettings {
     pub range: Option<ExportRange>,
     #[serde(default)]
     pub keystroke_overlay: Option<KeystrokeOverlay>,
+    /// Compositor selection: `auto` (compatibility today, GPU once the Phase 5
+    /// parity gate flips), `gpu` (native wgpu compositor, falls back when the
+    /// plan is outside its feature set) or `compatibility` (always FFmpeg).
+    #[serde(default = "default_export_renderer")]
+    pub renderer: String,
 }
 
 /// Keystroke overlay (Pro): keycap badges for modifier-combo presses captured
@@ -757,6 +763,10 @@ fn default_export_container() -> String {
 
 fn default_chapter_mode() -> String {
     "embed".into()
+}
+
+fn default_export_renderer() -> String {
+    "auto".into()
 }
 
 /// Maximum raster an export may emit, driven by the license tier. `None`
@@ -1339,7 +1349,10 @@ pub fn run_export_harness_spec(spec_json: &[u8]) -> i32 {
     // The harness bypasses `run_render_plan`, so emit the same composition
     // total here — the bench parser expects the field either way.
     let composition_started = std::time::Instant::now();
-    let result = if spec.force_single_pass {
+    // A GPU render is a whole-timeline single pass by construction, so
+    // `forceSinglePass` must not bypass it (that entry point is the FFmpeg
+    // graph without chunking).
+    let result = if spec.force_single_pass && spec.settings.renderer != "gpu" {
         render_composition_window(
             &spec.ffmpeg_path,
             Path::new(&spec.output_path),
@@ -1588,6 +1601,52 @@ fn render_timeline_composition_shared(
     shared: &CompositionShared,
     output_cap: Option<ExportOutputCap>,
 ) -> Result<RenderOutcome> {
+    // The native compositor is a whole-timeline single pass: it decodes with
+    // one FFmpeg sidecar and encodes with another, so neither the chunked
+    // scheduler nor the filter graph applies. Unsupported plans and runtime
+    // failures (device loss, adapter trouble) fall through to the
+    // compatibility renderer below.
+    let renderer = gpu::resolve_renderer(&settings.renderer, plan, settings, shared, asset_paths);
+    match renderer.renderer {
+        gpu::ExportRenderer::Gpu => {
+            info!(
+                project_id,
+                renderer = renderer.renderer.label(),
+                "export: renderer selected"
+            );
+            match gpu::render_timeline_on_gpu(
+                ffmpeg_path,
+                output_path,
+                plan,
+                project_id,
+                asset_paths,
+                settings,
+                encoder,
+                Arc::clone(&cancel),
+                on_progress,
+                shared,
+            ) {
+                Ok(outcome) => return Ok(outcome),
+                Err(error) => {
+                    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                        return Err(error);
+                    }
+                    warn!(
+                        project_id,
+                        error = %error,
+                        "export: GPU render failed; retrying on the compatibility renderer"
+                    );
+                    let _ = std::fs::remove_file(output_path);
+                }
+            }
+        }
+        gpu::ExportRenderer::Compatibility => {
+            if let Some(reason) = renderer.reason.as_deref() {
+                tracing::debug!(project_id, reason, "export: compatibility renderer");
+            }
+        }
+    }
+
     if should_render_chunked(plan, settings) && chunk_temp_space_ok(plan, settings) {
         return render_timeline_chunked(
             ffmpeg_path,
@@ -2520,34 +2579,48 @@ fn render_composition_window(
         && screen_y.abs() < 0.5;
 
     let base_label = "canvas_base";
-    // zoompan emits output timestamps on its own 0-based grid, so a shifted
-    // pass must restore absolute pts for downstream pairing (overlays, plate,
-    // masks) after it runs.
-    let post_zoom_reabs = if abs_pts.is_empty() {
-        String::new()
-    } else {
-        format!(",setpts=PTS{abs_pts}")
-    };
     if can_direct_pad {
         filters.push(format!(
             "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},tpad=stop_mode=add:stop_duration={plan_duration}:color=black,trim=duration={plan_duration},setpts=PTS-STARTPTS{abs_pts},setsar=1[{base_label}]"
         ));
     } else if is_fullscreen_canvas && has_zoom {
-        let (z_expr, x_expr, y_expr) =
-            build_zoompan_expressions(plan, canvas, canvas.width as f64, canvas.height as f64);
-        // Pin the zoompan input to yuv420p so its chroma-subsample origin snap
-        // is always 2px and the cursor registration model stays exact.
+        // Pin the zoom stage's input to yuv420p so its chroma-subsample origin
+        // snap is always 2px and the cursor registration model stays exact.
         filters.push(format!(
-            "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},tpad=stop_mode=add:stop_duration={plan_duration}:color=black,trim=duration={plan_duration},setpts=PTS-STARTPTS{abs_pts},format=yuv420p,zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d=1:s={}x{}:fps={},setsar=1{post_zoom_reabs}[{base_label}]",
-            canvas.width, canvas.height, canvas.fps
+            "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},tpad=stop_mode=add:stop_duration={plan_duration}:color=black,trim=duration={plan_duration},setpts=PTS-STARTPTS{abs_pts},format=yuv420p[zoom_src]"
         ));
+        push_zoom_stage(
+            &mut filters,
+            "[zoom_src]",
+            base_label,
+            plan,
+            canvas,
+            window.first_frame,
+            window.frame_count,
+            canvas.width as f64,
+            canvas.height as f64,
+            &abs_pts,
+        );
     } else if can_pad_canvas && has_zoom {
-        let (z_expr, x_expr, y_expr) = build_zoompan_expressions(plan, canvas, screen_w, screen_h);
         let canvas_w = canvas.width;
         let canvas_h = canvas.height;
-        let canvas_fps = canvas.fps;
         filters.push(format!(
-            "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},tpad=stop_mode=add:stop_duration={plan_duration}:color=black,trim=duration={plan_duration},setpts=PTS-STARTPTS{abs_pts},format=yuv420p,zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d=1:s={screen_w:.0}x{screen_h:.0}:fps={canvas_fps},pad={canvas_w}:{canvas_h}:{screen_x:.0}:{screen_y:.0}:color={background},setsar=1{post_zoom_reabs}[{base_label}]"
+            "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},tpad=stop_mode=add:stop_duration={plan_duration}:color=black,trim=duration={plan_duration},setpts=PTS-STARTPTS{abs_pts},format=yuv420p[zoom_src]"
+        ));
+        push_zoom_stage(
+            &mut filters,
+            "[zoom_src]",
+            "zoom_fitted",
+            plan,
+            canvas,
+            window.first_frame,
+            window.frame_count,
+            screen_w,
+            screen_h,
+            &abs_pts,
+        );
+        filters.push(format!(
+            "[zoom_fitted]pad={canvas_w}:{canvas_h}:{screen_x:.0}:{screen_y:.0}:color={background},setsar=1[{base_label}]"
         ));
     } else {
         // 1. Generate the background plate [bg_plate]
@@ -2588,13 +2661,23 @@ fn render_composition_window(
         }
 
         // 2. Format the fitted video layer [screen_fitted]
-        let mut screen_filter = if has_zoom {
-            let (z_expr, x_expr, y_expr) =
-                build_zoompan_expressions(plan, canvas, screen_w, screen_h);
-            format!(
-                "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},tpad=stop_mode=add:stop_duration={plan_duration}:color=black,trim=duration={plan_duration},setpts=PTS-STARTPTS{abs_pts},format=yuv420p,zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d=1:s={screen_w:.0}x{screen_h:.0}:fps={},setsar=1{post_zoom_reabs}",
-                canvas.fps
-            )
+        let screen_base = "screen_base";
+        if has_zoom {
+            filters.push(format!(
+                "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},tpad=stop_mode=add:stop_duration={plan_duration}:color=black,trim=duration={plan_duration},setpts=PTS-STARTPTS{abs_pts},format=yuv420p[zoom_src]"
+            ));
+            push_zoom_stage(
+                &mut filters,
+                "[zoom_src]",
+                screen_base,
+                plan,
+                canvas,
+                window.first_frame,
+                window.frame_count,
+                screen_w,
+                screen_h,
+                &abs_pts,
+            );
         } else {
             // A zoom-free chunk inside a zoomed timeline still carries the
             // same-size swscale pass identity `zoompan` performed, so its
@@ -2606,43 +2689,42 @@ fn render_composition_window(
             } else {
                 String::new()
             };
-            format!(
-                "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},tpad=stop_mode=add:stop_duration={plan_duration}:color=black,trim=duration={plan_duration},setpts=PTS-STARTPTS{abs_pts}{parity_scale},setsar=1"
-            )
-        };
-        if let Some(mask_idx) = canvas_mask_idx {
+            filters.push(format!(
+                "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},tpad=stop_mode=add:stop_duration={plan_duration}:color=black,trim=duration={plan_duration},setpts=PTS-STARTPTS{abs_pts}{parity_scale},setsar=1[{screen_base}]"
+            ));
+        }
+        let fitted_label = if let Some(mask_idx) = canvas_mask_idx {
             let raw_label = "screen_unmasked";
             let mask_label = "screen_mask_loop";
-            screen_filter.push_str(&format!(",format=rgba[{raw_label}]"));
-            filters.push(screen_filter);
+            filters.push(format!("[{screen_base}]format=rgba[{raw_label}]"));
             filters.push(format!(
                 "[{mask_idx}:v]format=gray,scale={screen_w:.0}:{screen_h:.0},setsar=1,loop=loop=-1:size=1:start=0,fps={},trim=duration={plan_duration},setpts=PTS-STARTPTS[{mask_label}];\
                  [{raw_label}][{mask_label}]alphamerge[screen_fitted]",
                 canvas.fps
             ));
+            "screen_fitted".to_string()
         } else {
-            screen_filter.push_str("[screen_fitted]");
-            filters.push(screen_filter);
-        }
+            screen_base.to_string()
+        };
 
         // The fitted stream is rendered at the full-area geometry; inside
         // side-by-side windows an eval=frame scale resizes it to the smaller
-        // rect and the overlay position exprs re-anchor it — the same
+        // rect and the overlay position exprs re-anchor it - the same
         // per-frame layout switch the preview performs on the playhead.
-        let (fitted_label, overlay_args) = if let Some((sbs_x, sbs_y, sbs_w, sbs_h)) =
-            sbs_screen_rect
-        {
+        let overlay_args = if let Some((sbs_x, sbs_y, sbs_w, sbs_h)) = sbs_screen_rect {
             filters.push(format!(
-                "[screen_fitted]scale=w='if({sbs_expr},{sbs_w:.0},{screen_w:.0})':h='if({sbs_expr},{sbs_h:.0},{screen_h:.0})':eval=frame,setsar=1[screen_fitted_dyn]"
+                "[{fitted_label}]scale=w='if({sbs_expr},{sbs_w:.0},{screen_w:.0})':h='if({sbs_expr},{sbs_h:.0},{screen_h:.0})':eval=frame,setsar=1[screen_fitted_dyn]"
             ));
-            (
-                "screen_fitted_dyn",
-                format!(
-                    "x='if({sbs_expr},{sbs_x:.0},{screen_x:.0})':y='if({sbs_expr},{sbs_y:.0},{screen_y:.0})':eval=frame"
-                ),
+            format!(
+                "x='if({sbs_expr},{sbs_x:.0},{screen_x:.0})':y='if({sbs_expr},{sbs_y:.0},{screen_y:.0})':eval=frame"
             )
         } else {
-            ("screen_fitted", format!("x={screen_x:.0}:y={screen_y:.0}"))
+            format!("x={screen_x:.0}:y={screen_y:.0}")
+        };
+        let fitted_label = if sbs_screen_rect.is_some() {
+            "screen_fitted_dyn".to_string()
+        } else {
+            fitted_label
         };
 
         // 3. Composite screen layer onto background plate [canvas_base]
@@ -3193,7 +3275,7 @@ fn render_composition_window(
             .map(|(x, y, _, _)| (x, y))
             .unwrap_or((0, 0));
         filters.push(format!(
-            "[{current_label}]{items_plate}overlay=x={plate_x}:y={plate_y}:shortest=1:format=auto{enable_suffix}[with_items]"
+            "[{current_label}]{items_plate}overlay=x={plate_x}:y={plate_y}:shortest=1:format=yuv420{enable_suffix}[with_items]"
         ));
         current_label = "with_items".to_string();
     }
@@ -3298,7 +3380,7 @@ fn render_composition_window(
         let plate_x = (rect_x as u64 * out_w as u64) / canvas.width as u64;
         let plate_y = (rect_y as u64 * out_h as u64) / canvas.height as u64;
         filters.push(format!(
-            "[{current_label}]{keys_source}overlay=x={plate_x}:y={plate_y}:shortest=1:format=auto{enable_suffix}[with_keys]"
+            "[{current_label}]{keys_source}overlay=x={plate_x}:y={plate_y}:shortest=1:format=yuv420{enable_suffix}[with_keys]"
         ));
         current_label = "with_keys".to_string();
     }
@@ -3387,14 +3469,16 @@ fn render_composition_window(
             .arg(&spec.path);
     }
     if let Some(frame_plan) = &cursor_plan {
-        // The generated overlay stream is a transparent RGBA rawvideo feed over
-        // stdin; frame timestamps come from the declared rate. Planes pack
-        // side-by-side at their own bounding rects, so the stream is `sum(w)`
-        // wide and `max(h)` tall.
+        // The generated overlay stream is a transparent `yuva420p` rawvideo
+        // feed over stdin; frame timestamps come from the declared rate.
+        // Planes pack side-by-side at their own bounding rects, so the stream
+        // is `sum(w)` wide and `max(h)` tall. Shipping alpha-carrying YUV
+        // (rather than RGBA) skips the per-plane swscale the `overlay` filter
+        // would otherwise insert, and moves 2.5 bytes per pixel instead of 4.
         let (plate_width, plate_height) = (frame_plan.stream_width, frame_plan.stream_height);
-        let queue_size = stdin_thread_queue_size(plate_width as usize * plate_height as usize * 4);
+        let queue_size = stdin_thread_queue_size(cursor::yuva420p_len(plate_width, plate_height));
         command
-            .args(["-f", "rawvideo", "-pix_fmt", "rgba"])
+            .args(["-f", "rawvideo", "-pix_fmt", "yuva420p"])
             .args(["-s", &format!("{}x{}", plate_width, plate_height)])
             .args(["-r", &canvas.fps.to_string()])
             .args(["-thread_queue_size", &queue_size.to_string()])
@@ -4664,10 +4748,43 @@ impl CursorFramePlan {
             .map(|(_, rect)| *rect)
     }
 
-    /// Packed RGBA bytes per frame — the declared rawvideo frame size.
+    /// Packed `yuva420p` bytes per frame — the declared rawvideo frame size.
     fn frame_byte_len(&self) -> usize {
-        self.stream_width as usize * self.stream_height as usize * 4
+        cursor::yuva420p_len(self.stream_width, self.stream_height)
     }
+}
+
+/// Fill one packed stream frame with a fully transparent plate: black-level
+/// luma/chroma and zero alpha (the blend is a no-op at alpha 0).
+fn fill_transparent_plane(dst: &mut [u8], width: usize, height: usize) {
+    let y_size = width * height;
+    let c_size = (width / 2) * (height / 2);
+    dst[..y_size].fill(16);
+    dst[y_size..y_size + 2 * c_size].fill(128);
+    dst[y_size + 2 * c_size..y_size + 2 * c_size + y_size].fill(0);
+}
+
+/// Align a canvas-space plane rect to the 4:2:0 chroma grid: floor the origin,
+/// round the extent up, and clamp to even canvas dimensions. `crop` and
+/// `overlay` address chroma planes at `x >> 1`, so an odd origin or extent
+/// would smear the plane by one luma column/row.
+fn even_plane_rect(
+    rect: (u32, u32, u32, u32),
+    canvas_w: u32,
+    canvas_h: u32,
+) -> (u32, u32, u32, u32) {
+    let x0 = rect.0 & !1;
+    let y0 = rect.1 & !1;
+    let x1 = (rect.0.saturating_add(rect.2) + 1) & !1;
+    let y1 = (rect.1.saturating_add(rect.3) + 1) & !1;
+    let max_w = canvas_w.max(2) & !1;
+    let max_h = canvas_h.max(2) & !1;
+    (
+        x0,
+        y0,
+        (x1.saturating_sub(x0)).max(2).min(max_w),
+        (y1.saturating_sub(y0)).max(2).min(max_h),
+    )
 }
 
 /// Lay out plane rects inside one stream frame, choosing the tiling axis
@@ -4770,6 +4887,116 @@ fn cursor_tile_mode() -> CursorTileMode {
     }
 }
 
+/// `RECORDFORGE_EXPORT_ZOOM_PIECES=0` restores the single-`zoompan` stage for
+/// A/B parity checks; piecewise zoom is on by default.
+fn zoom_pieces_enabled() -> bool {
+    !matches!(
+        std::env::var("RECORDFORGE_EXPORT_ZOOM_PIECES"),
+        Ok(value) if value == "0" || value.eq_ignore_ascii_case("false")
+    )
+}
+
+/// Build this pass's zoom stage into `filters`, emitting `output_label` as the
+/// zoomed stream.
+///
+/// The window is classified into identity / steady / transition runs
+/// (`camera::classify_zoom_pieces`): steady frames use a cached-context
+/// `crop` + multithreaded `scale`, identity frames pass through, and only
+/// animated frames keep `zoompan`. When classification is unavailable (too many
+/// branches) the whole window falls back to a single `zoompan`, which is the
+/// previous behavior.
+#[allow(clippy::too_many_arguments)]
+fn push_zoom_stage(
+    filters: &mut Vec<String>,
+    input_label: &str,
+    output_label: &str,
+    plan: &RenderPlan,
+    canvas: &cursor::RenderCanvas,
+    first_frame: u64,
+    frame_count: u64,
+    screen_w: f64,
+    screen_h: f64,
+    abs_pts: &str,
+) {
+    let (z_expr, x_expr, y_expr) = build_zoompan_expressions(plan, canvas, screen_w, screen_h);
+    let zoompan = format!(
+        "zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d=1:s={screen_w:.0}x{screen_h:.0}:fps={},setsar=1",
+        canvas.fps
+    );
+    // zoompan emits 0-based output PTS, so a shifted pass must restore the
+    // absolute timeline for downstream composites.
+    let reabs = if abs_pts.is_empty() {
+        String::new()
+    } else {
+        format!(",setpts=PTS{abs_pts}")
+    };
+
+    let pieces = if zoom_pieces_enabled() {
+        camera::classify_zoom_pieces(
+            &plan.zoom_segments,
+            canvas,
+            first_frame,
+            frame_count,
+            screen_w,
+            screen_h,
+        )
+    } else {
+        None
+    };
+    let Some(pieces) = pieces else {
+        filters.push(format!("{input_label}{zoompan}{reabs}[{output_label}]"));
+        return;
+    };
+    // Whole-window steady zoom: skip the split/concat bookkeeping entirely.
+    // `crop`/`scale` keep the input timestamps, so no re-anchoring is needed.
+    if let [piece] = pieces.as_slice() {
+        if let camera::ZoomPieceKind::Hold { x, y, w, h } = piece.kind {
+            filters.push(format!(
+                "{input_label}crop={w}:{h}:{x}:{y},scale={screen_w:.0}:{screen_h:.0}:flags=bicubic:threads=auto,setsar=1[{output_label}]"
+            ));
+            return;
+        }
+    }
+
+    let mut split = format!("{input_label}split={}", pieces.len());
+    for index in 0..pieces.len() {
+        split.push_str(&format!("[zs{index}]"));
+    }
+    filters.push(split);
+    let mut branch_labels = String::new();
+    for (index, piece) in pieces.iter().enumerate() {
+        let start = piece.start_frame.saturating_sub(first_frame);
+        let end = piece.end_frame.saturating_sub(first_frame);
+        let label = format!("zo{index}");
+        let body = match piece.kind {
+            camera::ZoomPieceKind::Identity => format!(
+                "trim=start_frame={start}:end_frame={end},setpts=PTS-STARTPTS,setsar=1"
+            ),
+            camera::ZoomPieceKind::Hold { x, y, w, h } => format!(
+                "trim=start_frame={start}:end_frame={end},crop={w}:{h}:{x}:{y},scale={screen_w:.0}:{screen_h:.0}:flags=bicubic:threads=auto,setsar=1,setpts=PTS-STARTPTS"
+            ),
+            camera::ZoomPieceKind::Transition => {
+                format!("trim=start_frame={start}:end_frame={end},{zoompan}")
+            }
+        };
+        filters.push(format!("[zs{index}]{body}[{label}]"));
+        branch_labels.push_str(&format!("[{label}]"));
+    }
+    // `concat` re-bases its output to microseconds, so the last frame lands up
+    // to 1 µs before the background/plate frame it pairs with and
+    // `overlay=shortest=1` drops it. Re-grid the joined stream onto the canvas
+    // frame grid (identical to `zoompan`'s output timing) and shift it back to
+    // the pass's absolute timeline.
+    let fps = canvas.fps.max(1);
+    filters.push(format!(
+        "{branch_labels}concat=n={}:v=1:a=0[zoom_joined]",
+        pieces.len()
+    ));
+    filters.push(format!(
+        "[zoom_joined]settb=1/{fps},setpts=N{abs_pts}[{output_label}]"
+    ));
+}
+
 fn full_screen_cursor_tile(
     screen_rect: (f64, f64, f64, f64),
     frame_count: u64,
@@ -4816,9 +5043,11 @@ fn prepare_cursor_tile(
     let mut max_height = 0u32;
     let mut union: Option<(u32, u32, u32, u32)> = None;
     if frame_count == 0 || renderers.is_empty() {
+        // Even dimensions keep every packed plane on the 4:2:0 grid even when
+        // the cursor never becomes visible in this window.
         return CursorTilePlan {
-            width: 1,
-            height: 1,
+            width: 2,
+            height: 2,
             origins: Arc::new(vec![(0, 0); frame_count.max(1) as usize]),
             script: String::new(),
         };
@@ -4858,16 +5087,18 @@ fn prepare_cursor_tile(
     if !per_frame_origins {
         let Some((ux0, uy0, ux1, uy1)) = union else {
             return CursorTilePlan {
-                width: 1,
-                height: 1,
+                width: 2,
+                height: 2,
                 origins: Arc::new(vec![(0, 0); frame_count.max(1) as usize]),
                 script: String::new(),
             };
         };
         let origin_x = ux0 & !1;
         let origin_y = uy0 & !1;
-        let width = (((ux1.saturating_sub(origin_x) + 2) + 1) & !1).clamp(1, canvas.width.max(1));
-        let height = (((uy1.saturating_sub(origin_y) + 2) + 1) & !1).clamp(1, canvas.height.max(1));
+        let width =
+            (((ux1.saturating_sub(origin_x) + 2) + 1) & !1).clamp(2, canvas.width.max(2) & !1);
+        let height =
+            (((uy1.saturating_sub(origin_y) + 2) + 1) & !1).clamp(2, canvas.height.max(2) & !1);
         return CursorTilePlan {
             width,
             height,
@@ -4879,8 +5110,8 @@ fn prepare_cursor_tile(
         };
     }
 
-    let width = (((max_width + 2) + 1) & !1).clamp(1, canvas.width.max(1));
-    let height = (((max_height + 2) + 1) & !1).clamp(1, canvas.height.max(1));
+    let width = (((max_width + 2) + 1) & !1).clamp(2, canvas.width.max(2) & !1);
+    let height = (((max_height + 2) + 1) & !1).clamp(2, canvas.height.max(2) & !1);
     let script = build_cursor_sendcmd_script(&origins, first_frame, fps);
     CursorTilePlan {
         width,
@@ -5031,7 +5262,8 @@ fn prepare_cursor_frame_plan(
             let rect = match kind {
                 PlatePlane::Cursor => {
                     // The cursor ships only its animated tile; `sendcmd` moves
-                    // the overlay to each frame's even origin.
+                    // the overlay to each frame's even origin. Tile size and
+                    // origin are already chroma-aligned by `prepare_cursor_tile`.
                     cursor_tile.as_ref().map(|tile| {
                         let (origin_x, origin_y) = tile.origins.first().copied().unwrap_or((0, 0));
                         (
@@ -5059,7 +5291,14 @@ fn prepare_cursor_frame_plan(
                     )
                 }),
             };
-            rect.unwrap_or((0, 0, 1, 1))
+            // Items/keys rects come from a float bounds sweep; snap them to
+            // the 4:2:0 grid. An absent plane still occupies a transparent
+            // 2×2 cell so the packed layout stays valid.
+            let rect = rect.unwrap_or((0, 0, 2, 2));
+            match kind {
+                PlatePlane::Cursor => rect,
+                _ => even_plane_rect(rect, canvas.width, canvas.height),
+            }
         })
         .collect();
     let (plane_offsets, stream_width, stream_height) = pack_plane_layout(&plane_rects);
@@ -5178,33 +5417,56 @@ fn register_overlay_image_asset(
     Ok(())
 }
 
-/// Pack `planes` `plane_w`×`plane_h` RGBA planes into one side-by-side
-/// `(planes.len())*plane_w`×`plane_h` frame, in order. A missing plane
-/// contributes transparent pixels so its composite becomes a no-op.
-/// Pack each plane's pixels into the rawvideo stream at its layout offset.
-/// `plane_sizes[i]`/`offsets[i]` are `(w, h)`/`(x, y)` for plane `i`, and
-/// regions outside every plane stay transparent — a recycled buffer may
-/// carry a previous frame's tail, so clear once up front.
+/// Pack each plane's `yuva420p` pixels into the rawvideo stream at its layout
+/// offset. `plane_sizes[i]`/`offsets[i]` are `(w, h)`/`(x, y)` in luma space
+/// and must be even; each plane's full-resolution Y/A blocks land at the
+/// offset, its quarter-size U/V blocks at half the offset. Regions outside
+/// every plane stay transparent — a recycled buffer may carry a previous
+/// frame's tail, so reset once up front.
 fn pack_overlay_planes(
     dst: &mut [u8],
     plane_sizes: &[(usize, usize)],
     offsets: &[(u32, u32)],
-    stream_row_bytes: usize,
+    stream_width: usize,
+    stream_height: usize,
     planes: &[Option<&[u8]>],
 ) {
     debug_assert_eq!(planes.len(), plane_sizes.len());
     debug_assert_eq!(planes.len(), offsets.len());
-    dst.fill(0);
+    let (cw, ch) = (stream_width / 2, stream_height / 2);
+    let y_size = stream_width * stream_height;
+    let c_size = cw * ch;
+    fill_transparent_plane(dst, stream_width, stream_height);
     for (index, plane) in planes.iter().enumerate() {
         let (plane_w, plane_h) = plane_sizes[index];
         let Some(plane) = plane else { continue };
-        debug_assert_eq!(plane.len(), plane_w * plane_h * 4);
-        let plane_row_bytes = plane_w * 4;
+        debug_assert_eq!(
+            plane.len(),
+            cursor::yuva420p_len(plane_w as u32, plane_h as u32)
+        );
         let (ox, oy) = (offsets[index].0 as usize, offsets[index].1 as usize);
+        let (plane_cw, plane_ch) = (plane_w / 2, plane_h / 2);
+        let plane_c_size = plane_cw * plane_ch;
+        let y_end = plane_w * plane_h;
         for row in 0..plane_h {
-            let dst_start = (oy + row) * stream_row_bytes + ox * 4;
-            dst[dst_start..dst_start + plane_row_bytes]
-                .copy_from_slice(&plane[row * plane_row_bytes..(row + 1) * plane_row_bytes]);
+            let dst_start = (oy + row) * stream_width + ox;
+            dst[dst_start..dst_start + plane_w]
+                .copy_from_slice(&plane[row * plane_w..(row + 1) * plane_w]);
+            let alpha_start = y_size + 2 * c_size + dst_start;
+            let src_alpha = y_end + plane_c_size * 2 + row * plane_w;
+            dst[alpha_start..alpha_start + plane_w]
+                .copy_from_slice(&plane[src_alpha..src_alpha + plane_w]);
+        }
+        let (chroma_x, chroma_y) = (ox / 2, oy / 2);
+        for (plane_kind, base) in [(0usize, y_size), (1usize, y_size + c_size)] {
+            let src_offset = y_end + plane_kind * plane_c_size;
+            let dst_base = base + chroma_y * cw + chroma_x;
+            for row in 0..plane_ch {
+                let dst_start = dst_base + row * cw;
+                let src_start = src_offset + row * plane_cw;
+                dst[dst_start..dst_start + plane_cw]
+                    .copy_from_slice(&plane[src_start..src_start + plane_cw]);
+            }
         }
     }
 }
@@ -5274,7 +5536,9 @@ struct OverlayWorkerState {
     keys_rect: Option<(u32, u32, u32, u32)>,
     items_layer: Option<resvg::tiny_skia::Pixmap>,
     last_display_items: Option<Vec<overlay_engine::DisplayItem>>,
-    cached_unpremultiplied_frame: Option<Arc<Vec<u8>>>,
+    /// Cached `yuva420p` render of the items plane while the evaluated display
+    /// list is unchanged, shared across frames without re-rasterizing.
+    cached_plane: Option<Arc<Vec<u8>>>,
     keys_pixmap: Option<resvg::tiny_skia::Pixmap>,
 }
 
@@ -5312,7 +5576,7 @@ impl OverlayWorkerState {
             keys_rect,
             items_layer: None,
             last_display_items: None,
-            cached_unpremultiplied_frame: None,
+            cached_plane: None,
             keys_pixmap: None,
         })
     }
@@ -5335,7 +5599,7 @@ impl OverlayWorkerState {
             let display_list = engine.evaluate(overlay_time_ms);
             if display_list.items.is_empty() {
                 self.last_display_items = Some(Vec::new());
-                self.cached_unpremultiplied_frame = None;
+                self.cached_plane = None;
             } else if self.last_display_items.as_ref() != Some(&display_list.items) {
                 let (rect_x, rect_y, rect_w, rect_h) = self.items_rect.unwrap_or((
                     0,
@@ -5363,14 +5627,14 @@ impl OverlayWorkerState {
                         (rect_x as f64, rect_y as f64),
                     )
                     .map_err(|error| format!("render overlay frame: {error}"))?;
-                let mut unprem = layer.data().to_vec();
-                cursor::unpremultiply_rgba_bounded(&mut unprem, rect_w as usize);
-                self.cached_unpremultiplied_frame = Some(Arc::new(unprem));
+                let mut plane = vec![0u8; cursor::yuva420p_len(rect_w, rect_h)];
+                cursor::rgba_to_yuva420p(layer.data(), rect_w, rect_h, &mut plane);
+                self.cached_plane = Some(Arc::new(plane));
                 self.last_display_items = Some(display_list.items);
                 timings.items = items_started.elapsed().as_nanos() as u64;
             }
         }
-        let items_plane = self.cached_unpremultiplied_frame.clone();
+        let items_plane = self.cached_plane.clone();
 
         let cursor_started = std::time::Instant::now();
         let cursor_plane = match self.renderers.iter_mut().find(|(start_ms, end_ms, _)| {
@@ -5397,15 +5661,16 @@ impl OverlayWorkerState {
                             origin_x,
                             origin_y,
                         );
-                        let mut plane = self.cursor_pixmap.data().to_vec();
-                        cursor::unpremultiply_rgba_bounded(&mut plane, rw as usize);
+                        let mut plane = vec![0u8; cursor::yuva420p_len(rw, rh)];
+                        cursor::rgba_to_yuva420p(self.cursor_pixmap.data(), rw, rh, &mut plane);
                         Some(plane)
                     }
                     None => {
+                        let (rw, rh) = (self.cursor_pixmap.width(), self.cursor_pixmap.height());
                         renderer.render_frame_at(output_time_ms, self.cursor_pixmap.data_mut());
-                        let stride = self.cursor_pixmap.width() as usize;
-                        cursor::unpremultiply_rgba_bounded(self.cursor_pixmap.data_mut(), stride);
-                        Some(self.cursor_pixmap.data().to_vec())
+                        let mut plane = vec![0u8; cursor::yuva420p_len(rw, rh)];
+                        cursor::rgba_to_yuva420p(self.cursor_pixmap.data(), rw, rh, &mut plane);
+                        Some(plane)
                     }
                 }
             }
@@ -5450,8 +5715,8 @@ impl OverlayWorkerState {
                     pixmap,
                     (rect_x as f64, rect_y as f64),
                 );
-                let mut plane = pixmap.data().to_vec();
-                cursor::unpremultiply_rgba_bounded(&mut plane, rect_w as usize);
+                let mut plane = vec![0u8; cursor::yuva420p_len(rect_w, rect_h)];
+                cursor::rgba_to_yuva420p(pixmap.data(), rect_w, rect_h, &mut plane);
                 Some(plane)
             }
             // Renderer exists but this frame sits outside every badge window.
@@ -5508,9 +5773,11 @@ fn feed_cursor_frames(
         .map(|rect| (rect.2 as usize, rect.3 as usize))
         .collect();
     let plane_offsets = cursor.plane_offsets.clone();
-    let stream_row_bytes = cursor.stream_width as usize * 4;
+    let stream_width = cursor.stream_width as usize;
+    let stream_height = cursor.stream_height as usize;
     let frame_byte_len = cursor.frame_byte_len();
-    let zero_frame = vec![0u8; frame_byte_len];
+    let mut zero_frame = vec![0u8; frame_byte_len];
+    fill_transparent_plane(&mut zero_frame, stream_width, stream_height);
     let frame_count = cursor.frame_count;
 
     // Each worker keeps roughly five live frames (two pixmaps, the cursor
@@ -5673,7 +5940,8 @@ fn feed_cursor_frames(
                                             &mut buffer,
                                             &plane_sizes,
                                             &plane_offsets,
-                                            stream_row_bytes,
+                                            stream_width,
+                                            stream_height,
                                             &slices,
                                         );
                                         ProducedFrame::Bytes(buffer)
@@ -5854,7 +6122,8 @@ fn feed_cursor_frames_sequential(
         .map(|rect| (rect.2 as usize, rect.3 as usize))
         .collect();
     let plane_offsets = cursor.plane_offsets.clone();
-    let stream_row_bytes = cursor.stream_width as usize * 4;
+    let stream_width = cursor.stream_width as usize;
+    let stream_height = cursor.stream_height as usize;
     let multi_plane = cursor.planes.len() > 1;
     let mut packed_frame = if multi_plane {
         vec![0u8; frame_byte_len]
@@ -5907,7 +6176,8 @@ fn feed_cursor_frames_sequential(
                     &mut packed_frame,
                     &plane_sizes,
                     &plane_offsets,
-                    stream_row_bytes,
+                    stream_width,
+                    stream_height,
                     &slices,
                 );
                 packed_frame.as_slice()
@@ -6197,6 +6467,11 @@ pub(crate) fn validate_export_settings(settings: &ExportSettings, plan: &RenderP
     }
     if !matches!(settings.encoder.as_str(), "auto" | "software") {
         return Err(InternalError::Media("export encoder preference is unsupported".into()).into());
+    }
+    if !matches!(settings.renderer.as_str(), "auto" | "gpu" | "compatibility") {
+        return Err(
+            InternalError::Media("export renderer preference is unsupported".into()).into(),
+        );
     }
     if !matches!(
         settings.preset.as_str(),
@@ -9164,6 +9439,7 @@ mod tests {
             chapter_mode: "none".into(),
             range: None,
             keystroke_overlay: None,
+            renderer: "auto".into(),
         };
         assert_eq!(hvc1_tag_args(&hevc), &["-tag:v", "hvc1"]);
         let h264 = ExportSettings {
@@ -9359,6 +9635,167 @@ mod tests {
             keystrokes: Vec::new(),
             keystroke_platform: "unknown".into(),
         }
+    }
+
+    #[test]
+    fn piecewise_zoom_graph_skips_zoompan_for_a_step_zoom() {
+        let mut plan = valid_plan();
+        plan.zoom_segments = vec![RenderPlanZoomSegment {
+            id: "step".into(),
+            start_ms: 1_000,
+            end_ms: 3_000,
+            target: RenderCropFloat {
+                x: 480.0,
+                y: 270.0,
+                width: 960.0,
+                height: 540.0,
+            },
+            scale: 2.0,
+            easing: "linear".into(),
+            transition_in_ms: 0,
+            transition_out_ms: 0,
+            enabled: true,
+            mode: "manual".into(),
+            source: "auto".into(),
+            preset: "product-demo".into(),
+            follow_deadzone_percent: None,
+            follow_smoothing_alpha: None,
+            label: None,
+            from_target: None,
+            from_scale: None,
+            keyframes: None,
+            motion_plan: None,
+        }];
+        let canvas = plan.canvas.clone().expect("canvas");
+        let mut filters = Vec::new();
+        push_zoom_stage(
+            &mut filters,
+            "[zoom_src]",
+            "canvas_base",
+            &plan,
+            &canvas,
+            0,
+            120,
+            1_920.0,
+            1_080.0,
+            "",
+        );
+        let graph = filters.join(";\n");
+        assert!(graph.contains("split=3"), "{graph}");
+        assert!(
+            !graph.contains("zoompan="),
+            "a step zoom has no animated frames: {graph}"
+        );
+        assert!(graph.contains("crop=960:540:480:270"), "{graph}");
+        assert!(graph.contains("scale=1920:1080:flags=bicubic"), "{graph}");
+        assert!(graph.contains("concat=n=3:v=1:a=0"), "{graph}");
+        assert!(
+            graph.contains("settb=1/30,setpts=N"),
+            "concat output must be re-gridded onto the canvas frame grid: {graph}"
+        );
+        assert!(graph.trim_end().ends_with("[canvas_base]"), "{graph}");
+    }
+
+    #[test]
+    fn piecewise_zoom_graph_keeps_animated_phases_on_zoompan() {
+        let mut plan = valid_plan();
+        plan.zoom_segments = vec![RenderPlanZoomSegment {
+            id: "eased".into(),
+            start_ms: 1_000,
+            end_ms: 3_000,
+            target: RenderCropFloat {
+                x: 480.0,
+                y: 270.0,
+                width: 960.0,
+                height: 540.0,
+            },
+            scale: 2.0,
+            easing: "cinematic".into(),
+            transition_in_ms: 500,
+            transition_out_ms: 500,
+            enabled: true,
+            mode: "manual".into(),
+            source: "auto".into(),
+            preset: "product-demo".into(),
+            follow_deadzone_percent: None,
+            follow_smoothing_alpha: None,
+            label: None,
+            from_target: None,
+            from_scale: None,
+            keyframes: None,
+            motion_plan: None,
+        }];
+        let canvas = plan.canvas.clone().expect("canvas");
+        let mut filters = Vec::new();
+        push_zoom_stage(
+            &mut filters,
+            "[zoom_src]",
+            "canvas_base",
+            &plan,
+            &canvas,
+            0,
+            120,
+            1_920.0,
+            1_080.0,
+            "",
+        );
+        let graph = filters.join(";\n");
+        assert!(graph.contains("zoompan="), "{graph}");
+        assert!(graph.contains("crop=960:540:480:270"), "{graph}");
+        assert!(graph.contains("concat=n="), "{graph}");
+    }
+
+    #[test]
+    fn piecewise_zoom_graph_skips_the_split_for_a_whole_window_hold() {
+        let mut plan = valid_plan();
+        plan.zoom_segments = vec![RenderPlanZoomSegment {
+            id: "steady".into(),
+            start_ms: 0,
+            end_ms: 10_000,
+            target: RenderCropFloat {
+                x: 480.0,
+                y: 270.0,
+                width: 960.0,
+                height: 540.0,
+            },
+            scale: 2.0,
+            easing: "linear".into(),
+            transition_in_ms: 0,
+            transition_out_ms: 0,
+            enabled: true,
+            mode: "manual".into(),
+            source: "auto".into(),
+            preset: "product-demo".into(),
+            follow_deadzone_percent: None,
+            follow_smoothing_alpha: None,
+            label: None,
+            from_target: None,
+            from_scale: None,
+            keyframes: None,
+            motion_plan: None,
+        }];
+        let canvas = plan.canvas.clone().expect("canvas");
+        let mut filters = Vec::new();
+        // A shifted (chunked) pass: `crop`/`scale` keep the absolute PTS the
+        // caller already applied, so no second `setpts` may appear.
+        push_zoom_stage(
+            &mut filters,
+            "[zoom_src]",
+            "canvas_base",
+            &plan,
+            &canvas,
+            0,
+            150,
+            1_920.0,
+            1_080.0,
+            "+4.000000/TB",
+        );
+        let graph = filters.join(";\n");
+        assert!(graph.contains("crop=960:540:480:270"), "{graph}");
+        assert!(!graph.contains("split="), "{graph}");
+        assert!(!graph.contains("zoompan="), "{graph}");
+        assert!(!graph.contains("setpts"), "{graph}");
+        assert!(graph.trim_end().ends_with("[canvas_base]"), "{graph}");
     }
 
     #[test]
@@ -9668,6 +10105,7 @@ mod tests {
                 chapter_mode: "embed".into(),
                 range: None,
                 keystroke_overlay: None,
+                renderer: "auto".into(),
             };
             assert!(validate_export_settings(&settings, &plan).is_ok());
         }
@@ -9680,6 +10118,7 @@ mod tests {
             chapter_mode: "embed".into(),
             range: None,
             keystroke_overlay: None,
+            renderer: "auto".into(),
         };
         assert_eq!(audio_bitrate(&settings_4k), "192k");
     }
@@ -9696,6 +10135,7 @@ mod tests {
             chapter_mode: "embed".into(),
             range: None,
             keystroke_overlay: None,
+            renderer: "auto".into(),
         };
         assert!(validate_export_settings(&settings, &plan).is_err());
         settings.encoder = "auto".into();
@@ -9725,60 +10165,81 @@ mod tests {
 
     #[test]
     fn pack_overlay_planes_places_left_and_right_halves() {
-        // 2x2 planes packed into a 4x2 frame: left=cursor, right=items.
-        let left = vec![1u8; 2 * 2 * 4];
-        let right = vec![2u8; 2 * 2 * 4];
-        let mut dst = vec![0u8; 4 * 2 * 4];
+        // 2×2 planes packed into a 4×2 `yuva420p` frame: left=cursor,
+        // right=items. Each plane is Y(4) U(1) V(1) A(4).
+        let left = vec![1u8; 10];
+        let right = vec![2u8; 10];
+        let mut dst = vec![0u8; cursor::yuva420p_len(4, 2)];
         pack_overlay_planes(
             &mut dst,
             &[(2, 2), (2, 2)],
             &[(0, 0), (2, 0)],
-            4 * 4,
+            4,
+            2,
             &[Some(&left), Some(&right)],
         );
-        assert_eq!(
-            dst,
-            vec![
-                1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, // row 0
-                1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, // row 1
-            ]
-        );
+        let y_size = 4 * 2;
+        let c_size = 2;
+        // Luma: left plane's Y at x0..2, right plane's Y at x2..4.
+        assert_eq!(&dst[0..y_size], &[1, 1, 2, 2, 1, 1, 2, 2]);
+        // Chroma: one 2×1 block per plane, so U/V are the plane's own blocks.
+        assert_eq!(&dst[y_size..y_size + c_size], &[1, 2]);
+        assert_eq!(&dst[y_size + c_size..y_size + 2 * c_size], &[1, 2]);
+        // Alpha: full resolution, same layout as luma.
+        let alpha = y_size + 2 * c_size;
+        assert_eq!(&dst[alpha..alpha + y_size], &[1, 1, 2, 2, 1, 1, 2, 2]);
     }
 
     #[test]
     fn pack_overlay_planes_fills_missing_side_with_transparency() {
-        let right = vec![7u8; 2 * 4];
-        let mut dst = vec![9u8; 4 * 4];
+        // Only the right plane is present; the left stays at the transparent
+        // plate's black level / neutral chroma / zero alpha.
+        let right = vec![7u8; 10];
+        let mut dst = vec![9u8; cursor::yuva420p_len(4, 2)];
         pack_overlay_planes(
             &mut dst,
-            &[(2, 1), (2, 1)],
+            &[(2, 2), (2, 2)],
             &[(0, 0), (2, 0)],
-            16,
+            4,
+            2,
             &[None, Some(&right)],
         );
-        assert_eq!(dst, vec![0, 0, 0, 0, 0, 0, 0, 0, 7, 7, 7, 7, 7, 7, 7, 7]);
+        let y_size = 4 * 2;
+        let c_size = 2;
+        assert_eq!(&dst[0..y_size], &[16, 16, 7, 7, 16, 16, 7, 7]);
+        assert_eq!(&dst[y_size..y_size + c_size], &[128, 7]);
+        assert_eq!(&dst[y_size + c_size..y_size + 2 * c_size], &[128, 7]);
+        let alpha = y_size + 2 * c_size;
+        assert_eq!(&dst[alpha..alpha + y_size], &[0, 0, 7, 7, 0, 0, 7, 7]);
     }
 
     #[test]
     fn pack_overlay_planes_handles_uneven_plane_heights() {
-        // Planes pack at their own rects: a tall left plane beside a 1px
+        // Planes pack at their own rects: a tall left plane beside a short
         // right plane leaves the second row's right slot transparent.
-        let left = vec![3u8; 2 * 2 * 4];
-        let right = vec![8u8; 4];
-        let mut dst = vec![0u8; (2 + 1) * 2 * 4];
+        let left = vec![3u8; cursor::yuva420p_len(2, 4)];
+        let right = vec![8u8; cursor::yuva420p_len(2, 2)];
+        let mut dst = vec![0u8; cursor::yuva420p_len(4, 4)];
         pack_overlay_planes(
             &mut dst,
-            &[(2, 2), (1, 1)],
+            &[(2, 4), (2, 2)],
             &[(0, 0), (2, 0)],
-            (2 + 1) * 4,
+            4,
+            4,
             &[Some(&left), Some(&right)],
         );
+        let y_size = 4 * 4;
+        let c_size = 2 * 2;
         assert_eq!(
-            dst,
-            vec![
-                3, 3, 3, 3, 3, 3, 3, 3, 8, 8, 8, 8, // row 0: both planes
-                3, 3, 3, 3, 3, 3, 3, 3, 0, 0, 0, 0, // row 1: right plane ended
-            ]
+            &dst[0..y_size],
+            &[3, 3, 8, 8, 3, 3, 8, 8, 3, 3, 16, 16, 3, 3, 16, 16]
+        );
+        assert_eq!(&dst[y_size..y_size + c_size], &[3, 8, 3, 128]);
+        assert_eq!(&dst[y_size + c_size..y_size + 2 * c_size], &[3, 8, 3, 128]);
+        let alpha = y_size + 2 * c_size;
+        assert_eq!(
+            &dst[alpha..alpha + y_size],
+            &[3, 3, 8, 8, 3, 3, 8, 8, 3, 3, 0, 0, 3, 3, 0, 0]
         );
     }
 
@@ -10657,6 +11118,7 @@ mod tests {
             chapter_mode: "embed".into(),
             range: None,
             keystroke_overlay: None,
+            renderer: "auto".into(),
         };
 
         let res = render_timeline_composition(
@@ -10928,6 +11390,7 @@ mod tests {
                 chapter_mode: mode.into(),
                 range: None,
                 keystroke_overlay: None,
+                renderer: "auto".into(),
             };
             assert!(validate_export_settings(&settings, &p).is_ok());
         }
@@ -10943,6 +11406,7 @@ mod tests {
             chapter_mode: "invalid_mode".into(),
             range: None,
             keystroke_overlay: None,
+            renderer: "auto".into(),
         };
         assert!(validate_export_settings(&settings, &p).is_err());
     }
@@ -10962,6 +11426,7 @@ mod tests {
                 chapter_mode: "none".into(),
                 range: None,
                 keystroke_overlay: None,
+                renderer: "auto".into(),
             };
             assert!(validate_export_settings(&settings, &p).is_ok());
         }
@@ -10978,6 +11443,7 @@ mod tests {
             chapter_mode: "embed".into(),
             range: None,
             keystroke_overlay: None,
+            renderer: "auto".into(),
         };
         assert!(validate_export_settings(&settings, &p).is_ok());
 
@@ -10993,6 +11459,7 @@ mod tests {
             chapter_mode: "sidecar".into(),
             range: None,
             keystroke_overlay: None,
+            renderer: "auto".into(),
         };
         assert!(validate_export_settings(&settings_sidecar, &p_sidecar).is_ok());
     }
@@ -11017,6 +11484,7 @@ mod tests {
                 chapter_mode: "none".into(),
                 range: None,
                 keystroke_overlay: None,
+                renderer: "auto".into(),
             };
             assert!(validate_export_settings(&settings, &p).is_ok());
         }
@@ -11033,6 +11501,7 @@ mod tests {
             chapter_mode: "embed".into(),
             range: None,
             keystroke_overlay: None,
+            renderer: "auto".into(),
         };
         assert!(validate_export_settings(&settings, &p).is_ok());
 
@@ -11048,6 +11517,7 @@ mod tests {
             chapter_mode: "sidecar".into(),
             range: None,
             keystroke_overlay: None,
+            renderer: "auto".into(),
         };
         assert!(validate_export_settings(&settings_sidecar, &p_sidecar).is_ok());
     }
@@ -11065,6 +11535,7 @@ mod tests {
             chapter_mode: "none".into(),
             range: None,
             keystroke_overlay: None,
+            renderer: "auto".into(),
         };
         plan.duration_ms = 60_000;
         assert!(validate_export_settings(&gif_settings, &plan).is_ok());
@@ -11080,6 +11551,7 @@ mod tests {
             chapter_mode: "embed".into(),
             range: None,
             keystroke_overlay: None,
+            renderer: "auto".into(),
         };
         plan.duration_ms = 120_000;
         plan.chapter_mode = "embed".into();
@@ -11099,6 +11571,7 @@ mod tests {
             chapter_mode: "embed".into(),
             range: None,
             keystroke_overlay: None,
+            renderer: "auto".into(),
         };
         // 1920*1080*30 * 0.01 bpp * 60 s / 8 + 128k/8 * 60 s.
         let expected = (1920.0 * 1080.0 * 30.0 * 0.01 * 60.0 / 8.0 + 128_000.0 / 8.0 * 60.0) as u64;
@@ -11440,6 +11913,7 @@ mod tests {
             chapter_mode: "embed".into(),
             range: None,
             keystroke_overlay: None,
+            renderer: "auto".into(),
         };
 
         let res = render_timeline_composition(
@@ -11554,6 +12028,7 @@ mod tests {
             chapter_mode: "none".into(),
             range: None,
             keystroke_overlay: None,
+            renderer: "auto".into(),
         };
 
         let res = render_timeline_composition(
@@ -11690,6 +12165,7 @@ mod tests {
                 chapter_mode: "none".into(),
                 range: None,
                 keystroke_overlay: None,
+                renderer: "auto".into(),
             };
 
             let res = render_timeline_composition(
@@ -11791,6 +12267,7 @@ mod tests {
                 chapter_mode: "none".into(),
                 range: None,
                 keystroke_overlay: None,
+                renderer: "auto".into(),
             };
 
             let res = render_timeline_composition(
@@ -11913,6 +12390,7 @@ mod tests {
                 chapter_mode: "none".into(),
                 range: None,
                 keystroke_overlay: None,
+                renderer: "auto".into(),
             };
 
             let res = render_timeline_composition(
@@ -12017,6 +12495,7 @@ mod tests {
                 chapter_mode: "none".into(),
                 range: None,
                 keystroke_overlay: None,
+                renderer: "auto".into(),
             };
 
             let res = render_timeline_composition(
@@ -12123,6 +12602,7 @@ mod tests {
                 chapter_mode: "none".into(),
                 range: None,
                 keystroke_overlay: None,
+                renderer: "auto".into(),
             };
 
             let res = render_timeline_composition(
@@ -12258,6 +12738,7 @@ mod tests {
             chapter_mode: "none".into(),
             range: None,
             keystroke_overlay: None,
+            renderer: "auto".into(),
         };
 
         let res = render_timeline_composition(
@@ -12382,6 +12863,7 @@ mod tests {
             chapter_mode: "none".into(),
             range: None,
             keystroke_overlay: None,
+            renderer: "auto".into(),
         };
 
         let res = render_timeline_composition(
@@ -12695,6 +13177,7 @@ mod tests {
             chapter_mode: "embed".into(),
             range: None,
             keystroke_overlay: None,
+            renderer: "auto".into(),
         };
         let res = render_timeline_composition(
             &ffmpeg.to_string_lossy(),
@@ -13201,6 +13684,7 @@ mod tests {
             chapter_mode: "embed".into(),
             range: None,
             keystroke_overlay: None,
+            renderer: "auto".into(),
         };
 
         let res = render_timeline_composition(
@@ -13612,6 +14096,7 @@ mod tests {
             chapter_mode: "embed".into(),
             range: None,
             keystroke_overlay: None,
+            renderer: "auto".into(),
         };
 
         let res = render_timeline_composition(
@@ -13833,6 +14318,7 @@ mod tests {
             chapter_mode: "embed".into(),
             range: None,
             keystroke_overlay: None,
+            renderer: "auto".into(),
         };
 
         let res = render_timeline_composition(
@@ -14025,6 +14511,7 @@ mod tests {
             chapter_mode: "embed".into(),
             range: None,
             keystroke_overlay: None,
+            renderer: "auto".into(),
         };
 
         let res = render_timeline_composition(
@@ -14231,6 +14718,7 @@ mod tests {
             chapter_mode: "none".into(),
             range: None,
             keystroke_overlay: None,
+            renderer: "auto".into(),
         };
 
         let res = render_timeline_composition(
@@ -14407,6 +14895,7 @@ mod tests {
             chapter_mode: "none".into(),
             range: None,
             keystroke_overlay: None,
+            renderer: "auto".into(),
         };
 
         let res = render_timeline_composition(

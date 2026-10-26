@@ -167,6 +167,7 @@ describe("freeExportSettings", () => {
     preset: "ultra-4k",
     codec: "h264",
     encoder: "auto",
+    renderer: "auto",
     container: "mp4",
     captionMode: "burn-in",
     chapterMode: "embed",

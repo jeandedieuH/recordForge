@@ -4,6 +4,7 @@ import {
   defaultSmartZoomSettings,
   recordingPreferencesSchema,
   type ExportEncoderPreference,
+  type ExportRendererPreference,
   type ExportPreset,
   type ExportRange,
   type ExportDeliveries,
@@ -159,6 +160,7 @@ interface TimelineStore {
   setExportPreset: (preset: ExportPreset) => void
   setExportCodec: (codec: "h264" | "hevc" | "gif" | "webp") => void
   setExportEncoder: (encoder: ExportEncoderPreference) => void
+  setExportRenderer: (renderer: ExportRendererPreference) => void
   setExportRange: (range: ExportRange | undefined) => void
   cancelExport: () => Promise<void>
   retryExport: () => Promise<void>
@@ -1301,6 +1303,17 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     const nextProject = {
       ...project,
       exportSettings: { ...project.exportSettings, encoder },
+      updatedAt: new Date().toISOString(),
+    }
+    get().markProjectChanged(nextProject)
+  },
+
+  setExportRenderer: (renderer) => {
+    const project = get().project
+    if (!project || project.exportSettings.renderer === renderer) return
+    const nextProject = {
+      ...project,
+      exportSettings: { ...project.exportSettings, renderer },
       updatedAt: new Date().toISOString(),
     }
     get().markProjectChanged(nextProject)

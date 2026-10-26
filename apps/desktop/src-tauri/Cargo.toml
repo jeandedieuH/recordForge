@@ -67,6 +67,17 @@ image = { version = "0.25.10", default-features = false, features = ["png", "jpe
 # Exact pin matching overlay-engine: the caption ASS writer measures text with
 # HarfBuzz so chip widths and line centers match the editor-core estimator.
 rustybuzz = "=0.20.1"
+# Native GPU export compositor (ADR 018, Phase 5). FFmpeg keeps decode/encode;
+# wgpu only composites the frames the FFmpeg graph used to blend. Pinned to a
+# release older than 7 days; DX12/Vulkan/Metal/GLES cover every V1 target.
+wgpu = { version = "30.0.1", default-features = false, features = [
+    "std",
+    "wgsl",
+    "dx12",
+    "metal",
+    "vulkan",
+    "gles",
+] }
 
 [target.'cfg(windows)'.dependencies]
 wasapi = "0.23.0"

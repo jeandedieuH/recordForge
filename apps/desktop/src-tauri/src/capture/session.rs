@@ -642,7 +642,12 @@ impl Recorder {
             }
         }
 
-        let profile = config.resolve_profile().ok_or_else(|| {
+        // The output geometry is derived from the source aspect so window and
+        // region captures are not letterboxed into the profile box (which also
+        // disqualifies the zero-copy GPU capture path). Pinned here for the
+        // whole session: a window that later moves or resizes keeps recording
+        // into this frame via the fit filter, so resumed segments concatenate.
+        let profile = config.resolve_profile_for_source().ok_or_else(|| {
             crate::errors::InternalError::Capture(format!("unknown profile: {}", config.profile))
         })?;
         let session_id = uuid::Uuid::new_v4().to_string();
@@ -2275,7 +2280,13 @@ impl Recorder {
             let ffmpeg_path = self.ffmpeg_path.clone();
             let work_dir = session.work_dir.clone();
             let webcam_segments = session.webcam_segments.clone();
-            let profile = session.profile.clone();
+            // The standalone webcam asset keeps the selected profile's canvas.
+            // `session.profile` has been fitted to the *screen source* aspect,
+            // which must not resize the camera track.
+            let profile = session
+                .config
+                .resolve_profile()
+                .unwrap_or_else(|| session.profile.clone());
             let available_encoders = self.available_encoders.clone();
             let capture_webcam = session.config.capture_webcam;
             let failed = session.webcam_capture_failed;

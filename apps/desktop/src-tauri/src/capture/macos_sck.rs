@@ -29,6 +29,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use screencapturekit::cm::{AudioBuffer, AudioBufferList};
+use screencapturekit::cv::CVPixelBufferLockGuard;
 use screencapturekit::prelude::*;
 
 use super::audio::wav::{
@@ -49,7 +50,37 @@ const FRAME_QUEUE_DEPTH: usize = 3;
 /// the stream dead (cold stream startup, permission denied mid-flight).
 const AUDIO_STARTUP_TIMEOUT: Duration = Duration::from_millis(2500);
 
-/// A tightly-packed BGRA frame ready for `rawvideo` consumption.
+/// How ScreenCaptureKit delivers frames on the wire.
+///
+/// NV12 (`420v`) is preferred: the stream is scaled on the GPU to the final
+/// output size, the pipe carries 1.5 bytes per pixel instead of 4, and
+/// VideoToolbox consumes the frames without a conversion. Packed BGRA stays as
+/// the fallback (and for region captures, which crop in the filter chain and so
+/// need the full display frame).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SckFrameFormat {
+    Nv12,
+    Bgra,
+}
+
+impl SckFrameFormat {
+    fn pixel_format(self) -> PixelFormat {
+        match self {
+            Self::Nv12 => PixelFormat::YCbCr_420v,
+            Self::Bgra => PixelFormat::BGRA,
+        }
+    }
+
+    /// FFmpeg `-pixel_format` for the `rawvideo` fd-3 input.
+    fn ffmpeg_pixel_format(self) -> &'static str {
+        match self {
+            Self::Nv12 => "nv12",
+            Self::Bgra => "bgra",
+        }
+    }
+}
+
+/// A tightly-packed BGRA or NV12 frame ready for `rawvideo` consumption.
 struct PackedFrame(Vec<u8>);
 
 // ---------------------------------------------------------------------------
@@ -78,8 +109,9 @@ pub fn sck_streaming_available() -> bool {
 struct ResolvedSource {
     display: Option<SCDisplay>,
     window: Option<SCWindow>,
-    /// Output frame size in physical pixels (what `config.width/height` asks
-    /// for and therefore what every `CVPixelBuffer` delivers).
+    /// Native frame size of the source in physical pixels. Region captures
+    /// stream at this size (the crop happens in FFmpeg); display and window
+    /// captures ask SCK to scale straight to the recording's output size.
     width: u32,
     height: u32,
     /// Region/window crop in *stream* coordinates — consumed by the shared
@@ -146,10 +178,20 @@ fn run_frame_writer(rx: Receiver<PackedFrame>, write_fd: OwnedFd, stop: Arc<Atom
     }
 }
 
-/// Lock the pixel buffer and copy into a tightly-packed `w*h*4` buffer.
+/// How long a freshly started stream may take to deliver its first frame before
+/// the format is considered unusable and the next candidate is tried. SCK's
+/// first frame during a steady capture lands in tens of milliseconds; a slow
+/// machine plus a cold stream still fits comfortably.
+const FIRST_FRAME_TIMEOUT: Duration = Duration::from_millis(1200);
+
+/// Lock the pixel buffer and copy into a tightly-packed frame.
+///
 /// `bytes_per_row` may carry padding, so rows copy individually when they
 /// don't line up — the `rawvideo` demuxer sees a contiguous W×H×BPP image.
-fn pack_bgra(sample: &CMSampleBuffer, frame_tx: &SyncSender<PackedFrame>) {
+/// `produced` is raised on the first frame handed to the writer, which is how
+/// the start path tells a working stream from one whose frames are silently
+/// dropping.
+fn pack_bgra(sample: &CMSampleBuffer, frame_tx: &SyncSender<PackedFrame>, produced: &AtomicBool) {
     let Some(buffer) = sample.pixel_buffer() else {
         return;
     };
@@ -177,7 +219,80 @@ fn pack_bgra(sample: &CMSampleBuffer, frame_tx: &SyncSender<PackedFrame>) {
     drop(guard);
     // Never block the SCK output queue: a full channel means ffmpeg is
     // behind, so the oldest frame is the one to sacrifice.
-    let _ = frame_tx.try_send(PackedFrame(frame));
+    if frame_tx.try_send(PackedFrame(frame)).is_ok() {
+        produced.store(true, Ordering::Release);
+    }
+}
+
+/// Copy a two-plane `420v` buffer into the contiguous NV12 layout `rawvideo`
+/// reads. A buffer that is not actually bi-planar (the OS ignored the pixel
+/// format) is dropped rather than misread as BGRA — the capture then fails its
+/// startup check and the caller falls back to the BGRA stream.
+fn pack_nv12(sample: &CMSampleBuffer, frame_tx: &SyncSender<PackedFrame>, produced: &AtomicBool) {
+    let Some(buffer) = sample.pixel_buffer() else {
+        return;
+    };
+    let Ok(guard) = buffer.lock_read_only() else {
+        return;
+    };
+    if guard.plane_count() < 2 {
+        return;
+    }
+    let (width, height) = (guard.width(), guard.height());
+    if width == 0 || height == 0 || !width.is_multiple_of(2) || !height.is_multiple_of(2) {
+        return;
+    }
+    let (Some(luma_base), Some(chroma_base)) = (plane_base(&guard, 0), plane_base(&guard, 1))
+    else {
+        return;
+    };
+    let luma_stride = guard.bytes_per_row_of_plane(0);
+    let chroma_stride = guard.bytes_per_row_of_plane(1);
+    // SAFETY: a locked CVPixelBuffer plane maps at least `bytesPerRow * rows`
+    // bytes (`rows` is the plane's own height: full for luma, half for chroma),
+    // so the slices stay inside the allocation. `guard` holds the lock for the
+    // whole copy.
+    let (luma, chroma) = unsafe {
+        (
+            super::nv12::Nv12Plane {
+                data: std::slice::from_raw_parts(luma_base, luma_stride * height),
+                offset: 0,
+                stride: luma_stride,
+            },
+            super::nv12::Nv12Plane {
+                data: std::slice::from_raw_parts(chroma_base, chroma_stride * (height / 2)),
+                offset: 0,
+                stride: chroma_stride,
+            },
+        )
+    };
+    let packed = super::nv12::pack_nv12(luma, chroma, width as u32, height as u32);
+    drop(guard);
+    if let Some(frame) = packed {
+        if frame_tx.try_send(PackedFrame(frame)).is_ok() {
+            produced.store(true, Ordering::Release);
+        }
+    }
+}
+
+/// Non-null base address of one plane, as a `*const u8`.
+fn plane_base(guard: &CVPixelBufferLockGuard<'_>, plane: usize) -> Option<*const u8> {
+    guard
+        .base_address_of_plane(plane)
+        .filter(|base| !base.is_null())
+}
+
+/// Dispatch a sample to the packer that matches the stream's wire format.
+fn pack_frame(
+    sample: &CMSampleBuffer,
+    frame_tx: &SyncSender<PackedFrame>,
+    format: SckFrameFormat,
+    produced: &AtomicBool,
+) {
+    match format {
+        SckFrameFormat::Nv12 => pack_nv12(sample, frame_tx, produced),
+        SckFrameFormat::Bgra => pack_bgra(sample, frame_tx, produced),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -200,6 +315,8 @@ pub struct MacosSckCapture {
     height: u32,
     fps: u32,
     crop: Option<Bounds>,
+    /// Wire format the stream was started with (NV12 or BGRA).
+    frame_format: SckFrameFormat,
 }
 
 impl std::fmt::Debug for MacosSckCapture {
@@ -209,8 +326,66 @@ impl std::fmt::Debug for MacosSckCapture {
             .field("height", &self.height)
             .field("fps", &self.fps)
             .field("crop", &self.crop)
+            .field("frame_format", &self.frame_format)
             .finish_non_exhaustive()
     }
+}
+
+/// Create, wire and start one `SCStream` attempt for a pixel format.
+///
+/// Split out of `start_if_available` so a rejected format (bad config, missing
+/// hardware path) can be retried with the fallback instead of aborting macOS
+/// capture entirely.
+fn start_stream(
+    filter: &SCContentFilter,
+    format: SckFrameFormat,
+    width: u32,
+    height: u32,
+    frame_interval: &CMTime,
+    frame_tx: SyncSender<PackedFrame>,
+) -> Result<(SCStream, Arc<AtomicBool>)> {
+    let produced = Arc::new(AtomicBool::new(false));
+    let handler_produced = Arc::clone(&produced);
+    let config = SCStreamConfiguration::new()
+        .with_width(width)
+        .with_height(height)
+        .with_pixel_format(format.pixel_format())
+        // The overlay engine draws its own cursor — hide the system one.
+        .with_shows_cursor(false)
+        .with_minimum_frame_interval(frame_interval)
+        // Bound the SCK queue; a stalled downstream must not balloon.
+        .with_queue_depth(8)
+        .with_scales_to_fit(true);
+
+    let mut stream = SCStream::new(filter, &config)
+        .map_err(|e| InternalError::Capture(format!("create SCK stream: {e}")))?;
+    stream
+        .add_output_handler(
+            move |sample, _of_type| pack_frame(&sample, &frame_tx, format, &handler_produced),
+            SCStreamOutputType::Screen,
+        )
+        .map_err(|e| InternalError::Capture(format!("attach SCK output handler: {e}")))?;
+    stream
+        .start_capture()
+        .map_err(|e| InternalError::Capture(format!("start SCK capture: {e}")))?;
+    Ok((stream, produced))
+}
+
+/// Wait for a start attempt's first packed frame.
+///
+/// A stream can start successfully and still deliver frames the packer rejects
+/// (for example an OS that ignores `420v` and hands back a single BGRA plane).
+/// Treating "no frame produced" as a failed attempt keeps that from turning
+/// into an empty recording: the caller retries the next format.
+fn await_first_frame(produced: &AtomicBool) -> bool {
+    let deadline = Instant::now() + FIRST_FRAME_TIMEOUT;
+    while Instant::now() < deadline {
+        if produced.load(Ordering::Acquire) {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    produced.load(Ordering::Acquire)
 }
 
 impl MacosSckCapture {
@@ -262,30 +437,64 @@ impl MacosSckCapture {
         }
         .map_err(|e| InternalError::Capture(format!("build SCK content filter: {e}")))?;
 
+        // Non-region captures are scaled by ScreenCaptureKit straight to the
+        // recording's output size (which `RecordingProfile::for_source_bounds`
+        // has already fitted to the source aspect), so the filter chain has no
+        // scale/pad stage left. A region still streams the whole display and
+        // crops in FFmpeg, because the crop rect is expressed in display
+        // pixels.
+        let (stream_width, stream_height) = if resolved.crop.is_some() {
+            (resolved.width, resolved.height)
+        } else {
+            (profile.width.max(2) as u32, profile.height.max(2) as u32)
+        };
+
         let frame_interval = CMTime::new(1, profile.fps.max(1));
-        let config = SCStreamConfiguration::new()
-            .with_width(resolved.width)
-            .with_height(resolved.height)
-            .with_pixel_format(PixelFormat::BGRA)
-            // The overlay engine draws its own cursor — hide the system one.
-            .with_shows_cursor(false)
-            .with_minimum_frame_interval(&frame_interval)
-            // Bound the SCK queue; a stalled downstream must not balloon.
-            .with_queue_depth(8)
-            .with_scales_to_fit(true);
 
-        let mut stream = SCStream::new(&filter, &config)
-            .map_err(|e| InternalError::Capture(format!("create SCK stream: {e}")))?;
-        stream
-            .add_output_handler(
-                move |sample, _of_type| pack_bgra(&sample, &frame_tx),
-                SCStreamOutputType::Screen,
-            )
-            .map_err(|e| InternalError::Capture(format!("attach SCK output handler: {e}")))?;
-
-        stream
-            .start_capture()
-            .map_err(|e| InternalError::Capture(format!("start SCK capture: {e}")))?;
+        // Prefer NV12; a stream that refuses it (older SCK builds, an OS that
+        // ignores the requested pixel format) falls back to packed BGRA at the
+        // same output size.
+        let mut started = None;
+        for format in [SckFrameFormat::Nv12, SckFrameFormat::Bgra] {
+            if format == SckFrameFormat::Nv12 && resolved.crop.is_some() {
+                continue;
+            }
+            let attempt = start_stream(
+                &filter,
+                format,
+                stream_width,
+                stream_height,
+                &frame_interval,
+                frame_tx.clone(),
+            );
+            match attempt {
+                Ok((stream, produced)) if await_first_frame(&produced) => {
+                    started = Some((stream, format, stream_width, stream_height));
+                    break;
+                }
+                Ok((stream, _)) => {
+                    tracing::warn!(
+                        ?format,
+                        "ScreenCaptureKit stream produced no packable frame; falling back"
+                    );
+                    let _ = stream.stop_capture();
+                    drop(stream);
+                    // Frames from the abandoned attempt must not reach the next
+                    // format's pipe (their layout differs).
+                    while frame_rx.try_recv().is_ok() {}
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        ?error,
+                        ?format,
+                        "ScreenCaptureKit stream start failed; trying the next pixel format"
+                    );
+                }
+            }
+        }
+        let Some((stream, frame_format, width, height)) = started else {
+            return Ok(None);
+        };
 
         let stop = Arc::new(AtomicBool::new(false));
         let writer_stop = Arc::clone(&stop);
@@ -296,9 +505,10 @@ impl MacosSckCapture {
 
         let read_fd_raw = read_fd.as_raw_fd();
         tracing::info!(
-            width = resolved.width,
-            height = resolved.height,
+            width,
+            height,
             fps = profile.fps,
+            pixel_format = frame_format.ffmpeg_pixel_format(),
             "started ScreenCaptureKit stream"
         );
 
@@ -308,17 +518,18 @@ impl MacosSckCapture {
             read_fd: read_fd_raw,
             frame_writer: Some(frame_writer),
             stop,
-            width: resolved.width,
-            height: resolved.height,
+            width,
+            height,
             fps: profile.fps.max(1) as u32,
             crop: resolved.crop,
+            frame_format,
         }))
     }
 
     /// The `rawvideo` input descriptor for the FFmpeg command.
     pub fn video_input(&self) -> PipeWireVideoInput {
         PipeWireVideoInput {
-            pixel_format: "bgra",
+            pixel_format: self.frame_format.ffmpeg_pixel_format(),
             width: self.width,
             height: self.height,
             framerate_num: self.fps,

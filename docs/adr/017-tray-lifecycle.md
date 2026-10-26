@@ -26,6 +26,13 @@ The updater must also always be able to terminate the app: the Windows
 installer launches the old process, waits for its executable to be released,
 and only then replaces the binary.
 
+A separate installer-level failure was observed on machines with McAfee: the
+Windows Restart Manager reports `McAfee Framework Host` as an `RmCritical`
+process holding `recordforge-desktop.exe`, so `RmShutdown` returns
+`ERROR_FAIL_NOACTION_REBOOT` (350) even when RecordForge is not running. Tauri's
+NSIS template aborts with "Failed to kill RecordForge" and a reboot is the only
+way to release the handle (tauri-apps/tauri#16277).
+
 ## Decision
 
 - **Single instance.** `tauri-plugin-single-instance` is registered first; a
@@ -56,6 +63,13 @@ and only then replaces the binary.
   running") and records `trayHintShown` in settings so it never repeats. The
   notification is native rather than `window.Notification` so it also appears
   while the webview is minimized.
+- **NSIS installer hook neutralizes the Restart Manager dead end.**
+  `src-tauri/installer-hooks.nsh` (`bundle.windows.nsis.installerHooks`) runs
+  before the template's check: it closes a current-user RecordForge, waits for
+  it to exit, then renames the old executable aside so `RmRegisterResources`
+  has no path to report. The template writes the new binary and the
+  post-install hook deletes the backup. Interactive installs keep a
+  confirmation prompt; passive/silent (updater) runs proceed directly.
 
 ## Consequences
 
@@ -69,6 +83,17 @@ and only then replaces the binary.
 - Windows toasts need the installed Start Menu shortcut's AppUserModelID. A
   dev build may not render the hint; the flag stays unset in that case, so the
   packaged build still shows it once.
+- The installer hook is NSIS-only. The MSI package keeps Tauri's stock
+  Restart Manager check and can hit the same third-party handle problem; the
+  updater publishes/uses NSIS on Windows.
+- If the executable cannot be renamed (for example it is held by a process in
+  another user session without delete sharing), the hook leaves it in place and
+  the stock check still reports the failure. The rename itself was verified to
+  work while McAfee held the file.
+- A failed install between the rename and the binary copy leaves
+  `recordforge-desktop.exe.rf-<ticks>` behind; re-running the installer writes
+  the new binary and removes its own backup, but older backups may need manual
+  cleanup.
 - Quit from the tray menu closes the main window rather than calling
   `app.exit` directly, so the editor can flush; if the close guard vetoes the
   close the app stays open.
@@ -83,3 +108,11 @@ and only then replaces the binary.
 - Track tray state in a global flag instead of querying the tray manager:
   rejected — the tray manager owns the icon object; a separate flag could drift
   from it and reintroduce the same bug.
+- Wait for the upstream Tauri fix to `CheckIfAppIsRunning`: rejected for now —
+  the issue is open and the failure blocks every update on affected machines.
+- Fork the full NSIS template to skip the check: rejected — a 34 KB template
+  copy would drift from Tauri's installer fixes; the supported
+  `installerHooks` extension point keeps the workaround small.
+- Publish only the MSI as the Windows updater artifact: rejected — it changes
+  the install/permission model and does not remove Windows Installer's own
+  file-in-use handling.

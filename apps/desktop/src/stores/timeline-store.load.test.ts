@@ -196,6 +196,7 @@ function fakeProject(recordingId: string): recordForgeProject {
       container: "mp4",
       codec: "h264",
       encoder: "auto",
+      renderer: "auto",
       captionMode: "burn-in",
       chapterMode: "embed",
       keystrokeOverlay: { ...defaultKeystrokeOverlaySettings },

@@ -257,6 +257,7 @@ mod tests {
             chapter_mode: "none".to_string(),
             range: None,
             keystroke_overlay: None,
+            renderer: "auto".into(),
         }
     }
 

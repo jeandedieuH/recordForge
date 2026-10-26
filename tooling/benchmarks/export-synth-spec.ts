@@ -5,11 +5,20 @@
  * the "all features" chunked/single-pass specs plus the `abl-<variant>`
  * ablation matrix that isolates the marginal cost of each overlay feature.
  *
- *   bun run tooling/benchmarks/export-synth-spec.ts [outDir] [--encoder <enc>] [--long]
+ *   bun run tooling/benchmarks/export-synth-spec.ts [outDir] [--encoder <enc>] [--renderer <r>] [--long] [--single-pass]
  *
  * `--encoder` (default `software`) is written into each spec's top-level
  * `encoder` field for the harness to resolve; non-software runs get a
  * `_<encoder>` suffix on spec and render file stems so matrices coexist.
+ * `--renderer` (default `compatibility`) sets `settings.renderer`. With
+ * `--renderer gpu` only the gate-compatible ablations (`plain`, `zoom`) are
+ * emitted — the rest need overlay milestones the GPU compositor does not cover
+ * yet — and stems get a `_<renderer>` suffix. `--single-pass` forces every spec
+ * through one encoder pass; use it — with its own outDir — for the compatibility
+ * baselines that will be compared against the single-pass GPU renderer, because
+ * chunked and single-pass x264 encodes of the same frames differ by ~46 dB from
+ * per-chunk rate control alone. The full-feature `synth` spec stays in the
+ * matrix so the automatic fallback is exercised too.
  * `--long` raises the fixture to a 6 min source / 5 min export and emits only
  * the chunked "all" + plain-ablation specs — pass a separate outDir so the
  * long matrix doesn't collide with the 30 s one.
@@ -27,10 +36,13 @@ const scriptDir = dirname(fileURLToPath(import.meta.url))
 // --- args ----------------------------------------------------------------
 
 const VALID_ENCODERS = new Set(["software", "auto", "nvenc", "qsv", "amf", "videotoolbox", "vaapi"])
+const VALID_RENDERERS = new Set(["auto", "gpu", "compatibility"])
 
 let outDirArg: string | undefined
 let encoder = "software"
+let renderer = "compatibility"
 let longMode = false
+let singlePass = false
 const argv = process.argv.slice(2)
 for (let i = 0; i < argv.length; i++) {
   const arg = argv[i]
@@ -40,8 +52,16 @@ for (let i = 0; i < argv.length; i++) {
       console.error(`--encoder must be one of: ${[...VALID_ENCODERS].join(", ")}`)
       process.exit(2)
     }
+  } else if (arg === "--renderer") {
+    renderer = argv[++i] ?? ""
+    if (!VALID_RENDERERS.has(renderer)) {
+      console.error(`--renderer must be one of: ${[...VALID_RENDERERS].join(", ")}`)
+      process.exit(2)
+    }
   } else if (arg === "--long") {
     longMode = true
+  } else if (arg === "--single-pass") {
+    singlePass = true
   } else if (arg.startsWith("--")) {
     console.error(`unknown option: ${arg}`)
     process.exit(2)
@@ -52,6 +72,8 @@ for (let i = 0; i < argv.length; i++) {
 
 const outDir = resolve(outDirArg ?? join(scriptDir, "out", "synth"))
 const encSuffix = encoder === "software" ? "" : `_${encoder}`
+const rendererSuffix = renderer === "compatibility" ? "" : `_${renderer}`
+const variantSuffix = `${encSuffix}${rendererSuffix}`
 mkdirSync(join(outDir, "cursor"), { recursive: true })
 
 // Repo sidecars come from `bun run setup:ffmpeg`; RF_FFMPEG/RF_FFPROBE override.
@@ -438,6 +460,7 @@ const settings = {
   preset: "default-mp4",
   codec: "h264",
   encoder: "auto",
+  renderer,
   container: "mp4",
   captionMode: "burn-in",
   chapterMode: "off",
@@ -459,39 +482,48 @@ interface SpecEntry {
 }
 
 const specs: SpecEntry[] = []
+// With an explicit GPU request only the plans the compositor actually renders
+// are worth measuring; everything else is rejected by the feature gate and
+// would just re-run the compatibility renderer under a different label.
+const gpuCompatible = new Set(["plain", "zoom"])
 if (longMode) {
   specs.push({
-    name: `spec_synth_chunked${encSuffix}`,
-    outputName: `render_synth_chunked${encSuffix}.mp4`,
+    name: `spec_synth_chunked${variantSuffix}`,
+    outputName: `render_synth_chunked${variantSuffix}.mp4`,
     plan: synthPlan,
     assetPaths: baseAssetPaths,
-    forceSinglePass: false,
+    forceSinglePass: singlePass,
   })
   specs.push({
-    name: `spec_abl-plain_chunked${encSuffix}`,
-    outputName: `render_abl-plain_chunked${encSuffix}.mp4`,
+    name: `spec_abl-plain_chunked${variantSuffix}`,
+    outputName: `render_abl-plain_chunked${variantSuffix}.mp4`,
     plan: plainPlan(),
     assetPaths: baseAssetPaths,
-    forceSinglePass: false,
+    forceSinglePass: singlePass,
   })
 } else {
-  for (const single of [false, true]) {
+  // `--single-pass` renders every spec through one encoder pass. The GPU
+  // renderer is always single-pass, so parity baselines meant to be compared
+  // against it must be too: a chunked x264 render differs from a single-pass
+  // render of the same frames by ~46 dB purely from per-chunk rate control.
+  for (const single of singlePass ? [true] : [false, true]) {
     const mode = single ? "single" : "chunked"
     specs.push({
-      name: `spec_synth_${mode}${encSuffix}`,
-      outputName: `render_synth_${mode}${encSuffix}.mp4`,
+      name: `spec_synth_${mode}${variantSuffix}`,
+      outputName: `render_synth_${mode}${variantSuffix}.mp4`,
       plan: synthPlan,
       assetPaths: baseAssetPaths,
       forceSinglePass: single,
     })
   }
   for (const ablation of ablations) {
+    if (renderer === "gpu" && !gpuCompatible.has(ablation.name)) continue
     specs.push({
-      name: `spec_abl-${ablation.name}_chunked${encSuffix}`,
-      outputName: `render_abl-${ablation.name}_chunked${encSuffix}.mp4`,
+      name: `spec_abl-${ablation.name}_chunked${variantSuffix}`,
+      outputName: `render_abl-${ablation.name}_chunked${variantSuffix}.mp4`,
       plan: ablation.plan,
       assetPaths: { ...baseAssetPaths, ...ablation.extraAssets },
-      forceSinglePass: false,
+      forceSinglePass: singlePass,
     })
   }
 }

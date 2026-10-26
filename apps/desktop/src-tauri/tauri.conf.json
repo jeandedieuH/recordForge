@@ -69,6 +69,11 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "windows": {
+      "nsis": {
+        "installerHooks": "installer-hooks.nsh"
+      }
+    },
     "macOS": {
       "minimumSystemVersion": "12.3",
       "infoPlist": "Info.plist",

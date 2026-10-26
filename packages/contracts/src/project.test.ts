@@ -198,6 +198,7 @@ describe("project contract", () => {
       preset: "default-mp4",
       codec: "h264",
       encoder: "auto",
+      renderer: "auto",
       container: "mp4",
       captionMode: "burn-in",
       chapterMode: "embed",
@@ -253,6 +254,7 @@ describe("project contract", () => {
       container: "gif",
       codec: "gif",
       encoder: "auto",
+      renderer: "auto",
       captionMode: "burn-in",
       chapterMode: "none",
       keystrokeOverlay: {
@@ -284,6 +286,7 @@ describe("project contract", () => {
       container: "webp",
       codec: "webp",
       encoder: "auto",
+      renderer: "auto",
       captionMode: "burn-in",
       chapterMode: "none",
       keystrokeOverlay: {

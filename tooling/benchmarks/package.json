@@ -10,6 +10,7 @@
     "benchmark:export:synth": "bun run export-synth-spec.ts",
     "benchmark:export": "bun run export-bench.ts",
     "benchmark:parity": "bun run parity.ts",
+    "benchmark:zoom-pieces": "bun run zoom-pieces-ab.ts",
     "typecheck": "tsc --noEmit",
     "format:check": "prettier --check .",
     "format": "prettier --write ."
