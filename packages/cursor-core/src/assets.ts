@@ -106,9 +106,9 @@ const PRESET_SVGS: Record<CursorAssetId, Omit<CursorAsset, "id" | "label">> = {
     hotspotY: 2.5,
     isCenterHotspot: false,
     svg: `<g transform="translate(0.5, 0.5)">
-      <path d="M 8.5 2 C 7.6 2 7 2.7 7 3.6 L 7 10.2 C 6.2 9.6 5.1 9.4 4.1 10.1 C 3.1 10.9 2.8 12.2 3.3 13.6 C 4 15.6 5.6 19.2 8.5 20.8 C 9.6 21.4 11.1 21.5 13 21.5 C 16.5 21.5 18 19.8 18.2 17.5 L 18.2 12.8 C 18.2 11.8 17.3 11 16.3 11 C 15.8 11 15.4 11.2 15 11.5 C 14.8 10.4 13.9 9.6 12.8 9.6 C 12.4 9.6 12 9.8 11.7 10 C 11.4 8.9 10.4 8.2 9.4 8.2 C 9.1 8.2 8.7 8.3 8.5 8.5 L 8.5 3.6 C 8.5 2.7 7.6 2 8.5 2 Z" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linejoin="round" stroke-linecap="round" />
-      <path d="M 11.7 10.1 C 11.6 11.0 11.6 11.9 11.7 12.8" fill="none" stroke="{stroke}" stroke-width="1.3" stroke-linecap="round" stroke-opacity="0.85" />
-      <path d="M 15.0 11.6 C 14.9 12.5 14.9 13.4 15.0 14.3" fill="none" stroke="{stroke}" stroke-width="1.3" stroke-linecap="round" stroke-opacity="0.85" />
+      <path d="M 8.5 2.0 C 7.4 2.0 6.5 2.9 6.5 4.0 L 6.5 11.0 C 5.8 10.6 4.9 10.6 4.2 11.1 C 3.4 11.7 3.2 12.7 3.6 13.6 L 5.4 16.8 C 6.8 19.2 9.2 20.5 12.0 20.5 L 13.5 20.5 C 16.8 20.5 19.2 18.4 19.2 15.2 L 19.2 12.0 C 19.2 11.0 18.2 10.2 17.2 10.2 C 16.8 10.2 16.4 10.3 16.1 10.6 C 15.7 9.8 14.9 9.2 13.9 9.2 C 13.5 9.2 13.1 9.3 12.8 9.5 C 12.5 8.7 11.7 8.2 10.7 8.2 L 9.5 8.2 L 9.5 4.0 C 9.5 2.9 8.6 2.0 8.5 2.0 Z" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linejoin="round" stroke-linecap="round" />
+      <path d="M 11.8 10.8 L 11.8 13.8" fill="none" stroke="{stroke}" stroke-width="1.3" stroke-linecap="round" stroke-opacity="0.85" />
+      <path d="M 15.0 11.5 L 15.0 14.5" fill="none" stroke="{stroke}" stroke-width="1.3" stroke-linecap="round" stroke-opacity="0.85" />
     </g>`,
   },
   // I-beam drawn as a single filled glyph: thin stem with horizontal serifs
