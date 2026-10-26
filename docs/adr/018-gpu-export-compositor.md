@@ -77,13 +77,14 @@ benchmarks. `renderer = gpu` asks for the GPU path explicitly and still
 degrades per feature.
 
 `gpu::plan_limitations` is the single source of truth for what the compositor
-supports. Anything outside it keeps the FFmpeg renderer: canvas frame and
-background plate, cursor, overlay items, camera/side-by-side, masks,
-keystrokes, burned-in captions, timeline gaps, non-MP4/H.264 delivery, and
-canvases that are not a 4×2 NV12 grid. Explicit `gpu` requests that fall
-outside the gate render on FFmpeg with the reason logged — failing an export
-over a renderer preference would be worse than rendering it on the path that
-works.
+supports. Anything outside it keeps the FFmpeg renderer: cursor and overlay
+items, camera/side-by-side, masks, keystrokes, burned-in captions, timeline
+gaps, non-MP4/H.264 delivery, and canvases that are not a 4×2 NV12 grid. Canvas
+framing (padding, background colour/gradient/image, blur, dim, rounded corners,
+shadow) and letterboxed fits are part of the compositor. Explicit `gpu` requests
+that fall outside the gate render on FFmpeg with the reason logged — failing an
+export over a renderer preference would be worse than rendering it on the path
+that works.
 
 Runtime failures (no qualifying adapter, device loss, sidecar failure) also
 fall back once to the compatibility renderer, mirroring the existing
@@ -107,8 +108,8 @@ slower software path.
 
 | Gate | Scope |
 |---|---|
-| G0 | Passthrough + zoom at canvas size (this ADR's implemented state) |
-| G1 | Background plate, canvas frame/corners, shadow, cursor, items |
+| G0 | Passthrough + zoom at canvas size (implemented) |
+| G1 | Background plate, canvas frame/corners, shadow (implemented; cursor tile and items outstanding) |
 | G2 | Camera mask/border/shadow, privacy masks, keystrokes, side-by-side |
 | G3 | Captions (libass burn-in), chapters, HEVC, output cap, selected range |
 | G4 | Parity suite across the ablation matrix; ships behind the setting |

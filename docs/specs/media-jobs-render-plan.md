@@ -261,27 +261,31 @@ How a compiled render plan reaches FFmpeg processes:
 compositor. `auto` stays on the FFmpeg graph until the Phase 5 G5 gate flips;
 `RECORDFORGE_EXPORT_GPU=1` opts `auto` in for A/B benchmarks.
 
-`gpu::plan_limitations` is the feature gate. G0 covers a full-canvas screen
-plane with optional zoom and nothing that needs a shader milestone; canvas
-framing, cursor, overlay items, camera/side-by-side, masks, keystrokes,
-burned-in captions, timeline gaps, non-MP4/H.264 delivery and non-4×2-grid
-canvases all keep the compatibility renderer. Explicit `gpu` requests outside
-the gate degrade with a logged reason rather than failing the export, and a
-runtime failure (no hardware adapter, device loss, sidecar error) falls back
-once to the FFmpeg renderer — mirroring the hardware→software encoder retry.
+`gpu::plan_limitations` is the feature gate. The compositor handles the full
+canvas frame (padding, background colour/gradient/image, blur, dim, rounded
+corners, shadow), the fitted screen rect and zoom; overlay layers (cursor, text,
+annotations, images), camera/side-by-side, masks, keystrokes, burned-in
+captions, timeline gaps, non-MP4/H.264 delivery and non-4×2-grid canvases keep
+the compatibility renderer. Explicit `gpu` requests outside the gate degrade with
+a logged reason rather than failing the export, and a runtime failure (no
+hardware adapter, device loss, sidecar error) falls back once to the FFmpeg
+renderer — mirroring the hardware→software encoder retry.
 
 The pipeline is three processes: an FFmpeg **decode sidecar** (the same
-`trim`/`setpts`/`fps`/`scale`/`pad`/`concat` chain, emitting `rawvideo`/`nv12`
-on stdout; `-hwaccel auto` is opt-in via
-`RECORDFORGE_EXPORT_GPU_DECODE_HWACCEL=1` because every frame is downloaded
-anyway), a **wgpu compositor** (`YUV→RGB` at BT.601 limited through an integer
-crop from `zoompan_integer_crop`, Catmull-Rom bicubic sampling, an
-`Rgba16Float` canvas, then a compute `RGB→NV12` pass that writes a storage
-buffer byte-identical to the encoder's expected pixel format), and an FFmpeg
-**encode sidecar** reading that NV12 on stdin plus the existing semantic audio
-graph. Identity-zoom frames never touch the GPU: they are forwarded from
-decoder to encoder untouched, which is also bit-exact against the compatibility
-path's identity runs.
+`trim`/`setpts` chain, scaling each segment into the **fitted content rect** and
+padding out to the canvas at that rect's origin so the compositor receives a
+canvas-sized frame, emitting `rawvideo`/`nv12` on stdout; `-hwaccel auto` is
+opt-in via `RECORDFORGE_EXPORT_GPU_DECODE_HWACCEL=1` because every frame is
+downloaded anyway), a **wgpu compositor** (canvas background plate or solid
+colour, `YUV→RGB` at BT.601 limited through an integer crop from
+`zoompan_integer_crop` in content uv, Catmull-Rom bicubic sampling, an analytic
+signed-distance rounded-corner mask, an `Rgba16Float` canvas, then a compute
+`RGB→NV12` pass that writes a storage buffer byte-identical to the encoder's
+expected pixel format), and an FFmpeg **encode sidecar** reading that NV12 on
+stdin plus the existing semantic audio graph. Identity-zoom frames bypass the GPU
+when the canvas frame is plain (no padding, radius, shadow or background);
+otherwise they still composite, because the background has to be painted under
+the screen.
 
 The wgpu device, adapter and both pipelines are process-wide and cached
 (`RECORDFORGE_EXPORT_GPU_CACHE=0` disables reuse), so only the size-dependent

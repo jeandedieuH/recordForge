@@ -27,8 +27,9 @@ use tracing::{info, warn};
 use super::camera::{self, ZoomTransformState};
 use super::encoding::ExportEncoder;
 use super::{
-    common_screen_source, video_screen_rect, CompositionShared, CompositionWindow, ExportSettings,
-    RenderOutcome, RenderPlan,
+    background_plate_unneeded, common_screen_source, parse_color_hex,
+    prepare_canvas_background_plate, safe_filter_color, video_screen_rect, CompositionShared,
+    CompositionWindow, ExportSettings, RenderOutcome, RenderPlan,
 };
 
 /// Which compositor renders an export.
@@ -111,8 +112,9 @@ pub(crate) fn resolve_renderer(
 }
 
 /// Every reason this plan cannot render on the GPU compositor yet. An empty list
-/// means "G0-compatible": a full-canvas screen plane, optional zoom, and nothing
-/// that needs a shader milestone.
+/// means "G1-compatible": a canvas-sized screen plane with optional zoom and
+/// canvas framing (padding, background, rounded corners, shadow), and nothing
+/// that needs a per-frame overlay shader.
 pub(crate) fn plan_limitations(
     plan: &RenderPlan,
     settings: &ExportSettings,
@@ -137,21 +139,6 @@ pub(crate) fn plan_limitations(
             "canvas {}x{} is not a 4x2 NV12 grid",
             canvas.width, canvas.height
         ));
-    }
-
-    // Canvas framing (G1): a padded, rounded, shadowed or dimmed frame needs the
-    // background plate and SDF corners.
-    if canvas.padding != 0 {
-        reasons.push("canvas padding".into());
-    }
-    if canvas.border_radius != 0 {
-        reasons.push("canvas corner radius".into());
-    }
-    if canvas.shadow {
-        reasons.push("canvas shadow".into());
-    }
-    if canvas.background_blur.unwrap_or(0.0) > 0.0 || canvas.background_dim.unwrap_or(0.0) > 0.0 {
-        reasons.push("canvas background treatment".into());
     }
 
     // Overlay layers (G1/G2).
@@ -186,20 +173,10 @@ pub(crate) fn plan_limitations(
         reasons.push("segments do not cover the full timeline".into());
     }
 
-    // The G0 compositor samples the screen straight onto the canvas: the fitted
-    // rect must fill it exactly, otherwise the background plate (G1) is needed.
-    match common_screen_source(&plan.segments, asset_paths, &shared.probe) {
-        Some(source) => {
-            let (x, y, width, height) = video_screen_rect(canvas, Some(source), false);
-            if x.abs() > 0.5
-                || y.abs() > 0.5
-                || width < canvas.width as f64 - 0.5
-                || height < canvas.height as f64 - 0.5
-            {
-                reasons.push("screen does not fill the canvas".into());
-            }
-        }
-        None => reasons.push("segments have mixed or unknown source dimensions".into()),
+    // The decode pass scales every segment into one content rect, so mixed or
+    // unknown source dimensions cannot be fitted.
+    if common_screen_source(&plan.segments, asset_paths, &shared.probe).is_none() {
+        reasons.push("segments have mixed or unknown source dimensions".into());
     }
 
     // Non-finite zoom/overlay values are rejected upstream; a malformed canvas
@@ -254,6 +231,11 @@ const FULL_FRAME: compositor::Crop = compositor::Crop {
     height: 0,
 };
 
+/// A content rect covering the whole canvas, for tests that render without
+/// canvas framing.
+#[cfg(test)]
+const FULL_CANVAS: (f64, f64, f64, f64) = (0.0, 0.0, 1920.0, 1080.0);
+
 fn decode_hwaccel() -> bool {
     // Off by default: the decode sidecar downloads every frame to system memory
     // for the compositor and the encoder, so hardware decode only adds a
@@ -282,6 +264,7 @@ pub(crate) fn render_timeline_on_gpu(
     encoder: ExportEncoder,
     cancel: Arc<AtomicBool>,
     on_progress: &(dyn Fn(f64) + Sync),
+    resource_dir: Option<&Path>,
     shared: &CompositionShared,
 ) -> Result<RenderOutcome> {
     let canvas = plan
@@ -294,6 +277,7 @@ pub(crate) fn render_timeline_on_gpu(
     let window = CompositionWindow::full(plan);
 
     let started = Instant::now();
+    let frame = canvas_frame(plan, canvas, project_id, asset_paths, resource_dir, shared)?;
     let decode_plan = decode::plan(
         plan,
         project_id,
@@ -302,6 +286,7 @@ pub(crate) fn render_timeline_on_gpu(
         &window,
         width,
         height,
+        frame.rect,
         fps,
         decode_hwaccel(),
     )?;
@@ -312,7 +297,7 @@ pub(crate) fn render_timeline_on_gpu(
         ));
     }
 
-    let mut compositor = compositor::Compositor::new(width, height)?;
+    let mut compositor = compositor::Compositor::new(width, height, &frame)?;
     let compositor_ready_ms = started.elapsed().as_millis() as u64;
     let compositor_ms = compositor_ready_ms - plan_ms;
     let encode_process = encode::spawn(
@@ -404,7 +389,7 @@ pub(crate) fn render_timeline_on_gpu(
                 break;
             }
             let wait_started = Instant::now();
-            let frame = match decode_rx.recv() {
+            let decoded = match decode_rx.recv() {
                 Ok(frame) => frame,
                 Err(_) => break,
             };
@@ -418,14 +403,18 @@ pub(crate) fn render_timeline_on_gpu(
                 output_ms,
             );
             let compose_started = Instant::now();
-            let ready = if camera::zoom_transform_is_identity(&state, width, height) {
+            // An identity-zoom frame only needs the GPU when the canvas frame
+            // itself has to be painted (background, padding or rounded corners).
+            let ready = if camera::zoom_transform_is_identity(&state, width, height)
+                && frame.is_plain(width, height)
+            {
                 passthrough_frames += 1;
-                compositor.submit(compositor::Frame::Pass(frame), FULL_FRAME)
+                compositor.submit(compositor::Frame::Pass(decoded), FULL_FRAME)
             } else {
                 composed_frames += 1;
-                let crop = zoom_crop(&state, width, height);
+                let crop = zoom_crop(&state, width, height, frame.rect);
                 compositor.submit(
-                    compositor::Frame::Compose(compositor::Nv12Frame { data: frame }),
+                    compositor::Frame::Compose(compositor::Nv12Frame { data: decoded }),
                     crop,
                 )
             };
@@ -515,25 +504,107 @@ pub(crate) fn render_timeline_on_gpu(
     Ok(RenderOutcome { has_audio })
 }
 
+/// Where the screen sits on the canvas, how round its corners are, and the
+/// background behind it. Mirrors the compatibility renderer's canvas framing so
+/// the two paths frame a padded/rounded/shadowed canvas identically.
+fn canvas_frame(
+    plan: &RenderPlan,
+    canvas: &super::cursor::RenderCanvas,
+    _project_id: &str,
+    asset_paths: &HashMap<String, PathBuf>,
+    resource_dir: Option<&Path>,
+    shared: &CompositionShared,
+) -> Result<compositor::CanvasFrame> {
+    let source = common_screen_source(&plan.segments, asset_paths, &shared.probe)
+        .ok_or_else(|| gpu_error("segments have mixed or unknown source dimensions"))?;
+    let rect = video_screen_rect(canvas, Some(source), false);
+    // Same rule as the FFmpeg path: skip the plate when nothing behind the
+    // screen can ever be visible.
+    let plate = if background_plate_unneeded(plan, canvas, rect, false, false) {
+        None
+    } else {
+        let key = format!(
+            "gpu_bg:{}x{}:{}:{}:{}:{}:{}:{}",
+            canvas.width,
+            canvas.height,
+            rect.0.round() as i64,
+            rect.1.round() as i64,
+            rect.2.round() as i64,
+            rect.3.round() as i64,
+            canvas.border_radius,
+            canvas.background
+        );
+        shared.plates.get_or_create(&key, || {
+            Ok(
+                prepare_canvas_background_plate(canvas, rect, asset_paths, resource_dir)
+                    .map(|path| (path, true)),
+            )
+        })?
+    };
+    Ok(compositor::CanvasFrame {
+        rect,
+        radius: canvas.border_radius,
+        background: solid_background(&canvas.background),
+        plate,
+    })
+}
+
+/// Parse the canvas background into sRGB floats. Gradients and images arrive
+/// through the plate, so this only has to handle the solid forms the plate
+/// generator short-circuits on (`#rgb`, `#rrggbb`, `rgb()`, `rgba()`).
+fn solid_background(value: &str) -> [f32; 3] {
+    let trimmed = value.trim();
+    if trimmed.starts_with("rgb") {
+        if let Some(start) = trimmed.find('(') {
+            if let Some(end) = trimmed[start..].find(')') {
+                let parts: Vec<f32> = trimmed[start + 1..start + end]
+                    .split(',')
+                    .filter_map(|part| part.trim().parse::<f32>().ok())
+                    .collect();
+                if parts.len() >= 3 {
+                    return [
+                        (parts[0] / 255.0).clamp(0.0, 1.0),
+                        (parts[1] / 255.0).clamp(0.0, 1.0),
+                        (parts[2] / 255.0).clamp(0.0, 1.0),
+                    ];
+                }
+            }
+        }
+    }
+    let color = parse_color_hex(&safe_filter_color(trimmed), 1.0);
+    [color.red(), color.green(), color.blue()]
+}
+
 /// Integer source rect the GPU samples for one frame. Uses the same
 /// `zoompan_integer_crop` math the piecewise-zoom path builds filters from, so
 /// cursor registration and the sampled region stay consistent between
 /// renderers; widths/heights are snapped to the NV12 chroma grid.
-fn zoom_crop(state: &ZoomTransformState, width: u32, height: u32) -> compositor::Crop {
+///
+/// `content` is the fitted screen rect on the canvas: the compatibility graph
+/// zooms the *fitted* stream (scale to `screen_w`×`screen_h`, then `zoompan`),
+/// so the crop space is the content rect, not the canvas.
+fn zoom_crop(
+    state: &ZoomTransformState,
+    width: u32,
+    height: u32,
+    content: (f64, f64, f64, f64),
+) -> compositor::Crop {
+    let content_w = content.2.max(2.0);
+    let content_h = content.3.max(2.0);
     let (x, y, w, h) = camera::zoompan_integer_crop(
         (state.crop_x, state.crop_y, state.crop_w, state.crop_h),
-        width as f64,
-        height as f64,
+        content_w,
+        content_h,
         width as f64,
         height as f64,
         1,
         1,
     );
-    let w = (w.min(width).max(2)) & !1u32;
-    let h = (h.min(height).max(2)) & !1u32;
+    let w = (w.min(content_w as u32).max(2)) & !1u32;
+    let h = (h.min(content_h as u32).max(2)) & !1u32;
     compositor::Crop {
-        x: x.min(width.saturating_sub(w)),
-        y: y.min(height.saturating_sub(h)),
+        x: x.min((content_w as u32).saturating_sub(w)),
+        y: y.min((content_h as u32).saturating_sub(h)),
         width: w,
         height: h,
     }
@@ -619,18 +690,22 @@ mod tests {
     }
 
     #[test]
-    fn canvas_framing_needs_the_background_plate() {
+    fn canvas_framing_is_gpu_compatible() {
+        // G1: padding, corner radius, shadow and background treatments are
+        // composited by the shader, so they no longer force the FFmpeg path.
         let mut canvas = gated_canvas();
         canvas.padding = 48;
-        assert!(limitations(&plan_with_canvas(canvas))
-            .iter()
-            .any(|reason| reason.contains("padding")));
+        assert!(limitations(&plan_with_canvas(canvas)).is_empty());
 
         let mut canvas = gated_canvas();
         canvas.border_radius = 24;
-        assert!(limitations(&plan_with_canvas(canvas))
-            .iter()
-            .any(|reason| reason.contains("corner radius")));
+        assert!(limitations(&plan_with_canvas(canvas)).is_empty());
+
+        let mut canvas = gated_canvas();
+        canvas.shadow = true;
+        canvas.background_blur = Some(20.0);
+        canvas.background_dim = Some(0.4);
+        assert!(limitations(&plan_with_canvas(canvas)).is_empty());
     }
 
     #[test]
@@ -663,14 +738,34 @@ mod tests {
     }
 
     #[test]
-    fn a_letterboxed_screen_needs_the_fit_plate() {
-        // A 16:9 source on a square canvas cannot fill it without a background.
+    fn a_letterboxed_screenshot_is_fitted_into_the_canvas() {
+        // A 16:9 source on a square canvas is centred by the shader instead of
+        // falling back to FFmpeg.
         let mut canvas = gated_canvas();
         canvas.width = 1080;
         canvas.height = 1080;
-        assert!(limitations(&plan_with_canvas(canvas))
-            .iter()
-            .any(|reason| reason.contains("fill the canvas")));
+        assert!(limitations(&plan_with_canvas(canvas)).is_empty());
+
+        let canvas = super::super::cursor::RenderCanvas {
+            padding: 48,
+            ..{
+                let mut canvas = gated_canvas();
+                canvas.width = 1080;
+                canvas.height = 1080;
+                canvas
+            }
+        };
+        let plan = plan_with_canvas(canvas.clone());
+        let shared = CompositionShared::new(None);
+        let assets: HashMap<String, PathBuf> = HashMap::new();
+        let frame = canvas_frame(&plan, &canvas, "project-1", &assets, None, &shared)
+            .expect("canvas frame");
+        // Content is 16:9 inside a 1080 - 2*48 square, vertically centred.
+        assert!((frame.rect.2 - 984.0).abs() < 2.0, "{:?}", frame.rect);
+        assert!((frame.rect.3 - 553.5).abs() < 2.0, "{:?}", frame.rect);
+        assert!((frame.rect.0 - 48.0).abs() < 1.0, "{:?}", frame.rect);
+        assert!(frame.rect.1 > 48.0, "{:?}", frame.rect);
+        assert!(!frame.is_plain(canvas.width, canvas.height));
     }
 
     #[test]
@@ -744,7 +839,7 @@ mod tests {
             crop_w: 1280.0,
             crop_h: 720.0,
         };
-        let crop = zoom_crop(&state, 1920, 1080);
+        let crop = zoom_crop(&state, 1920, 1080, FULL_CANVAS);
         assert_eq!(crop.width % 2, 0);
         assert_eq!(crop.height % 2, 0);
         assert_eq!(crop.x % 2, 0);
@@ -763,7 +858,7 @@ mod tests {
             crop_w: 1920.0,
             crop_h: 1080.0,
         };
-        let crop = zoom_crop(&state, 1920, 1080);
+        let crop = zoom_crop(&state, 1920, 1080, FULL_CANVAS);
         assert_eq!(
             crop,
             compositor::Crop {
@@ -795,7 +890,7 @@ mod tests {
             let state = camera::evaluate_zoom_transform(&segments, 1920, 1080, 0, ms);
             (
                 camera::zoom_transform_is_identity(&state, 1920, 1080),
-                zoom_crop(&state, 1920, 1080),
+                zoom_crop(&state, 1920, 1080, FULL_CANVAS),
             )
         };
         // Identity before the region starts.

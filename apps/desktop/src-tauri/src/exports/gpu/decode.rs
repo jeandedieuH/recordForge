@@ -49,6 +49,11 @@ pub(super) struct DecodePlan {
 }
 
 /// Plan the decode pass for one full-timeline window.
+///
+/// `content` is the fitted screen rect on the canvas: every segment is scaled
+/// into it and padded out to the canvas at its origin, exactly like the
+/// compatibility graph's `scale`→`pad` chain, so the compositor receives a
+/// canvas-sized frame with the picture already in place.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn plan(
     plan: &RenderPlan,
@@ -58,6 +63,7 @@ pub(super) fn plan(
     window: &CompositionWindow,
     width: u32,
     height: u32,
+    content: (f64, f64, f64, f64),
     fps: u32,
     hwaccel: bool,
 ) -> Result<DecodePlan> {
@@ -178,6 +184,7 @@ pub(super) fn plan(
             job.cut_in_s,
             width,
             height,
+            content,
             fps,
             &label,
         ));
@@ -225,6 +232,7 @@ fn segment_filter(
     cut_in_s: f64,
     width: u32,
     height: u32,
+    content: (f64, f64, f64, f64),
     fps: u32,
     label: &str,
 ) -> String {
@@ -246,9 +254,14 @@ fn segment_filter(
     }
     let segment_duration =
         fmt_secs((request.source_out_s - request.source_in_s).max(0.0) / speed.max(1e-6));
+    // Scale into the fitted content rect, then pad out to the canvas at that
+    // rect's origin: the frame handed to the compositor is canvas-sized with the
+    // picture already framed, which is what the background/radius composite
+    // expects.
+    let (content_x, content_y, content_w, content_h) = content;
     filter.push_str(&format!(
-        ",scale={width}:{height}:force_original_aspect_ratio=decrease:force_divisible_by=2:threads=auto,\
-pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,fps={fps},setsar=1,\
+        ",scale={content_w:.0}:{content_h:.0}:force_original_aspect_ratio=decrease:force_divisible_by=2:threads=auto,\
+pad={width}:{height}:{content_x:.0}:{content_y:.0}:color=black,fps={fps},setsar=1,\
 tpad=stop_mode=clone:stop_duration={segment_duration},\
 tpad=stop_mode=add:stop_duration={segment_duration}:color=black,\
 trim=duration={segment_duration},setpts=PTS-STARTPTS[{label}]"

@@ -320,5 +320,14 @@ Priority follows the GPU-first decision: Phase 0 runs first; Phase 1 and the Pha
     disables), readback runs through a three-buffer async ring, and the sidecar
     queues are 8/6 frames (`RECORDFORGE_EXPORT_GPU_DECODE_QUEUE`/`_ENCODE_QUEUE`).
     The second export in a process pays 0 ms for wgpu setup instead of ~1.8 s.
-  - G1–G3 (canvas frame, cursor/items, camera/masks/keystrokes,
-    captions/HEVC/cap) are still not implemented; they are the next milestone.
+  - **G1 canvas frame shipped 2026-10-26.** `plan_limitations` now accepts
+    padding, background colour/gradient/image, blur, dim, corner radius, drop
+    shadow and letterboxed fits. The decode sidecar scales to the fitted content
+    rect and pads at its offset; the compositor paints the background from the
+    existing `prepare_canvas_background_plate` image plus an analytic SDF corner
+    mask over the fitted screen. Parity on the padded variants lands at the
+    resampler bound: padding 43.50, radius 43.96, shadow 43.48 dB mean (plain
+    stays bit-identical at 100 dB). Remaining in G1: overlay items and the
+    cursor. Then G2 (camera/masks/keystrokes/side-by-side), G3 (captions,
+    chapters, HEVC, output cap, selected range), the full ablation matrix, and
+    G4/G5.

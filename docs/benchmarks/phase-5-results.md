@@ -9,9 +9,11 @@
 
 ## What shipped
 
-Milestone **G0** of the Phase 5 plan: passthrough + zoom through a native wgpu
-compositor, with FFmpeg kept as the decode and encode sidecar. ADR 018 records
-the architecture; `docs/specs/media-jobs-render-plan.md` §5.6 the contract.
+Milestone **G0** of the Phase 5 plan — passthrough + zoom through a native wgpu
+compositor, with FFmpeg kept as the decode and encode sidecar — plus **G1**'s
+canvas frame (padding, background colour/gradient/image/blur/dim, rounded
+corners, canvas shadow). ADR 018 records the architecture;
+`docs/specs/media-jobs-render-plan.md` §5.6 the contract.
 
 - `apps/desktop/src-tauri/src/exports/gpu/mod.rs` — renderer selection
   (`ExportSettings.renderer`), the per-feature gate, and the
@@ -135,7 +137,7 @@ So ~43–48 dB is what *FFmpeg itself* scores against FFmpeg with a different
 kernel; the GPU compositor is at that ceiling. Identity frames are held to the
 strict standard and are bit-identical.
 
-### Three real bugs the gate caught
+### The gate caught three real bugs
 
 1. **RGB→NV12 chroma matrix.** `nv12_encode.wgsl` computed
    `Cb = (B − Kr·R − Kg·G) / 2(1−Kb)`, dropping the `Kb·B` term of the colour
@@ -152,6 +154,41 @@ Each is now pinned by a GPU unit test in `gpu/compositor.rs` (identity ramp
 position, crop position at canvas size, chroma block boundary, ring ordering,
 plus `zoom_crop`'s transition quantisation in `gpu/mod.rs`). The tests skip
 cleanly on a machine without a hardware adapter.
+
+## G1 — canvas frame and background (2026-10-26)
+
+`gpu::plan_limitations` no longer rejects canvas padding, background colour /
+image / gradient / blur / dim, corner radius or the canvas shadow. The decode
+sidecar now scales each segment into the **fitted content rect** and pads out to
+the canvas at that rect's origin (the same `scale`→`pad` chain the compatibility
+graph builds), and the compositor paints:
+
+- the canvas background: the existing `prepare_canvas_background_plate` PNG
+  (colour, gradient, image, blur, dim and the canvas shadow are all baked in by
+  the current generator) sampled 1:1, or a parsed solid colour when no plate is
+  needed;
+- the content rect on top, with an analytic signed-distance rounded-corner mask
+  (≈1 px coverage falloff), and the zoom crop applied in *content* uv so the
+  crop math matches `zoompan`'s input size.
+
+Reusing the plate generator keeps one source of truth for canvas framing and
+avoids a second blur/shadow implementation on the GPU.
+
+Parity (`--profile renderer`, single-pass on both sides):
+
+| Spec | Frames | Mean dB | Min dB | Result |
+|---|---|---|---|---|
+| `abl-plain` | 900 | 100.00 | 100.00 | bit-identical |
+| `abl-padding` | 900 | 43.50 | 42.25 | pass |
+| `abl-radius` | 900 | 43.96 | 42.93 | pass |
+| `abl-shadow` | 900 | 43.48 | 42.33 | pass |
+| `abl-zoom` | 900 | 53.20 | 30.87 | pass |
+
+Padding/radius/shadow land at the same ~43 dB resampler ceiling: the content is
+fitted to 1748×984 (a 0.91× swscale downscale in the compatibility graph versus
+Catmull-Rom here), so the residual is the kernel, not the framing. The framing
+itself was verified visually and by unit tests (padding shows the background,
+the rounded corner reveals it, the content interior survives).
 
 ## Resource lifetime and readback pipelining
 
@@ -173,9 +210,13 @@ short export. Frame-count queues are now `RECORDFORGE_EXPORT_GPU_DECODE_QUEUE`
 
 ## Follow-ups
 
-1. **G1**: background plate, canvas frame/radius/shadow, cursor tile, items.
+1. **G1 (rest)**: cursor tile and overlay items. Text/annotations/images are
+   rasterized by the same tiny-skia code the compatibility path uses, so they
+   need a texture per display-list hash plus the per-frame cursor evaluation.
 2. **G2**: camera mask/border/shadow, privacy masks, keystrokes, side-by-side.
 3. **G3**: captions, chapters, HEVC, output cap, selected range.
-4. **G4/G5**: extend the parity suite across the ablation matrix, then flip
-   `auto`. The renderer budget is already in `parity.ts`; G4 adds a per-feature
-   row so a regression in one layer cannot hide behind the mean.
+4. **G4/G5**: extend the parity suite across the whole ablation matrix (cursor /
+   items / camera / captions currently SKIP because the gate keeps them on
+   FFmpeg), then flip `auto`. The renderer budget is already in `parity.ts`; G4
+   adds a per-feature row so a regression in one layer cannot hide behind the
+   mean.

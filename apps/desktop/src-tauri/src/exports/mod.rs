@@ -1624,6 +1624,7 @@ fn render_timeline_composition_shared(
                 encoder,
                 Arc::clone(&cancel),
                 on_progress,
+                resource_dir,
                 shared,
             ) {
                 Ok(outcome) => return Ok(outcome),

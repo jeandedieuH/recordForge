@@ -485,7 +485,8 @@ const specs: SpecEntry[] = []
 // With an explicit GPU request only the plans the compositor actually renders
 // are worth measuring; everything else is rejected by the feature gate and
 // would just re-run the compatibility renderer under a different label.
-const gpuCompatible = new Set(["plain", "zoom"])
+// G1 added canvas framing (padding / radius / shadow / background).
+const gpuCompatible = new Set(["plain", "padding", "radius", "shadow", "zoom"])
 if (longMode) {
   specs.push({
     name: `spec_synth_chunked${variantSuffix}`,

@@ -122,6 +122,7 @@ mod bytemuck_free {
     pub unsafe trait Pod: Copy {}
     unsafe impl Pod for super::FrameParams {}
     unsafe impl Pod for super::Nv12Params {}
+    unsafe impl Pod for [f32; 4] {}
 }
 
 /// Device + pipelines shared by every export in the process.
@@ -163,24 +164,23 @@ pub(super) struct Compositor {
     src_y: wgpu::Texture,
     src_uv: wgpu::Texture,
     stage_view: wgpu::TextureView,
-    zoom_buffer: wgpu::Buffer,
+    params_buffer: wgpu::Buffer,
+    params: FrameParams,
     out_buffer: wgpu::Buffer,
     render_bind_group: wgpu::BindGroup,
     compute_bind_group: wgpu::BindGroup,
     ring: Vec<RingSlot>,
     ring_next: usize,
     pending: VecDeque<Inflight>,
-    /// Counts frames submitted to the GPU, for the ring index.
-    submitted: u64,
     /// The first frame handed back is checked for a degenerate (all-zero)
     /// result.
     checked_output: bool,
 }
 
 impl Compositor {
-    /// Create a compositor at `width` × `height`, reusing the process-wide
-    /// device and pipelines when they are still healthy.
-    pub(super) fn new(width: u32, height: u32) -> Result<Self> {
+    /// Create a compositor at `width` × `height` for `frame`, reusing the
+    /// process-wide device and pipelines when they are still healthy.
+    pub(super) fn new(width: u32, height: u32, frame: &CanvasFrame) -> Result<Self> {
         if width == 0 || height == 0 || !width.is_multiple_of(4) || !height.is_multiple_of(2) {
             return Err(gpu_error(
                 "GPU compositor needs an even canvas width divisible by 4",
@@ -206,6 +206,11 @@ impl Compositor {
         );
         let src_y_view = src_y.create_view(&wgpu::TextureViewDescriptor::default());
         let src_uv_view = src_uv.create_view(&wgpu::TextureViewDescriptor::default());
+        let background = match &frame.plate {
+            Some(path) => upload_plate(&device, &queue, path, width, height)?,
+            None => placeholder_background(&device, &queue, width, height),
+        };
+        let background_view = background.create_view(&wgpu::TextureViewDescriptor::default());
 
         // The composed canvas stays in `Rgba16Float` so the YUV→RGB→YUV round
         // trip quantizes once (at the NV12 write) instead of twice.
@@ -225,14 +230,36 @@ impl Compositor {
         });
         let stage_view = stage.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let zoom_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("gpu-export-zoom"),
-            size: std::mem::size_of::<ZoomUniform>() as u64,
+        let radius = frame
+            .radius
+            .min((frame.rect.2 / 2.0).max(0.0) as u32)
+            .min((frame.rect.3 / 2.0).max(0.0) as u32);
+        let has_plate = u8::from(frame.plate.is_some()) as f32;
+        let params = FrameParams {
+            canvas_size: [width as f32, height as f32, 0.0, 0.0],
+            dest_rect: [
+                frame.rect.0 as f32,
+                frame.rect.1 as f32,
+                frame.rect.2.max(1.0) as f32,
+                frame.rect.3.max(1.0) as f32,
+            ],
+            crop: [0.0, 0.0, 1.0, 1.0],
+            background: [
+                frame.background[0],
+                frame.background[1],
+                frame.background[2],
+                1.0 - has_plate,
+            ],
+            corner: [radius as f32, 0.0, 0.0, 0.0],
+        };
+        let params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("gpu-export-frame-params"),
+            size: std::mem::size_of::<FrameParams>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("gpu-export-params"),
+        let nv12_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("gpu-export-nv12-params"),
             size: std::mem::size_of::<Nv12Params>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
@@ -285,7 +312,11 @@ impl Compositor {
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
-                    resource: zoom_buffer.as_entire_binding(),
+                    resource: params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&background_view),
                 },
             ],
         });
@@ -303,13 +334,13 @@ impl Compositor {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: params_buffer.as_entire_binding(),
+                    resource: nv12_buffer.as_entire_binding(),
                 },
             ],
         });
 
         queue.write_buffer(
-            &params_buffer,
+            &nv12_buffer,
             0,
             pod_bytes(&Nv12Params {
                 width,
@@ -318,12 +349,16 @@ impl Compositor {
                 uv_word_offset: (width as usize * height as usize / 4) as u32,
             }),
         );
+        queue.write_buffer(&params_buffer, 0, pod_bytes(&params));
 
         let adapter_label = shared.adapter_label.clone();
         info!(
             adapter = %adapter_label,
             width,
             height,
+            content = ?frame.rect,
+            radius = params.corner[0],
+            plate = frame.plate.is_some(),
             "gpu export: compositor ready"
         );
 
@@ -336,14 +371,14 @@ impl Compositor {
             src_y,
             src_uv,
             stage_view,
-            zoom_buffer,
+            params_buffer,
+            params,
             out_buffer,
             render_bind_group,
             compute_bind_group,
             ring,
             ring_next: 0,
             pending: VecDeque::with_capacity(READBACK_RING + 1),
-            submitted: 0,
             checked_output: false,
         })
     }
@@ -378,7 +413,6 @@ impl Compositor {
             }
             Frame::Pass(data) => self.pending.push_back(Inflight::Ready(data)),
         }
-        self.submitted += 1;
         Ok(ready)
     }
 
@@ -447,17 +481,22 @@ impl Compositor {
         // Drop the caller's buffer before the copy so only the plane textures
         // hold the decoded frame.
         drop(frame);
+        // The crop is normalized against the *content* rect: the vertical/horiz
+        // zoom math runs on the fitted screen, matching the compatibility
+        // graph's `crop`+`scale` on the fitted stream.
+        let content_w = self.params.dest_rect[2].max(1.0);
+        let content_h = self.params.dest_rect[3].max(1.0);
+        self.params.crop = [
+            crop.x as f32 / content_w,
+            crop.y as f32 / content_h,
+            crop.width as f32 / content_w,
+            crop.height as f32 / content_h,
+        ];
         self.queue.write_buffer(
-            &self.zoom_buffer,
-            0,
-            pod_bytes(&ZoomUniform {
-                crop: [
-                    crop.x as f32 / self.width as f32,
-                    crop.y as f32 / self.height as f32,
-                    crop.width as f32 / self.width as f32,
-                    crop.height as f32 / self.height as f32,
-                ],
-            }),
+            &self.params_buffer,
+            // `crop` is the third 16-byte row of `FrameParams`.
+            (std::mem::size_of::<[f32; 4]>() * 2) as u64,
+            pod_bytes(&self.params.crop),
         );
 
         let mut encoder = self
@@ -667,6 +706,7 @@ fn create_shared_gpu() -> Result<SharedGpu> {
                 count: None,
             },
             uniform_binding(3),
+            texture_binding(4, wgpu::ShaderStages::FRAGMENT),
         ],
     });
     let compute_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -762,6 +802,108 @@ fn create_shared_gpu() -> Result<SharedGpu> {
         render_pipeline,
         compute_pipeline,
     })
+}
+
+/// Upload a canvas-size background plate PNG (sRGB RGBA8) as a texture.
+///
+/// The plate is generated by `prepare_canvas_background_plate`, which already
+/// bakes the colour/gradient/image, blur, dim and the canvas shadow, so the
+/// compositor only has to sample it 1:1.
+fn upload_plate(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    path: &std::path::Path,
+    width: u32,
+    height: u32,
+) -> Result<wgpu::Texture> {
+    let bytes = std::fs::read(path)
+        .map_err(|error| gpu_error(&format!("read background plate: {error}")))?;
+    let image = image::load_from_memory(&bytes)
+        .map_err(|error| gpu_error(&format!("decode background plate: {error}")))?
+        .to_rgba8();
+    let (image_w, image_h) = image.dimensions();
+    if image_w != width || image_h != height {
+        return Err(gpu_error("background plate is not canvas-sized"));
+    }
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("gpu-export-background"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        image.as_raw(),
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(width * 4),
+            rows_per_image: Some(height),
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+    Ok(texture)
+}
+
+/// One opaque black texel: the bind group always needs a background texture,
+/// and the shader ignores it whenever `background.a` says the colour is solid.
+fn placeholder_background(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    width: u32,
+    height: u32,
+) -> wgpu::Texture {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("gpu-export-background-placeholder"),
+        size: wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let _ = (width, height);
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &[0u8, 0, 0, 255],
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(4),
+            rows_per_image: Some(1),
+        },
+        wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+    );
+    texture
 }
 
 fn create_plane(
@@ -919,10 +1061,25 @@ mod tests {
         Nv12Frame { data }
     }
 
+    /// A canvas frame that fills the whole canvas with square corners and an
+    /// opaque black background.
+    fn plain_frame(width: u32, height: u32) -> CanvasFrame {
+        CanvasFrame {
+            rect: (0.0, 0.0, width as f64, height as f64),
+            radius: 0,
+            background: [0.0, 0.0, 0.0],
+            plate: None,
+        }
+    }
+
     /// Compositor tests need a hardware adapter; a machine without one (CI,
     /// headless) skips rather than failing the suite.
     fn compositor(width: u32, height: u32) -> Option<Compositor> {
-        match Compositor::new(width, height) {
+        compositor_for(width, height, plain_frame(width, height))
+    }
+
+    fn compositor_for(width: u32, height: u32, frame: CanvasFrame) -> Option<Compositor> {
+        match Compositor::new(width, height, &frame) {
             Ok(compositor) => Some(compositor),
             Err(error) => {
                 eprintln!("skipping GPU compositor test: {error}");
@@ -1074,6 +1231,57 @@ mod tests {
         assert!(
             u_col(width as usize / 2 - 1) > 176,
             "right of the crop must stay on the high block"
+        );
+    }
+
+    /// A flat-luma NV12 frame; `value` survives the YUV round trip.
+    fn flat_frame(width: u32, height: u32, value: u8) -> Nv12Frame {
+        let luma = width as usize * height as usize;
+        let mut data = vec![128u8; nv12_len(width, height)];
+        data[..luma].fill(value);
+        Nv12Frame { data }
+    }
+
+    #[test]
+    fn padded_content_shows_the_background_and_rounded_corners() {
+        let (width, height) = (64, 32);
+        let frame = CanvasFrame {
+            rect: (8.0, 4.0, 48.0, 24.0),
+            radius: 8,
+            background: [0.0, 0.0, 0.0],
+            plate: None,
+        };
+        let Some(mut compositor) = compositor_for(width, height, frame) else {
+            return;
+        };
+        let out = compose_one(
+            &mut compositor,
+            flat_frame(width, height, 200),
+            Crop {
+                x: 0,
+                y: 0,
+                width: 48,
+                height: 24,
+            },
+        );
+        let luma = |x: u32, y: u32| out[y as usize * width as usize + x as usize] as i16;
+        // Padding: black background (limited-range floor is 16).
+        assert!(luma(0, 0) <= 20, "padding luma {}", luma(0, 0));
+        assert!(luma(4, 16) <= 20, "left padding luma {}", luma(4, 16));
+        // Content: the flat 200 survives.
+        assert!(
+            (luma(32, 16) - 200).abs() <= 2,
+            "content luma {}",
+            luma(32, 16)
+        );
+        // The corner of the content rect is rounded away, so the background
+        // shows through even though the pixel is inside the bounding box.
+        assert!(luma(9, 5) <= 40, "corner luma {}", luma(9, 5));
+        // Just inside the straight edge, well past the radius: content.
+        assert!(
+            (luma(32, 5) - 200).abs() <= 3,
+            "top edge luma {}",
+            luma(32, 5)
         );
     }
 
