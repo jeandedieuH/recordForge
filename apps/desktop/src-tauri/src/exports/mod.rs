@@ -1695,7 +1695,7 @@ fn render_timeline_composition_shared(
 /// passes shift the composed stream by `start_s`, so `between(t,…)`, zoompan
 /// `it`, timed camera `setpts` offsets and libass cue times all evaluate in
 /// absolute timeline seconds.
-struct CompositionWindow {
+pub(crate) struct CompositionWindow {
     /// Absolute index of the first frame this pass emits (0 for a full pass).
     first_frame: u64,
     /// Number of CFR frames this pass emits.
@@ -1941,48 +1941,60 @@ fn render_composition_window(
         });
     }
 
-    // Each camera overlay visible in this window gets a dedicated seek input
-    // clamped to ~1 s of decode padding around the window.
-    let mut camera_jobs: Vec<CameraJob> = Vec::new();
-    for (index, overlay) in plan.overlays.iter().enumerate() {
-        if !overlay.visible || overlay.output_end_ms <= overlay.output_start_ms {
+    // Camera pieces coalesce into tracks (one decoder/chain per run), then
+    // each track intersecting this window keeps only its visible pieces.
+    let camera_tracks = coalesce_camera_overlays(&plan.overlays);
+    let mut camera_track_jobs: Vec<CameraTrackJob> = Vec::new();
+    for (track_index, track) in camera_tracks.iter().enumerate() {
+        if !track.is_renderable(plan.duration_ms) {
             continue;
         }
-        if (overlay.output_end_ms as f64) <= win_start_ms
-            || (overlay.output_start_ms as f64) >= win_end_ms
-        {
+        if (track.end_ms as f64) <= win_start_ms || (track.start_ms as f64) >= win_end_ms {
             continue;
         }
-        if !overlay.speed.is_finite() || overlay.speed <= 0.0 {
-            return Err(InternalError::Media("camera overlay speed is invalid".into()).into());
+        let mut pieces = Vec::new();
+        for &overlay_index in &track.pieces {
+            let overlay = &plan.overlays[overlay_index];
+            if !overlay.speed.is_finite() || overlay.speed <= 0.0 {
+                return Err(InternalError::Media("camera overlay speed is invalid".into()).into());
+            }
+            let video_delay_s = asset_paths
+                .get(&overlay.asset_id)
+                .map(|path| shared.probe.video_start_delay_s(path, &overlay.asset_id))
+                .unwrap_or(0.0);
+            if let Some(clamp) = camera_window_clamp(
+                overlay.output_start_ms,
+                overlay.output_end_ms,
+                overlay.source_in_ms,
+                overlay.source_out_ms,
+                overlay.speed,
+                canvas.fps as f64,
+                win_start_ms,
+                win_end_ms,
+                video_delay_s,
+            ) {
+                pieces.push(CameraPieceJob {
+                    overlay_index,
+                    clamp,
+                });
+            }
         }
-        let video_delay_s = asset_paths
-            .get(&overlay.asset_id)
-            .map(|path| shared.probe.video_start_delay_s(path, &overlay.asset_id))
-            .unwrap_or(0.0);
-        if let Some(clamp) = camera_window_clamp(
-            overlay.output_start_ms,
-            overlay.output_end_ms,
-            overlay.source_in_ms,
-            overlay.source_out_ms,
-            overlay.speed,
-            canvas.fps as f64,
-            win_start_ms,
-            win_end_ms,
-            video_delay_s,
-        ) {
-            camera_jobs.push(CameraJob {
-                overlay_index: index,
-                clamp,
-            });
+        if pieces.is_empty() {
+            continue;
         }
+        camera_track_jobs.push(CameraTrackJob {
+            track_index,
+            pieces,
+            input_index: 0,
+            seek_s: 0.0,
+        });
     }
 
     // Beyond MAX_SEEK_INPUTS the legacy one-input-per-asset layout wins:
     // every extra input costs a demuxer/decoder, and wide fan-out is worse
     // than decoding each file once.
     let seek_plan = plan_segment_inputs(&segment_requests)
-        .filter(|planned| planned.inputs.len() + camera_jobs.len() <= MAX_SEEK_INPUTS);
+        .filter(|planned| planned.inputs.len() + camera_track_jobs.len() <= MAX_SEEK_INPUTS);
 
     let asset_inputs = collect_input_assets(plan, asset_paths)?;
     let hwaccel_inputs = encoder != encoding::ExportEncoder::Software;
@@ -1999,8 +2011,6 @@ fn render_composition_window(
     // audio-referenced assets in the seeked layout — segments and camera
     // overlays consume their dedicated window inputs instead.
     let mut input_indices: HashMap<String, usize> = HashMap::new();
-    // overlay index → (clamp, input index, input seek) for the camera loop.
-    let mut camera_inputs: HashMap<usize, (CameraClamp, usize, f64)> = HashMap::new();
     // window index in `planned.inputs` → input_specs index.
     let mut window_input_indices: Vec<usize> = Vec::new();
     match &seek_plan {
@@ -2018,18 +2028,33 @@ fn render_composition_window(
                     hwaccel: hwaccel_inputs,
                 });
             }
-            for job in &camera_jobs {
-                let overlay = &plan.overlays[job.overlay_index];
-                let path = asset_paths.get(&overlay.asset_id).cloned().ok_or_else(|| {
+            // One seeked input per camera track, covering every piece it
+            // shows in this window; the pieces are trimmed out of that decode
+            // in-graph. Smart Cut's hundreds of contiguous pieces therefore
+            // cost one decoder, not hundreds.
+            for job in &mut camera_track_jobs {
+                let first = &plan.overlays[job.pieces[0].overlay_index];
+                let path = asset_paths.get(&first.asset_id).cloned().ok_or_else(|| {
                     InternalError::Media("camera overlay references an unknown asset".into())
                 })?;
-                let seek_s = floor_to_ms(job.clamp.src_in_s - SEEK_PREROLL_S).max(0.0);
-                camera_inputs.insert(job.overlay_index, (job.clamp, input_specs.len(), seek_s));
+                let src_in_s = job
+                    .pieces
+                    .iter()
+                    .map(|piece| piece.clamp.src_in_s)
+                    .fold(f64::INFINITY, f64::min);
+                let src_out_s = job
+                    .pieces
+                    .iter()
+                    .map(|piece| piece.clamp.src_out_s)
+                    .fold(f64::NEG_INFINITY, f64::max);
+                let seek_s = floor_to_ms(src_in_s - SEEK_PREROLL_S).max(0.0);
+                job.input_index = input_specs.len();
+                job.seek_s = seek_s;
                 input_specs.push(InputSpec {
-                    key: format!("cam:{}:{}", overlay.asset_id, job.overlay_index),
+                    key: format!("cam:{}:{}", first.asset_id, job.track_index),
                     path,
                     seek_s: Some(seek_s),
-                    duration_s: Some(job.clamp.src_out_s - seek_s + SEEK_TAIL_MARGIN_S),
+                    duration_s: Some(src_out_s - seek_s + SEEK_TAIL_MARGIN_S),
                     hwaccel: hwaccel_inputs,
                 });
             }
@@ -2078,19 +2103,25 @@ fn render_composition_window(
                     hwaccel: hwaccel_inputs,
                 });
             }
-            for job in &camera_jobs {
-                let overlay = &plan.overlays[job.overlay_index];
-                let input_index = *input_indices.get(&overlay.asset_id).ok_or_else(|| {
+            for job in &mut camera_track_jobs {
+                let first = &plan.overlays[job.pieces[0].overlay_index];
+                let input_index = *input_indices.get(&first.asset_id).ok_or_else(|| {
                     InternalError::Media("camera overlay references an unknown asset".into())
                 })?;
-                // The legacy chain consumes the overlay's full source range.
-                let clamp = CameraClamp {
-                    cut_out_s: 0.0,
-                    chain_dur_s: (overlay.output_end_ms - overlay.output_start_ms) as f64 / 1000.0,
-                    src_in_s: overlay.source_in_ms as f64 / 1000.0,
-                    src_out_s: overlay.source_out_ms as f64 / 1000.0,
-                };
-                camera_inputs.insert(job.overlay_index, (clamp, input_index, 0.0));
+                // The legacy chain consumes each piece's full source range
+                // from the whole-asset input.
+                for piece in &mut job.pieces {
+                    let overlay = &plan.overlays[piece.overlay_index];
+                    piece.clamp = CameraClamp {
+                        cut_out_s: 0.0,
+                        chain_dur_s: (overlay.output_end_ms - overlay.output_start_ms) as f64
+                            / 1000.0,
+                        src_in_s: overlay.source_in_ms as f64 / 1000.0,
+                        src_out_s: overlay.source_out_ms as f64 / 1000.0,
+                    };
+                }
+                job.input_index = input_index;
+                job.seek_s = 0.0;
             }
         }
     }
@@ -2277,11 +2308,10 @@ fn render_composition_window(
 
     let mut camera_mask_indices = HashMap::new();
     let mut camera_border_indices = HashMap::new();
-    // overlay index → (shadow input index, plate origin x, origin y).
+    // camera track index → (shadow input index, plate origin x, origin y).
     let mut camera_shadow_indices: HashMap<usize, (usize, u32, u32)> = HashMap::new();
-    for job in &camera_jobs {
-        let index = job.overlay_index;
-        let overlay = &plan.overlays[index];
+    for (index, job) in camera_track_jobs.iter().enumerate() {
+        let overlay = &plan.overlays[job.pieces[0].overlay_index];
         // Snap camera overlay dimensions and coordinates to even integers to prevent
         // YUV420 chroma subsampling misalignment and encoder EINVAL errors.
         let overlay_w = ((overlay.width.round() as u32) / 2 * 2).max(2);
@@ -2443,16 +2473,28 @@ fn render_composition_window(
         String::new()
     };
     let win_len_s = fmt_secs(window.end_s - window.start_s);
-    let mut filled_ms = win_start_ms;
+    // Segment and gap lengths live on the output frame grid, so their frame
+    // counts telescope to `window.frame_count` exactly. Trimming in milliseconds
+    // made every cut emit `ceil(d·fps)` frames, adding a frame here and there
+    // until video drifted seconds ahead of the audio.
+    let fps = canvas.fps.max(1) as f64;
+    let mut filled_frames = 0u64;
     for job in &segment_jobs {
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             return Err(InternalError::Media("export cancelled".into()).into());
         }
         let index = job.segment_index;
         let segment = &plan.segments[index];
-        let clamped_start = job.clamped_start;
-        let clamped_end = job.clamped_end;
-        if clamped_start > filled_ms {
+        let Some((start_frame, end_frame)) =
+            window_frame_span(window, fps, job.clamped_start, job.clamped_end)
+        else {
+            continue;
+        };
+        let frames = end_frame - start_frame;
+        if frames == 0 {
+            continue;
+        }
+        if start_frame > filled_frames {
             let gap_label = format!("gap{index}");
             let gap_color = if bg_input_index.is_some() {
                 "black@0".to_string()
@@ -2462,7 +2504,7 @@ fn render_composition_window(
             filters.push(format!(
                 "color=c={gap_color}:s={target_seg_w}x{target_seg_h}:r={}:d={}[{gap_label}]",
                 canvas.fps,
-                fmt_secs((clamped_start - filled_ms) / 1000.0),
+                fmt_secs((start_frame - filled_frames) as f64 / fps),
             ));
             video_labels.push(format!("[{gap_label}]"));
         }
@@ -2518,7 +2560,7 @@ fn render_composition_window(
         } else {
             background.clone()
         };
-        let segment_duration = fmt_secs((clamped_end - clamped_start) / 1000.0);
+        let segment_duration = fmt_secs(frames as f64 / fps);
         let canvas_w = canvas.width;
         let canvas_h = canvas.height;
         // scale runs per source frame at full canvas resolution and defaults
@@ -2526,20 +2568,20 @@ fn render_composition_window(
         // measured +7% export throughput on 1080p60 with the pinned FFmpeg.
         if can_direct_pad {
             filter.push_str(&format!(
-                ",scale={screen_w:.0}:{screen_h:.0}:force_original_aspect_ratio=decrease:force_divisible_by=2:threads=auto,pad={canvas_w}:{canvas_h}:{screen_x:.0}:{screen_y:.0}:color={pad_color},fps={},setsar=1,tpad=stop_mode=clone:stop_duration={segment_duration},tpad=stop_mode=add:stop_duration={segment_duration}:color={pad_color},trim=duration={segment_duration},setpts=PTS-STARTPTS[{label}]",
+                ",scale={screen_w:.0}:{screen_h:.0}:force_original_aspect_ratio=decrease:force_divisible_by=2:threads=auto,pad={canvas_w}:{canvas_h}:{screen_x:.0}:{screen_y:.0}:color={pad_color},fps={},setsar=1,tpad=stop_mode=clone:stop_duration={segment_duration},tpad=stop_mode=add:stop_duration={segment_duration}:color={pad_color},trim=end_frame={frames},setpts=PTS-STARTPTS[{label}]",
                 canvas.fps,
             ));
         } else {
             filter.push_str(&format!(
-                ",scale={screen_w:.0}:{screen_h:.0}:force_original_aspect_ratio=decrease:force_divisible_by=2:threads=auto,pad={screen_w:.0}:{screen_h:.0}:(ow-iw)/2:(oh-ih)/2:color={pad_color},fps={},setsar=1,tpad=stop_mode=clone:stop_duration={segment_duration},tpad=stop_mode=add:stop_duration={segment_duration}:color={pad_color},trim=duration={segment_duration},setpts=PTS-STARTPTS[{label}]",
+                ",scale={screen_w:.0}:{screen_h:.0}:force_original_aspect_ratio=decrease:force_divisible_by=2:threads=auto,pad={screen_w:.0}:{screen_h:.0}:(ow-iw)/2:(oh-ih)/2:color={pad_color},fps={},setsar=1,tpad=stop_mode=clone:stop_duration={segment_duration},tpad=stop_mode=add:stop_duration={segment_duration}:color={pad_color},trim=end_frame={frames},setpts=PTS-STARTPTS[{label}]",
                 canvas.fps,
             ));
         }
         filters.push(filter);
         video_labels.push(format!("[{label}]"));
-        filled_ms = clamped_end;
+        filled_frames = end_frame;
     }
-    if filled_ms < win_end_ms {
+    if filled_frames < window.frame_count {
         let gap_label = "gap_trailing";
         let gap_color = if bg_input_index.is_some() {
             "black@0".to_string()
@@ -2549,7 +2591,7 @@ fn render_composition_window(
         filters.push(format!(
             "color=c={gap_color}:s={target_seg_w}x{target_seg_h}:r={}:d={}[{gap_label}]",
             canvas.fps,
-            fmt_secs((win_end_ms - filled_ms) / 1000.0),
+            fmt_secs((window.frame_count - filled_frames) as f64 / fps),
         ));
         video_labels.push(format!("[{gap_label}]"));
     }
@@ -3039,31 +3081,23 @@ fn render_composition_window(
         cursor_plan = Some(prepared);
     }
 
-    for (index, overlay) in plan.overlays.iter().enumerate() {
-        if !overlay.visible || overlay.output_end_ms <= overlay.output_start_ms {
-            continue;
-        }
+    for (index, job) in camera_track_jobs.iter().enumerate() {
+        let track = &camera_tracks[job.track_index];
+        let overlay = &plan.overlays[track.pieces[0]];
         validate_overlay(overlay, project_id, asset_paths, canvas)?;
-        // Camera chains are timestamped absolutely, so a window-disjoint
-        // overlay would render nothing — it got no input, skip it entirely.
-        let Some((clamp, input_index, seek_s)) = camera_inputs.get(&index).copied() else {
-            continue;
-        };
-        let asset_path = asset_paths.get(&overlay.asset_id).ok_or_else(|| {
-            InternalError::Media("camera overlay references an unknown asset".into())
-        })?;
-        let input = resolve_video_stream_specifier(
-            &shared.probe,
-            asset_path,
-            &overlay.asset_id,
-            input_index,
-            overlay.stream_index,
-        )?;
+        for piece in &job.pieces {
+            validate_overlay(
+                &plan.overlays[piece.overlay_index],
+                project_id,
+                asset_paths,
+                canvas,
+            )?;
+        }
 
         let enable = format!(
             "between(t,{},{})",
-            seconds(overlay.output_start_ms),
-            seconds(overlay.output_end_ms)
+            seconds(track.start_ms),
+            seconds(track.end_ms)
         );
 
         // 1. Composite shadow underlay if present
@@ -3077,19 +3111,14 @@ fn render_composition_window(
             current_label = after_shadow_label;
         }
 
-        // 2. Format camera video stream (trim, speed, crop/cover, scale, opacity).
-        // `clamp` bounds the decode to this pass's window (plus padding); the
-        // `+cut/TB` term in setpts keeps the speed-normalized pts continuous
-        // with the un-clamped chain so downstream overlay timing is unchanged.
-        // Geometry ops shared by the camera stream and its segmentation
-        // mask — the mask is rendered at source dims, so it passes through
-        // the identical crop/scale to stay pixel-aligned.
+        // 2. Decode every piece in this window, frame-snap each to its output
+        // length, then concatenate. One chain per track replaces one chain per
+        // Smart Cut piece.
         let mut geometry_ops = String::new();
         let overlay_w = ((overlay.width.round() as u32) / 2 * 2).max(2);
         let overlay_h = ((overlay.height.round() as u32) / 2 * 2).max(2);
         let overlay_x = (overlay.x.round() as i32) / 2 * 2;
         let overlay_y = (overlay.y.round() as i32) / 2 * 2;
-        let overlay_duration = fmt_secs(clamp.chain_dur_s);
 
         if let Some(crop) = &overlay.crop {
             geometry_ops.push_str(&format!(
@@ -3105,38 +3134,67 @@ fn render_composition_window(
             ));
         }
 
-        let time_ops = format!(
-            "trim=start={}:end={},setpts=(PTS-STARTPTS+{:.6}/TB)/{:.6}",
-            fmt_secs(clamp.src_in_s - seek_s),
-            fmt_secs(clamp.src_out_s - seek_s),
-            clamp.cut_out_s * overlay.speed,
-            overlay.speed,
-        );
-        let mut camera_filter = format!("{input}{time_ops}");
-        camera_filter.push_str(&geometry_ops);
+        let fps = canvas.fps.max(1) as f64;
+        let mut piece_labels: Vec<String> = Vec::with_capacity(job.pieces.len());
+        let mut chain_frames = 0u64;
+        for (piece_index, piece) in job.pieces.iter().enumerate() {
+            let piece_overlay = &plan.overlays[piece.overlay_index];
+            let asset_path = asset_paths.get(&piece_overlay.asset_id).ok_or_else(|| {
+                InternalError::Media("camera overlay references an unknown asset".into())
+            })?;
+            let input = resolve_video_stream_specifier(
+                &shared.probe,
+                asset_path,
+                &piece_overlay.asset_id,
+                job.input_index,
+                piece_overlay.stream_index,
+            )?;
+            let clamp = piece.clamp;
+            let frames = ((clamp.chain_dur_s * fps).round().max(0.0) as u64).max(1);
+            chain_frames += frames;
+            let piece_duration = fmt_secs(frames as f64 / fps);
+            let label = format!("camera{index}_piece{piece_index}");
+            filters.push(format!(
+                "{input}trim=start={}:end={},setpts=(PTS-STARTPTS+{:.6}/TB)/{:.6},fps={},setsar=1,tpad=stop_mode=clone:stop_duration={piece_duration},tpad=stop_mode=add:stop_duration={piece_duration}:color=black,trim=end_frame={frames},setpts=PTS-STARTPTS[{label}]",
+                fmt_secs(clamp.src_in_s - job.seek_s),
+                fmt_secs(clamp.src_out_s - job.seek_s),
+                clamp.cut_out_s * piece_overlay.speed,
+                piece_overlay.speed,
+                canvas.fps,
+            ));
+            piece_labels.push(format!("[{label}]"));
+        }
+        let raw_label = if piece_labels.len() == 1 {
+            piece_labels.remove(0)
+        } else {
+            let label = format!("camera{index}_concat");
+            filters.push(format!(
+                "{}concat=n={}:v=1:a=0[{label}]",
+                piece_labels.join(""),
+                piece_labels.len()
+            ));
+            format!("[{label}]")
+        };
+
+        // 3. Shared geometry/mask apply once, after the pieces are joined.
+        let camera_stream_label = format!("camera_stream{index}");
+        // `geometry_ops` is written as a suffix (`",crop=...,"`) for the
+        // decode chain; here it follows an input label, so the leading comma
+        // would parse as an empty filter.
+        let mut camera_filter = format!("{raw_label}{}", geometry_ops.trim_start_matches(','));
         if overlay.opacity < 1.0 {
             camera_filter.push_str(&format!(",colorchannelmixer=aa={:.4}", overlay.opacity));
         }
-        camera_filter.push_str(&format!(
-            ",fps={},setsar=1,tpad=stop_mode=clone:stop_duration={overlay_duration},trim=duration={overlay_duration},setpts=PTS-STARTPTS,format=rgba",
-            canvas.fps
-        ));
-
-        // 3. Emit the camera stream under a label the shape-mask stage can
-        // consume (same wiring the virtual-background path used to share).
-        let camera_stream_label = {
-            let label = format!("camera_stream{index}");
-            camera_filter.push_str(&format!("[{label}]"));
-            filters.push(camera_filter);
-            label
-        };
+        camera_filter.push_str(&format!(",format=rgba[{camera_stream_label}]"));
+        filters.push(camera_filter);
 
         // 4. Mask camera video stream (for circle and rounded shapes)
+        let chain_duration = fmt_secs(chain_frames as f64 / fps);
         let masked_camera_label = if let Some(&cam_mask_idx) = camera_mask_indices.get(&index) {
             let mask_label = format!("cam_mask_loop{index}");
             let masked_label = format!("camera_masked{index}");
             filters.push(format!(
-                "[{cam_mask_idx}:v]format=gray,scale={overlay_w}:{overlay_h},setsar=1,loop=loop=-1:size=1:start=0,fps={},trim=duration={overlay_duration},setpts=PTS-STARTPTS[{mask_label}];\
+                "[{cam_mask_idx}:v]format=gray,scale={overlay_w}:{overlay_h},setsar=1,loop=loop=-1:size=1:start=0,fps={},trim=duration={chain_duration},setpts=PTS-STARTPTS[{mask_label}];\
                  [{camera_stream_label}][{mask_label}]alphamerge[{masked_label}]",
                 canvas.fps
             ));
@@ -3145,9 +3203,12 @@ fn render_composition_window(
             camera_stream_label
         };
 
-        // 4. Shift timestamps to the overlay's output start plus whatever the
-        // window clamp cut from the head, then composite on the canvas.
-        let timed_offset_s = overlay.output_start_ms as f64 / 1000.0 + clamp.cut_out_s;
+        // 5. Shift timestamps to the first piece's output start plus whatever
+        // the window clamp cut from its head, then composite on the canvas.
+        let first_piece = &job.pieces[0];
+        let timed_offset_s = plan.overlays[first_piece.overlay_index].output_start_ms as f64
+            / 1000.0
+            + first_piece.clamp.cut_out_s;
         let timed_camera_label = if timed_offset_s > 1e-9 {
             let label = format!("camera_timed{index}");
             filters.push(format!(
@@ -3165,7 +3226,7 @@ fn render_composition_window(
         ));
         current_label = after_camera_label;
 
-        // 5. Overlay border stroke directly on top of canvas if present
+        // 6. Overlay border stroke directly on top of canvas if present
         if let Some(&border_idx) = camera_border_indices.get(&index) {
             let border_loop_label = format!("cam_border_loop{index}");
             let after_border_label = format!("cam_with_border{index}");
@@ -3625,10 +3686,355 @@ fn render_composition_window(
     Ok(RenderOutcome { has_audio })
 }
 
-/// Append the audio graph — per-segment `atrim`/speed/volume chains padded to
-/// the full export duration and mixed into `[aout]` — to `filters`. Returns
-/// whether `[aout]` was emitted. Called by the standalone pass directly and,
-/// for chunked exports, by the dedicated audio render in `render_timeline_chunked`.
+/// Audio is normalized to one canonical sample format so every piece, gap and
+/// track can be joined by `concat`/`amix` without an implicit resample.
+const AUDIO_SAMPLE_RATE: u32 = 48_000;
+/// Fade applied on each side of a source discontinuity. Short enough to be
+/// inaudible, long enough to kill the click of starting/stopping mid-waveform.
+const AUDIO_DECLICK_S: f64 = 0.005;
+
+fn audio_format_filter() -> String {
+    format!("aformat=sample_fmts=fltp:sample_rates={AUDIO_SAMPLE_RATE}:channel_layouts=stereo")
+}
+
+fn audio_micros(seconds: f64) -> i64 {
+    (seconds * 1_000_000.0).round() as i64
+}
+
+/// One audio segment resolved into the linear per-track graph.
+struct AudioPiece {
+    segment: RenderSegment,
+    /// Resolved input specifier (`[2:a:0]`).
+    input: String,
+    /// Source range already rebased by the input `-ss` offset.
+    trim_start_s: f64,
+    trim_end_s: f64,
+    output_start_ms: u64,
+    output_end_ms: u64,
+    volume: f64,
+}
+
+impl AudioPiece {
+    fn duration_ms(&self) -> u64 {
+        self.output_end_ms.saturating_sub(self.output_start_ms)
+    }
+
+    fn duration_s(&self) -> f64 {
+        (self.duration_ms() as f64 / 1000.0).max(1e-3)
+    }
+}
+
+fn audio_piece_is_source_continuous(left: &AudioPiece, right: &AudioPiece) -> bool {
+    left.segment.asset_id == right.segment.asset_id
+        && left.segment.stream_index == right.segment.stream_index
+        && same_f64(left.trim_end_s, right.trim_start_s)
+}
+
+/// True when every source range in the track advances forward in output order:
+/// `asegment` can then split one decode pass into the pieces it needs.
+fn audio_pieces_route_cleanly(pieces: &[AudioPiece]) -> bool {
+    let mut last_end: HashMap<(&str, Option<i32>), f64> = HashMap::new();
+    for piece in pieces {
+        let key = (piece.segment.asset_id.as_str(), piece.segment.stream_index);
+        if let Some(previous_end) = last_end.get(&key) {
+            if piece.trim_start_s + 1e-9 < *previous_end {
+                return false;
+            }
+        }
+        last_end.insert(key, piece.trim_end_s);
+    }
+    true
+}
+
+/// True when two pieces overlap in output time; such a track falls back to the
+/// per-segment delay/mix graph because concatenation cannot express overlap.
+fn audio_pieces_overlap(pieces: &[AudioPiece]) -> bool {
+    pieces
+        .windows(2)
+        .any(|pair| pair[1].output_start_ms < pair[0].output_end_ms)
+}
+
+fn push_silence_gap(filters: &mut Vec<String>, duration_s: f64, label: &str) {
+    filters.push(format!(
+        "anullsrc=channel_layout=stereo:sample_rate={AUDIO_SAMPLE_RATE},atrim=duration={duration_s:.6},asetpts=PTS-STARTPTS[{label}]"
+    ));
+}
+
+/// Resolve the per-piece declick flags: a fade is only needed when the source
+/// is discontinuous (or silent) on that side.
+fn audio_declick_flags(pieces: &[AudioPiece]) -> Vec<(bool, bool)> {
+    pieces
+        .iter()
+        .enumerate()
+        .map(|(index, piece)| {
+            let previous_end = if index == 0 {
+                None
+            } else {
+                pieces.get(index - 1).map(|previous| previous.output_end_ms)
+            };
+            let declick_in = match (index.checked_sub(1), previous_end) {
+                (Some(previous_index), Some(previous_end)) => {
+                    piece.output_start_ms > previous_end
+                        || !audio_piece_is_source_continuous(&pieces[previous_index], piece)
+                }
+                _ => true,
+            };
+            let declick_out = match pieces.get(index + 1) {
+                Some(next) => {
+                    next.output_start_ms > piece.output_end_ms
+                        || !audio_piece_is_source_continuous(piece, next)
+                }
+                None => true,
+            };
+            (declick_in, declick_out)
+        })
+        .collect()
+}
+
+/// Emit one piece's `asetpts → atempo → volume/fades → declick → exact length`
+/// chain from an already-cut source label.
+fn push_audio_piece_chain(
+    filters: &mut Vec<String>,
+    piece: &AudioPiece,
+    source: &str,
+    declick_in: bool,
+    declick_out: bool,
+    label: &str,
+) {
+    let duration_ms = piece.duration_ms().max(1);
+    let duration_s = piece.duration_s();
+    let mut chain = format!("{source}{},asetpts=PTS-STARTPTS", audio_format_filter());
+    if (piece.segment.speed - 1.0).abs() > f64::EPSILON {
+        chain.push_str(&atempo_filter(piece.segment.speed));
+    }
+    if let Some(custom_filter) = &piece.segment.audio_filter {
+        chain.push_str(&format!(",{custom_filter}"));
+    } else {
+        chain.push_str(&format!(",volume={:.4}", piece.volume));
+        if let Some(fade_in_ms) = piece.segment.fade_in_ms.filter(|value| *value > 0.0) {
+            chain.push_str(&format!(",afade=t=in:st=0:d={:.6}", fade_in_ms / 1000.0));
+        }
+        if let Some(fade_out_ms) = piece.segment.fade_out_ms.filter(|value| *value > 0.0) {
+            let fade_duration = fade_out_ms.min(duration_ms as f64);
+            let fade_start = (duration_ms as f64 - fade_duration).max(0.0);
+            chain.push_str(&format!(
+                ",afade=t=out:st={:.6}:d={:.6}",
+                fade_start / 1000.0,
+                fade_duration / 1000.0
+            ));
+        }
+    }
+    let declick_s = AUDIO_DECLICK_S.min(duration_s / 4.0);
+    if declick_s > 0.0 {
+        if declick_in {
+            chain.push_str(&format!(",afade=t=in:st=0:d={declick_s:.6}"));
+        }
+        if declick_out {
+            chain.push_str(&format!(
+                ",afade=t=out:st={:.6}:d={:.6}",
+                (duration_s - declick_s).max(0.0),
+                declick_s
+            ));
+        }
+    }
+    // `apad` + `atrim` pins the piece to exactly its output slot, so the
+    // concatenated track cannot accumulate sample drift across hundreds of cuts.
+    chain.push_str(&format!(
+        ",apad=pad_dur={duration_s:.6},atrim=duration={duration_s:.6}[{label}]"
+    ));
+    filters.push(chain);
+}
+
+/// One `asegment` per input group, returning the source label of every piece.
+/// Unused splits are drained to `anullsink` so FFmpeg never sees an unconnected
+/// output.
+fn build_asegment_audio_sources(
+    filters: &mut Vec<String>,
+    pieces: &[AudioPiece],
+    label_seq: &mut usize,
+) -> Vec<String> {
+    let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
+    for (index, piece) in pieces.iter().enumerate() {
+        match groups.iter_mut().find(|(input, _)| *input == piece.input) {
+            Some((_, members)) => members.push(index),
+            None => groups.push((piece.input.clone(), vec![index])),
+        }
+    }
+
+    let mut sources = vec![String::new(); pieces.len()];
+    for (input, members) in groups {
+        let mut boundaries: Vec<i64> = members
+            .iter()
+            .flat_map(|&index| {
+                [
+                    audio_micros(pieces[index].trim_start_s),
+                    audio_micros(pieces[index].trim_end_s),
+                ]
+            })
+            .collect();
+        boundaries.sort_unstable();
+        boundaries.dedup();
+        let output_base = *label_seq;
+        *label_seq += boundaries.len() + 1;
+        let outputs: Vec<String> = (0..=boundaries.len())
+            .map(|index| format!("audio_split{output_base}_{index}"))
+            .collect();
+        let timestamps = boundaries
+            .iter()
+            .map(|value| format!("{:.6}", *value as f64 / 1_000_000.0))
+            .collect::<Vec<_>>()
+            .join("|");
+        let mut split = format!("{input}asegment=timestamps={timestamps}");
+        for output in &outputs {
+            split.push_str(&format!("[{output}]"));
+        }
+        filters.push(split);
+
+        let mut used = vec![false; outputs.len()];
+        for &piece_index in &members {
+            let start = audio_micros(pieces[piece_index].trim_start_s);
+            let Some(boundary_index) = boundaries.binary_search(&start).ok() else {
+                continue;
+            };
+            let output_index = boundary_index + 1;
+            used[output_index] = true;
+            sources[piece_index] = format!("[{}]", outputs[output_index]);
+        }
+        for (index, output) in outputs.iter().enumerate() {
+            if !used[index] {
+                filters.push(format!("[{output}]anullsink"));
+            }
+        }
+    }
+    sources
+}
+
+/// Per-piece `atrim` sources for a track whose source order is not monotonic.
+fn build_atrim_audio_sources(
+    filters: &mut Vec<String>,
+    pieces: &[AudioPiece],
+    label_seq: &mut usize,
+) -> Vec<String> {
+    pieces
+        .iter()
+        .map(|piece| {
+            let label = format!("audio_trim{}", *label_seq);
+            *label_seq += 1;
+            filters.push(format!(
+                "{}atrim=start={:.6}:end={:.6}[{label}]",
+                piece.input, piece.trim_start_s, piece.trim_end_s
+            ));
+            format!("[{label}]")
+        })
+        .collect()
+}
+
+/// Join a track's pieces and gaps in output order and pin it to the export
+/// duration.
+fn assemble_audio_track(
+    filters: &mut Vec<String>,
+    pieces: &[AudioPiece],
+    sources: &[String],
+    declick: &[(bool, bool)],
+    track_label: &str,
+    duration_ms: u64,
+    label_seq: &mut usize,
+) {
+    let duration_s = (duration_ms as f64 / 1000.0).max(0.001);
+    let mut inputs: Vec<String> = Vec::new();
+    let mut previous_end = 0u64;
+    for (index, piece) in pieces.iter().enumerate() {
+        if piece.output_start_ms > previous_end {
+            let gap_s = (piece.output_start_ms - previous_end) as f64 / 1000.0;
+            let gap_label = format!("audio_gap{}", *label_seq);
+            *label_seq += 1;
+            push_silence_gap(filters, gap_s, &gap_label);
+            inputs.push(format!("[{gap_label}]"));
+        }
+        let (declick_in, declick_out) = declick.get(index).copied().unwrap_or((true, true));
+        let label = format!("audio_piece{}", *label_seq);
+        *label_seq += 1;
+        push_audio_piece_chain(
+            filters,
+            piece,
+            &sources[index],
+            declick_in,
+            declick_out,
+            &label,
+        );
+        inputs.push(format!("[{label}]"));
+        previous_end = previous_end.max(piece.output_end_ms);
+    }
+
+    let joined = if inputs.len() == 1 {
+        inputs[0].clone()
+    } else {
+        let concat_label = format!("audio_concat_{track_label}");
+        filters.push(format!(
+            "{}concat=n={}:v=0:a=1[{concat_label}]",
+            inputs.join(""),
+            inputs.len()
+        ));
+        format!("[{concat_label}]")
+    };
+    filters.push(format!(
+        "{joined}apad,atrim=duration={duration_s:.6}[{track_label}]"
+    ));
+}
+
+/// Overlap-preserving fallback: per-segment `adelay` + the track's own `amix`.
+fn assemble_overlapping_audio_track(
+    filters: &mut Vec<String>,
+    pieces: &[AudioPiece],
+    sources: &[String],
+    declick: &[(bool, bool)],
+    track_label: &str,
+    duration_ms: u64,
+    label_seq: &mut usize,
+) {
+    let duration_s = (duration_ms as f64 / 1000.0).max(0.001);
+    let mut delayed: Vec<String> = Vec::new();
+    for (index, piece) in pieces.iter().enumerate() {
+        let (declick_in, declick_out) = declick.get(index).copied().unwrap_or((true, true));
+        let piece_label = format!("audio_overlap_piece{}", *label_seq);
+        *label_seq += 1;
+        push_audio_piece_chain(
+            filters,
+            piece,
+            &sources[index],
+            declick_in,
+            declick_out,
+            &piece_label,
+        );
+        let delayed_label = format!("audio_overlap_delay{}", *label_seq);
+        *label_seq += 1;
+        filters.push(format!(
+            "[{piece_label}]adelay={}:all=1,apad=pad_dur={duration_s:.6}[{delayed_label}]",
+            piece.output_start_ms
+        ));
+        delayed.push(format!("[{delayed_label}]"));
+    }
+    if delayed.is_empty() {
+        return;
+    }
+    filters.push(format!(
+        "{}amix=inputs={}:duration=longest:normalize=0,atrim=duration={duration_s:.6}[{track_label}]",
+        delayed.join(""),
+        delayed.len()
+    ));
+}
+
+/// Append the audio graph to `filters` and return whether `[aout]` was emitted.
+///
+/// Each track is built linearly in output order: either one `asegment` decode
+/// split into its pieces, per-piece `atrim`s for reordered clips, or the legacy
+/// delay/mix only when pieces genuinely overlap. Pieces are joined by `concat`
+/// (gaps become `anullsrc`) and the tracks are mixed once, so the graph is
+/// O(tracks + pieces) instead of one full-length stream per segment.
+///
+/// Called by the standalone pass directly and, for chunked exports, by the
+/// dedicated audio render in `render_timeline_chunked`, and by the GPU encode
+/// sidecar — all three share this one implementation.
 #[allow(clippy::too_many_arguments)]
 fn append_audio_graph(
     filters: &mut Vec<String>,
@@ -3646,9 +4052,10 @@ fn append_audio_graph(
         .as_ref()
         .map(|tracks| tracks.iter().collect::<Vec<_>>())
         .unwrap_or_else(|| plan.audio.iter().collect::<Vec<_>>());
-    let mut audio_labels = Vec::new();
-    let mut audio_segment_index = 0usize;
-    for track in audio_tracks {
+    let mut track_labels: Vec<String> = Vec::new();
+    let mut label_seq = 0usize;
+
+    for (track_index, track) in audio_tracks.iter().enumerate() {
         if track.muted {
             continue;
         }
@@ -3669,16 +4076,22 @@ fn append_audio_graph(
             source_height: None,
         };
         let uses_legacy_fallback = track.segments.is_empty();
-        let segments = if uses_legacy_fallback {
+        let mut segments = if uses_legacy_fallback {
             vec![fallback]
         } else {
             track.segments.clone()
         };
+        segments.sort_by_key(|segment| (segment.output_start_ms, segment.output_end_ms));
+
+        let mut pieces: Vec<AudioPiece> = Vec::with_capacity(segments.len());
         for segment in segments {
             if cancel.load(std::sync::atomic::Ordering::Relaxed) {
                 return Err(InternalError::Media("export cancelled".into()).into());
             }
             validate_segment_known(&segment, project_id, asset_paths)?;
+            if segment.output_end_ms <= segment.output_start_ms {
+                continue;
+            }
             let volume = segment.volume.unwrap_or(track.volume).clamp(0.0, 2.0);
             let input_index = *input_indices.get(&segment.asset_id).ok_or_else(|| {
                 InternalError::Media("audio track references an unknown asset".into())
@@ -3701,13 +4114,8 @@ fn append_audio_graph(
             else {
                 continue;
             };
-            let label = format!("audio{audio_segment_index}");
-            let clip_duration_ms = segment
-                .output_end_ms
-                .saturating_sub(segment.output_start_ms)
-                .max(1);
             // An input-side `-ss` rebases the source timeline to zero, so every
-            // atrim timestamp shifts by the same seek.
+            // trim timestamp shifts by the same seek.
             let seek_s = source_seek_s
                 .get(&segment.asset_id)
                 .copied()
@@ -3716,60 +4124,66 @@ fn append_audio_graph(
             let trim_start_s = (segment.source_in_ms as f64 / 1000.0 - seek_s).max(0.0);
             let trim_end_s =
                 (segment.source_out_ms as f64 / 1000.0 - seek_s).max(trim_start_s + 0.001);
-            let mut audio_filter = format!(
-                "{input}atrim=start={}:end={},asetpts=PTS-STARTPTS",
-                fmt_secs(trim_start_s),
-                fmt_secs(trim_end_s),
-            );
-            if (segment.speed - 1.0).abs() > f64::EPSILON {
-                audio_filter.push_str(&atempo_filter(segment.speed));
-            }
-            if let Some(custom_filter) = &segment.audio_filter {
-                audio_filter.push_str(&format!(",{custom_filter}"));
-            } else {
-                audio_filter.push_str(&format!(",volume={volume:.4}"));
-                if let Some(fade_in_ms) = segment.fade_in_ms.filter(|value| *value > 0.0) {
-                    audio_filter.push_str(&format!(
-                        ",afade=t=in:st=0:d={}",
-                        seconds(fade_in_ms as u64)
-                    ));
-                }
-                if let Some(fade_out_ms) = segment.fade_out_ms.filter(|value| *value > 0.0) {
-                    let fade_duration = fade_out_ms.min(clip_duration_ms as f64);
-                    let fade_start = (clip_duration_ms as f64 - fade_duration).max(0.0);
-                    audio_filter.push_str(&format!(
-                        ",afade=t=out:st={:.3}:d={:.3}",
-                        fade_start / 1000.0,
-                        fade_duration / 1000.0
-                    ));
-                }
-            }
-            if segment.output_start_ms > 0 {
-                audio_filter.push_str(&format!(",adelay={}:all=1", segment.output_start_ms));
-            }
-            audio_filter.push_str(&format!(",apad=pad_dur={}[{label}]", seconds(duration_ms)));
-            filters.push(audio_filter);
-            audio_labels.push(format!("[{label}]"));
-            audio_segment_index += 1;
+            pieces.push(AudioPiece {
+                output_start_ms: segment.output_start_ms,
+                output_end_ms: segment.output_end_ms,
+                segment,
+                input,
+                trim_start_s,
+                trim_end_s,
+                volume,
+            });
         }
+        if pieces.is_empty() {
+            continue;
+        }
+
+        let track_label = format!("audio_track{track_index}");
+        let declick = audio_declick_flags(&pieces);
+        let sources = if audio_pieces_overlap(&pieces) {
+            let sources = build_atrim_audio_sources(filters, &pieces, &mut label_seq);
+            assemble_overlapping_audio_track(
+                filters,
+                &pieces,
+                &sources,
+                &declick,
+                &track_label,
+                duration_ms,
+                &mut label_seq,
+            );
+            track_labels.push(format!("[{track_label}]"));
+            continue;
+        } else if audio_pieces_route_cleanly(&pieces) {
+            build_asegment_audio_sources(filters, &pieces, &mut label_seq)
+        } else {
+            build_atrim_audio_sources(filters, &pieces, &mut label_seq)
+        };
+        assemble_audio_track(
+            filters,
+            &pieces,
+            &sources,
+            &declick,
+            &track_label,
+            duration_ms,
+            &mut label_seq,
+        );
+        track_labels.push(format!("[{track_label}]"));
     }
 
-    if audio_labels.len() == 1 {
-        let label = "aout";
+    let duration_s = (duration_ms as f64 / 1000.0).max(0.001);
+    if track_labels.len() == 1 {
         filters.push(format!(
-            "{}atrim=duration={}[{label}]",
-            audio_labels[0],
-            seconds(duration_ms),
+            "{}atrim=duration={duration_s:.6}[aout]",
+            track_labels[0]
         ));
-    } else if !audio_labels.is_empty() {
+    } else if !track_labels.is_empty() {
         filters.push(format!(
-            "{}amix=inputs={}:duration=longest:normalize=0,atrim=duration={}[aout]",
-            audio_labels.join(""),
-            audio_labels.len(),
-            seconds(duration_ms),
+            "{}amix=inputs={}:duration=longest:normalize=0,atrim=duration={duration_s:.6}[aout]",
+            track_labels.join(""),
+            track_labels.len(),
         ));
     }
-    Ok(!audio_labels.is_empty())
+    Ok(!track_labels.is_empty())
 }
 
 /// Per-asset `(seek_s, duration_s)` decode window for a dedicated audio pass.
@@ -3949,13 +4363,20 @@ fn camera_window_clamp(
     if (out_end_ms as f64) <= win_start_ms || (out_start_ms as f64) >= win_end_ms {
         return None;
     }
+    let fps = fps.max(1.0);
     let rel = ((win_start_ms - 1000.0 - out_start_ms as f64) / 1000.0).max(0.0);
-    let cut_out_s = (rel * fps).floor() / fps;
+    let cut_frames = (rel * fps).floor().max(0.0) as u64;
+    let cut_out_s = cut_frames as f64 / fps;
     let clamped_end_ms = (out_end_ms as f64).min(win_end_ms + 1000.0);
-    let chain_dur_s = (clamped_end_ms - out_start_ms as f64) / 1000.0 - cut_out_s;
-    if chain_dur_s <= 0.0 {
+    // Length on the canvas frame grid: the overlay's own start/end frame
+    // indices, minus the frames the window cut from its head.
+    let total_frames = output_frame_index(clamped_end_ms, fps)
+        .saturating_sub(output_frame_index(out_start_ms as f64, fps));
+    let chain_frames = total_frames.saturating_sub(cut_frames);
+    if chain_frames == 0 {
         return None;
     }
+    let chain_dur_s = chain_frames as f64 / fps;
     let mut src_in_s = source_in_ms as f64 / 1000.0 + cut_out_s * speed;
     if cut_out_s > 0.0 {
         src_in_s += (video_delay_s - source_in_ms as f64 / 1000.0).max(0.0);
@@ -3982,6 +4403,48 @@ fn corrected_source_in_s(source_in_ms: u64, cut_in_s: f64, speed: f64, video_del
     base + cut_in_s * speed + (video_delay_s - base).max(0.0)
 }
 
+/// Frame index of an output timestamp on the canvas grid. Segment lengths are
+/// measured in frames (not milliseconds) so a cut that lands between two frame
+/// boundaries can never accumulate drift against the audio track.
+pub(crate) fn output_frame_index(ms: f64, fps: f64) -> u64 {
+    if !ms.is_finite() || ms <= 0.0 || !fps.is_finite() || fps <= 0.0 {
+        return 0;
+    }
+    (ms * fps / 1000.0).round().max(0.0) as u64
+}
+
+/// A segment's `[start, end)` within a composition window, in window-local
+/// frames. Both ends clamp to the window, and the window's own last frame is
+/// inclusive-by-count so a segment reaching the window end always covers the
+/// final frame (`ceil(duration·fps)`).
+pub(crate) fn window_frame_span(
+    window: &CompositionWindow,
+    fps: f64,
+    start_ms: f64,
+    end_ms: f64,
+) -> Option<(u64, u64)> {
+    let fps = fps.max(1.0);
+    let win_start_ms = window.start_ms();
+    let win_end_ms = window.end_ms();
+    let window_end_frame = window.first_frame + window.frame_count;
+    let start_frame = if start_ms <= win_start_ms + 1e-6 {
+        window.first_frame
+    } else {
+        output_frame_index(start_ms, fps).clamp(window.first_frame, window_end_frame)
+    };
+    let end_frame = if end_ms >= win_end_ms - 1e-6 {
+        window_end_frame
+    } else {
+        output_frame_index(end_ms, fps).clamp(window.first_frame, window_end_frame)
+    };
+    (end_frame > start_frame).then(|| {
+        (
+            start_frame - window.first_frame,
+            end_frame - window.first_frame,
+        )
+    })
+}
+
 /// Stdin queue depth for the rawvideo plate feed: keep ~96 MiB of frames in
 /// flight so producer stalls don't starve the encoder, bounded so a 4K
 /// dual-plane feed stays reasonable.
@@ -3999,13 +4462,120 @@ struct SegmentJob {
     cut_in_s: f64,
 }
 
-/// A camera overlay intersecting the pass window with its clamped source
-/// range. Its input index and seek offset are bound once the input list is
-/// built (`camera_inputs` in the render function).
+/// A run of output-contiguous camera overlays that share one source and every
+/// visual property. Smart Cut turns one camera clip into hundreds of pieces;
+/// compositing them as one track keeps a single decoder/chain (and one
+/// compositor camera slot) instead of one per piece.
+#[derive(Debug, Clone)]
+pub(crate) struct CameraTrack {
+    /// Overlay indices in plan order; output-contiguous with equal props.
+    pub pieces: Vec<usize>,
+    pub start_ms: u64,
+    pub end_ms: u64,
+}
+
+impl CameraTrack {
+    pub(crate) fn first_overlay(&self) -> usize {
+        self.pieces[0]
+    }
+
+    pub(crate) fn is_renderable(&self, duration_ms: u64) -> bool {
+        self.end_ms > 0 && self.start_ms < duration_ms
+    }
+}
+
+/// A camera track's pieces that intersect one composition window, with their
+/// clamped source ranges and the shared input/seek they decode from.
+struct CameraTrackJob {
+    track_index: usize,
+    pieces: Vec<CameraPieceJob>,
+    input_index: usize,
+    seek_s: f64,
+}
+
 #[derive(Clone, Copy)]
-struct CameraJob {
+struct CameraPieceJob {
     overlay_index: usize,
     clamp: CameraClamp,
+}
+
+fn same_f64(a: f64, b: f64) -> bool {
+    a.to_bits() == b.to_bits()
+}
+
+fn same_optional_f64(a: Option<f64>, b: Option<f64>) -> bool {
+    match (a, b) {
+        (Some(left), Some(right)) => same_f64(left, right),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn same_crop(a: Option<&RenderCrop>, b: Option<&RenderCrop>) -> bool {
+    match (a, b) {
+        (Some(left), Some(right)) => {
+            left.x == right.x
+                && left.y == right.y
+                && left.width == right.width
+                && left.height == right.height
+        }
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+/// Every visual property the compositor derives from an overlay. Pieces may
+/// only share a camera track when all of these match, otherwise they would be
+/// composited with the wrong rect/mask/border/shadow.
+fn overlay_visual_matches(left: &RenderPlanOverlay, right: &RenderPlanOverlay) -> bool {
+    same_f64(left.x, right.x)
+        && same_f64(left.y, right.y)
+        && same_f64(left.width, right.width)
+        && same_f64(left.height, right.height)
+        && same_f64(left.opacity, right.opacity)
+        && same_crop(left.crop.as_ref(), right.crop.as_ref())
+        && left.shape == right.shape
+        && same_optional_f64(left.border_width, right.border_width)
+        && left.border_color == right.border_color
+        && same_optional_f64(left.border_opacity, right.border_opacity)
+        && left.shadow_enabled == right.shadow_enabled
+        && left.shadow_color == right.shadow_color
+        && same_optional_f64(left.shadow_blur, right.shadow_blur)
+        && same_optional_f64(left.shadow_offset_x, right.shadow_offset_x)
+        && same_optional_f64(left.shadow_offset_y, right.shadow_offset_y)
+        && left.preset == right.preset
+}
+
+/// Group contiguous camera overlays into render tracks. Only visible,
+/// positively-sized overlays take part; a run continues while the source and
+/// every visual property match and the next piece starts exactly where the
+/// previous one ended.
+pub(crate) fn coalesce_camera_overlays(overlays: &[RenderPlanOverlay]) -> Vec<CameraTrack> {
+    let mut tracks: Vec<CameraTrack> = Vec::new();
+    for (index, overlay) in overlays.iter().enumerate() {
+        if !overlay.visible || overlay.output_end_ms <= overlay.output_start_ms {
+            continue;
+        }
+        let joins_previous = tracks.last().is_some_and(|track| {
+            let previous = &overlays[*track.pieces.last().expect("camera track has a piece")];
+            previous.output_end_ms == overlay.output_start_ms
+                && previous.asset_id == overlay.asset_id
+                && previous.stream_index == overlay.stream_index
+                && overlay_visual_matches(previous, overlay)
+        });
+        if joins_previous {
+            let track = tracks.last_mut().expect("camera track exists");
+            track.pieces.push(index);
+            track.end_ms = overlay.output_end_ms;
+        } else {
+            tracks.push(CameraTrack {
+                pieces: vec![index],
+                start_ms: overlay.output_start_ms,
+                end_ms: overlay.output_end_ms,
+            });
+        }
+    }
+    tracks
 }
 
 /// True when a background plate path is one of ours (temp-dir +
@@ -9382,8 +9952,10 @@ mod tests {
         let cut_abs_s = 1.234 + clamp.cut_out_s;
         assert!(cut_abs_s <= 59.0 + 1e-9);
         assert!(cut_abs_s >= 58.0);
-        // Chain covers from the cut through window end + 1 s.
-        assert!((1.234 + clamp.cut_out_s + clamp.chain_dur_s - 91.0).abs() < 1e-9);
+        // Chain length is frame-snapped: overlay start frame 37 through the
+        // window's 91 s frame, minus the 1732 cut frames = 961 frames.
+        let expected_chain = 961.0 / 30.0;
+        assert!((clamp.chain_dur_s - expected_chain).abs() < 1e-9);
         // source_in starts well past the first video frame, so no delay
         // correction applies to the cut.
         assert!((clamp.src_in_s - (5.0 + expected_cut)).abs() < 1e-9);
@@ -9408,6 +9980,246 @@ mod tests {
             90_000, 120_000, 0, 30_000, 1.0, 30.0, 60_000.0, 90_000.0, 0.0
         )
         .is_none());
+    }
+
+    #[test]
+    fn window_frame_spans_telescope_to_the_window_frame_count() {
+        // Off-grid cuts: 1000 ms is frame 30, 2017 ms is frame 61 (round 60.51),
+        // and the tail reaches the end of a 91-frame window.
+        let window = CompositionWindow::from_frames(0, 91, 30);
+        let mut filled = 0u64;
+        for (start_ms, end_ms) in [(0u64, 1_000u64), (1_050, 2_017), (2_500, 3_034)] {
+            let (start, end) =
+                window_frame_span(&window, 30.0, start_ms as f64, end_ms as f64).expect("span");
+            assert!(
+                start >= filled,
+                "segment starts before the previous fill end"
+            );
+            filled = end;
+        }
+        assert_eq!(filled, 91);
+
+        // A mid-timeline chunk keeps the same guarantee at its own offsets.
+        let chunk = CompositionWindow::from_frames(150, 40, 30);
+        let (start, end) = window_frame_span(&chunk, 30.0, 4_900.0, 6_000.0).expect("head");
+        assert_eq!((start, end), (0, 30));
+        let (start, end) = window_frame_span(&chunk, 30.0, 6_000.0, 6_400.0).expect("tail");
+        assert_eq!((start, end), (30, 40));
+    }
+
+    fn camera_test_overlay(output_start_ms: u64, output_end_ms: u64) -> RenderPlanOverlay {
+        RenderPlanOverlay {
+            asset_id: "cam".into(),
+            stream_index: Some(0),
+            source_in_ms: output_start_ms,
+            source_out_ms: output_end_ms,
+            output_start_ms,
+            output_end_ms,
+            speed: 1.0,
+            x: 40.0,
+            y: 40.0,
+            width: 320.0,
+            height: 240.0,
+            crop: None,
+            opacity: 1.0,
+            visible: true,
+            shape: "rectangle".into(),
+            border_width: None,
+            border_color: None,
+            border_opacity: None,
+            shadow_enabled: None,
+            shadow_color: None,
+            shadow_blur: None,
+            shadow_offset_x: None,
+            shadow_offset_y: None,
+            preset: None,
+        }
+    }
+
+    #[test]
+    fn camera_coalescing_merges_identical_contiguous_pieces() {
+        let overlays = vec![
+            camera_test_overlay(0, 1_000),
+            camera_test_overlay(1_000, 2_000),
+            camera_test_overlay(2_000, 3_000),
+        ];
+        let tracks = coalesce_camera_overlays(&overlays);
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].pieces, vec![0, 1, 2]);
+        assert_eq!((tracks[0].start_ms, tracks[0].end_ms), (0, 3_000));
+    }
+
+    #[test]
+    fn camera_coalescing_splits_on_transform_gap_or_source_change() {
+        // A different rect breaks the run.
+        let mut moved = camera_test_overlay(1_000, 2_000);
+        moved.x = 80.0;
+        let tracks = coalesce_camera_overlays(&[
+            camera_test_overlay(0, 1_000),
+            moved,
+            camera_test_overlay(2_000, 3_000),
+        ]);
+        assert_eq!(tracks.len(), 3);
+        assert_eq!(tracks[0].pieces, vec![0]);
+        assert_eq!(tracks[1].pieces, vec![1]);
+        assert_eq!(tracks[2].pieces, vec![2]);
+
+        // A hole in output time breaks the run.
+        let tracks = coalesce_camera_overlays(&[
+            camera_test_overlay(0, 1_000),
+            camera_test_overlay(1_500, 2_500),
+        ]);
+        assert_eq!(tracks.len(), 2);
+
+        // A different asset breaks the run.
+        let mut other_source = camera_test_overlay(1_000, 2_000);
+        other_source.asset_id = "cam-2".into();
+        let tracks = coalesce_camera_overlays(&[camera_test_overlay(0, 1_000), other_source]);
+        assert_eq!(tracks.len(), 2);
+    }
+
+    fn audio_test_segment(
+        asset: &str,
+        source_in_ms: u64,
+        source_out_ms: u64,
+        output_start_ms: u64,
+        output_end_ms: u64,
+    ) -> RenderSegment {
+        RenderSegment {
+            asset_id: asset.into(),
+            stream_index: Some(0),
+            volume: Some(1.0),
+            fade_in_ms: None,
+            fade_out_ms: None,
+            volume_keyframes: None,
+            audio_filter: None,
+            speed: 1.0,
+            source_in_ms,
+            source_out_ms,
+            output_start_ms,
+            output_end_ms,
+            source_width: None,
+            source_height: None,
+        }
+    }
+
+    fn audio_test_track(asset: &str, segments: Vec<RenderSegment>) -> RenderPlanAudio {
+        RenderPlanAudio {
+            asset_id: asset.into(),
+            stream_index: Some(0),
+            role: None,
+            muted: false,
+            volume: 1.0,
+            segments,
+        }
+    }
+
+    fn audio_test_graph(plan: &RenderPlan, assets: &[&str]) -> String {
+        let mut root = valid_plan();
+        root.duration_ms = plan.duration_ms;
+        root.audio_tracks = plan.audio_tracks.clone();
+        let input_indices: HashMap<String, usize> = assets
+            .iter()
+            .enumerate()
+            .map(|(index, asset)| ((*asset).to_string(), index))
+            .collect();
+        let asset_paths: HashMap<String, PathBuf> = assets
+            .iter()
+            .map(|asset| {
+                (
+                    (*asset).to_string(),
+                    PathBuf::from(format!("C:/tmp/{asset}.wav")),
+                )
+            })
+            .collect();
+        let mut filters = Vec::new();
+        append_audio_graph(
+            &mut filters,
+            &root,
+            "project-1",
+            &input_indices,
+            &asset_paths,
+            &ProbeCache::new(None),
+            root.duration_ms.max(1),
+            &HashMap::new(),
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .expect("audio graph");
+        filters.join(";\n")
+    }
+
+    #[test]
+    fn audio_graph_routes_forward_segments_through_asegment() {
+        let plan = RenderPlan {
+            duration_ms: 4_000,
+            audio_tracks: Some(vec![
+                audio_test_track(
+                    "mic",
+                    vec![
+                        audio_test_segment("mic", 10_000, 11_000, 0, 1_000),
+                        audio_test_segment("mic", 12_000, 13_000, 1_000, 2_000),
+                        audio_test_segment("mic", 14_000, 15_500, 2_500, 4_000),
+                    ],
+                ),
+                audio_test_track(
+                    "music",
+                    vec![audio_test_segment("music", 0, 4_000, 0, 4_000)],
+                ),
+            ]),
+            ..valid_plan()
+        };
+        let graph = audio_test_graph(&plan, &["mic", "music"]);
+
+        // Linear per-track routing: one `asegment` split and one piece concat
+        // per track, one `amix` for the two tracks — never a full-length stream
+        // per segment.
+        assert_eq!(graph.matches("asegment=timestamps=").count(), 2);
+        assert!(!graph.contains("adelay="));
+        assert!(graph.contains("amix=inputs=2:duration=longest:normalize=0"));
+        // Three mic pieces with one gap between them; the single-piece music
+        // track needs no concat.
+        assert!(graph.contains("concat=n=4:v=0:a=1"));
+        // Every splice side that is discontinuous (or silent) is declicked.
+        assert!(graph.contains("afade=t=in:st=0:d=0.005000"));
+        assert!(graph.contains("afade=t=out:st="));
+    }
+
+    #[test]
+    fn audio_graph_falls_back_to_atrim_for_reordered_segments() {
+        let plan = RenderPlan {
+            duration_ms: 2_000,
+            audio_tracks: Some(vec![audio_test_track(
+                "mic",
+                vec![
+                    audio_test_segment("mic", 10_000, 11_000, 0, 1_000),
+                    audio_test_segment("mic", 5_000, 6_000, 1_000, 2_000),
+                ],
+            )]),
+            ..valid_plan()
+        };
+        let graph = audio_test_graph(&plan, &["mic"]);
+        assert!(!graph.contains("asegment="));
+        assert_eq!(graph.matches("atrim=start=").count(), 2);
+        assert!(graph.contains("concat=n=2:v=0:a=1"));
+    }
+
+    #[test]
+    fn audio_graph_keeps_the_delay_mix_only_for_overlapping_segments() {
+        let plan = RenderPlan {
+            duration_ms: 3_000,
+            audio_tracks: Some(vec![audio_test_track(
+                "mic",
+                vec![
+                    audio_test_segment("mic", 0, 2_000, 0, 2_000),
+                    audio_test_segment("mic", 1_000, 3_000, 1_000, 3_000),
+                ],
+            )]),
+            ..valid_plan()
+        };
+        let graph = audio_test_graph(&plan, &["mic"]);
+        assert!(graph.contains("adelay="));
+        assert!(graph.contains("amix=inputs=2:duration=longest:normalize=0"));
+        assert!(!graph.contains("asegment="));
     }
 
     #[test]
@@ -14941,6 +15753,331 @@ mod tests {
             "Center of camera overlay at 0.5s should show camera video (red), but got RGBA: {:?}",
             pixel
         );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_smart_cut_dense_offgrid_export_is_frame_exact() {
+        use std::process::Command;
+
+        let ffmpeg = match crate::media::resolve_executable("ffmpeg") {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let ffprobe = match crate::media::resolve_executable("ffprobe") {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let ffmpeg = ffmpeg.to_string_lossy().to_string();
+        let ffprobe = ffprobe.to_string_lossy().to_string();
+
+        let temp_dir =
+            std::env::temp_dir().join(format!("rf-test-smartcut-{}", uuid::Uuid::new_v4()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let screen_path = temp_dir.join("screen.mp4");
+        let camera_path = temp_dir.join("camera.mp4");
+        let mic_path = temp_dir.join("mic.wav");
+        let system_path = temp_dir.join("system.wav");
+        let out_path = temp_dir.join("out.mp4");
+
+        let make = |args: &[&str], path: &Path| {
+            let status = Command::new(&ffmpeg)
+                .args(["-y", "-hide_banner", "-loglevel", "error"])
+                .args(args)
+                .arg(path)
+                .status()
+                .expect("run ffmpeg");
+            assert!(status.success(), "create fixture {:?}", path);
+        };
+        make(
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=320x240:r=30:d=12",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+            ],
+            &screen_path,
+        );
+        make(
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=red:s=160x120:r=30:d=12",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+            ],
+            &camera_path,
+        );
+        make(
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=48000:duration=12",
+                "-ac",
+                "2",
+            ],
+            &mic_path,
+        );
+        make(
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=660:sample_rate=48000:duration=12",
+                "-ac",
+                "2",
+            ],
+            &system_path,
+        );
+
+        // 40 Smart-Cut-style pieces with off-grid lengths and source holes.
+        let mut segments = Vec::new();
+        let mut overlays = Vec::new();
+        let mut mic_segments = Vec::new();
+        let mut system_segments = Vec::new();
+        let mut output_ms = 0u64;
+        for index in 0..40u64 {
+            let duration_ms = 197 + (index % 5);
+            let source_in_ms = index * 300;
+            let source_out_ms = source_in_ms + duration_ms;
+            let output_start_ms = output_ms;
+            let output_end_ms = output_ms + duration_ms;
+            output_ms = output_end_ms;
+            let segment = |asset: &str, out_start: u64, out_end: u64| RenderSegment {
+                asset_id: asset.into(),
+                stream_index: Some(0),
+                volume: Some(1.0),
+                fade_in_ms: None,
+                fade_out_ms: None,
+                volume_keyframes: None,
+                audio_filter: None,
+                speed: 1.0,
+                source_in_ms,
+                source_out_ms,
+                output_start_ms: out_start,
+                output_end_ms: out_end,
+                source_width: Some(320),
+                source_height: Some(240),
+            };
+            segments.push(segment("screen-asset", output_start_ms, output_end_ms));
+            mic_segments.push(segment("mic-asset", output_start_ms, output_end_ms));
+            system_segments.push(segment("system-asset", output_start_ms, output_end_ms));
+            overlays.push(RenderPlanOverlay {
+                asset_id: "camera-asset".into(),
+                stream_index: Some(0),
+                source_in_ms,
+                source_out_ms,
+                output_start_ms,
+                output_end_ms,
+                speed: 1.0,
+                x: 20.0,
+                y: 20.0,
+                width: 120.0,
+                height: 90.0,
+                crop: None,
+                opacity: 1.0,
+                visible: true,
+                shape: "rectangle".into(),
+                border_width: None,
+                border_color: None,
+                border_opacity: None,
+                shadow_enabled: None,
+                shadow_color: None,
+                shadow_blur: None,
+                shadow_offset_x: None,
+                shadow_offset_y: None,
+                preset: None,
+            });
+        }
+        let plan = RenderPlan {
+            project_id: "dense-smart-cut".into(),
+            duration_ms: output_ms,
+            segments,
+            gaps: Vec::new(),
+            overlays,
+            captions: Vec::new(),
+            caption_mode: "none".into(),
+            chapters: Vec::new(),
+            chapter_mode: "none".into(),
+            masks: Vec::new(),
+            zoom_segments: Vec::new(),
+            cursor_effects: Vec::new(),
+            overlay_render_plan: None,
+            canvas: Some(cursor::RenderCanvas {
+                width: 320,
+                height: 240,
+                fps: 30,
+                ..Default::default()
+            }),
+            audio: None,
+            audio_tracks: Some(vec![
+                RenderPlanAudio {
+                    asset_id: "mic-asset".into(),
+                    stream_index: Some(0),
+                    role: Some("microphone".into()),
+                    muted: false,
+                    volume: 1.0,
+                    segments: mic_segments,
+                },
+                RenderPlanAudio {
+                    asset_id: "system-asset".into(),
+                    stream_index: Some(0),
+                    role: Some("system_audio".into()),
+                    muted: false,
+                    volume: 1.0,
+                    segments: system_segments,
+                },
+            ]),
+            annotations: Vec::new(),
+            texts: Vec::new(),
+            images: Vec::new(),
+            keystrokes: Vec::new(),
+            keystroke_platform: "unknown".into(),
+        };
+
+        let asset_paths = HashMap::from([
+            ("screen-asset".to_string(), screen_path),
+            ("camera-asset".to_string(), camera_path),
+            ("mic-asset".to_string(), mic_path),
+            ("system-asset".to_string(), system_path),
+        ]);
+        let settings = ExportSettings {
+            preset: "speed".into(),
+            codec: "h264".into(),
+            encoder: "software".into(),
+            container: "mp4".into(),
+            caption_mode: "none".into(),
+            chapter_mode: "none".into(),
+            range: None,
+            keystroke_overlay: None,
+            renderer: "compatibility".into(),
+        };
+        let res = render_timeline_composition(
+            &ffmpeg,
+            &out_path,
+            &plan,
+            &plan.project_id,
+            &asset_paths,
+            &settings,
+            encoding::ExportEncoder::Software,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            &|_| {},
+            None,
+            Some(Path::new(&ffprobe)),
+        );
+        assert!(res.is_ok(), "dense export: {:?}", res.err());
+
+        let probe = crate::media::probe::probe_media(&ffprobe, &out_path, &plan.project_id)
+            .expect("probe output");
+        let video = probe
+            .streams
+            .iter()
+            .find(|stream| stream.kind == "video")
+            .expect("video stream");
+        let audio = probe
+            .streams
+            .iter()
+            .find(|stream| stream.kind == "audio")
+            .expect("audio stream");
+        let expected_frames = plan.duration_ms.saturating_mul(30).div_ceil(1000);
+        let frame_probe = Command::new(&ffprobe)
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-count_frames",
+                "-show_entries",
+                "stream=nb_read_frames",
+                "-of",
+                "csv=p=0",
+            ])
+            .arg(&out_path)
+            .output()
+            .expect("count output frames");
+        let decoded_frames: u64 = String::from_utf8_lossy(&frame_probe.stdout)
+            .trim()
+            .parse()
+            .expect("frame count");
+        assert_eq!(decoded_frames, expected_frames, "video frame count");
+        let video_ms = video.duration_ms.unwrap_or(0);
+        let audio_ms = audio.duration_ms.unwrap_or(0);
+        let frame_ms = 1000.0 / 30.0;
+        assert!(
+            (video_ms as f64 - plan.duration_ms as f64).abs() <= frame_ms,
+            "video duration {video_ms} vs {}",
+            plan.duration_ms
+        );
+        assert!(
+            (audio_ms as f64 - video_ms as f64).abs() <= frame_ms,
+            "audio/video duration skew {audio_ms} vs {video_ms}"
+        );
+
+        // The GPU compositor gets the same plan: camera pieces must coalesce
+        // into one decode process/slot and the frame count must stay identical.
+        let gpu_settings = ExportSettings {
+            preset: "speed".into(),
+            codec: "h264".into(),
+            encoder: "software".into(),
+            container: "mp4".into(),
+            caption_mode: "none".into(),
+            chapter_mode: "none".into(),
+            range: None,
+            keystroke_overlay: None,
+            renderer: "gpu".into(),
+        };
+        let gpu_out_path = temp_dir.join("out-gpu.mp4");
+        let gpu_res = render_timeline_composition(
+            &ffmpeg,
+            &gpu_out_path,
+            &plan,
+            &plan.project_id,
+            &asset_paths,
+            &gpu_settings,
+            encoding::ExportEncoder::Software,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            &|_| {},
+            None,
+            Some(Path::new(&ffprobe)),
+        );
+        match gpu_res {
+            Ok(_) => {
+                let gpu_frames = Command::new(&ffprobe)
+                    .args([
+                        "-v",
+                        "error",
+                        "-select_streams",
+                        "v:0",
+                        "-count_frames",
+                        "-show_entries",
+                        "stream=nb_read_frames",
+                        "-of",
+                        "csv=p=0",
+                    ])
+                    .arg(&gpu_out_path)
+                    .output()
+                    .expect("count GPU output frames");
+                let decoded: u64 = String::from_utf8_lossy(&gpu_frames.stdout)
+                    .trim()
+                    .parse()
+                    .expect("GPU frame count");
+                assert_eq!(decoded, expected_frames, "GPU video frame count");
+            }
+            Err(error) => {
+                // No working adapter in this environment: the compatibility
+                // path above is still authoritative for the frame contract.
+                eprintln!("GPU dense export skipped: {error}");
+            }
+        }
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

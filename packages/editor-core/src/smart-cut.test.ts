@@ -197,8 +197,9 @@ describe("analyzeSilenceRanges", () => {
     const waveforms = new Map([[1, makeWaveform(20_000, [{ startMs: 0, endMs: 10_000 }])]])
 
     const result = analyzeSilenceRanges(state, waveforms, OPTS)
-    // 4000–10000 protected by the unanalyzable clip; only 0–4000 remains silent.
-    expect(result.ranges).toEqual([{ startMs: 80, endMs: 3_920 }])
+    // 4000–10000 protected by the unanalyzable clip; only 0–4000 remains
+    // silent. The 80 ms head island is below the minimum and is merged away.
+    expect(result.ranges).toEqual([{ startMs: 0, endMs: 3_920 }])
   })
 
   it("drops silences shorter than minDurationMs and ranges too small after padding", () => {
@@ -280,9 +281,10 @@ describe("mapSourceRangesToTimeline", () => {
       ],
       { paddingMs: 100 },
     )
-    // [5000..6000] → timeline 2000–3000, [8000..9000] → timeline 5000–6000.
+    // [5000..6000] → timeline 2000-3000, [8000..9000] → timeline 5000-6000.
+    // The 100 ms head island is below the minimum and merges into the cut.
     expect(mapped).toEqual([
-      { startMs: 2_100, endMs: 2_900 },
+      { startMs: 2_000, endMs: 2_900 },
       { startMs: 5_100, endMs: 5_900 },
     ])
   })
@@ -297,5 +299,78 @@ describe("combinedWaveformEnvelope", () => {
     expect(amplitudes.length).toBe(50)
     expect(amplitudes[0]).toBe(0.5) // b is loud in the first half
     expect(amplitudes[49]).toBe(0.5) // a is loud in the second half
+  })
+})
+
+describe("Smart Cut island merging and frame snapping", () => {
+  it("merges two cuts whose kept island is under 200 ms", () => {
+    const state = makeState([screenTrack, audioTrack([audioClip({})])])
+    // Silence [5000,6000] and [6030,8000]: padded ends leave a 160 ms island.
+    const waveforms = new Map([
+      [
+        1,
+        makeWaveform(20_000, [
+          { startMs: 5_000, endMs: 6_000 },
+          { startMs: 6_030, endMs: 8_000 },
+        ]),
+      ],
+    ])
+
+    const result = analyzeSilenceRanges(state, waveforms, OPTS)
+    expect(result.ranges).toEqual([{ startMs: 5_080, endMs: 7_920 }])
+  })
+
+  it("merges tiny head and tail islands against the audible coverage", () => {
+    const state = makeState([screenTrack, audioTrack([audioClip({})])])
+    const waveforms = new Map([
+      [
+        1,
+        makeWaveform(20_000, [
+          { startMs: 80, endMs: 5_000 },
+          { startMs: 5_150, endMs: 19_900 },
+        ]),
+      ],
+    ])
+
+    const result = analyzeSilenceRanges(state, waveforms, OPTS)
+    expect(result.ranges).toEqual([
+      { startMs: 0, endMs: 4_920 },
+      { startMs: 5_220, endMs: 20_000 },
+    ])
+  })
+
+  it("keeps islands at or above the minimum", () => {
+    const state = makeState([screenTrack, audioTrack([audioClip({})])])
+    // Padded end 5_920, next start 6_120 -> exactly 200 ms kept.
+    const waveforms = new Map([
+      [
+        1,
+        makeWaveform(20_000, [
+          { startMs: 5_000, endMs: 6_000 },
+          { startMs: 6_040, endMs: 8_000 },
+        ]),
+      ],
+    ])
+
+    const result = analyzeSilenceRanges(state, waveforms, OPTS)
+    expect(result.ranges).toEqual([
+      { startMs: 5_080, endMs: 5_920 },
+      { startMs: 6_120, endMs: 7_920 },
+    ])
+  })
+
+  it("snaps cut edges to the canvas frame grid for both analysis paths", () => {
+    const state = makeState([screenTrack, audioTrack([audioClip({})])])
+    const waveforms = new Map([[1, makeWaveform(20_000, [{ startMs: 5_000, endMs: 10_000 }])]])
+
+    const analyzed = analyzeSilenceRanges(state, waveforms, { ...OPTS, fps: 30 })
+    // 5080 ms -> frame 152 -> 5067 ms; 9920 ms -> frame 298 -> 9933 ms.
+    expect(analyzed.ranges).toEqual([{ startMs: 5_067, endMs: 9_933 }])
+
+    const mapped = mapSourceRangesToTimeline(state, [{ startMs: 5_000, endMs: 10_000 }], {
+      paddingMs: 80,
+      fps: 30,
+    })
+    expect(mapped).toEqual([{ startMs: 5_067, endMs: 9_933 }])
   })
 })

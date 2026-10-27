@@ -32,6 +32,11 @@ export interface SmartCutOptions {
   minDurationMs: number
   /** Audio kept inside each boundary so speech onsets/offsets are not clipped. */
   paddingMs: number
+  /**
+   * Canvas frame rate. When set, range edges snap to the output frame grid so
+   * every spliced piece covers a whole number of frames.
+   */
+  fps?: number
 }
 
 export interface SmartCutAnalysis {
@@ -53,6 +58,9 @@ export const SMART_CUT_DEFAULTS = {
 
 // A cut shorter than this is not worth a splice point pair.
 const MIN_KEPT_RANGE_MS = 60
+// Speech kept between two cuts shorter than this reads as a glitch and costs a
+// pair of splices (plus a declick fade) for a few frames of audio.
+export const MIN_KEPT_ISLAND_MS = 200
 // Percentile of per-window amplitudes treated as the recording's noise floor.
 const NOISE_FLOOR_PERCENTILE = 0.2
 // Headroom above the estimated noise floor for the auto threshold (+12 dB).
@@ -60,6 +68,56 @@ const NOISE_FLOOR_HEADROOM = 4
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value))
+}
+
+/**
+ * Snap a timeline edge onto the canvas frame grid. Without an `fps` the value
+ * is only rounded to whole milliseconds.
+ */
+export function snapRangeEdgeToFrame(ms: number, fps: number | undefined): number {
+  if (!fps || !Number.isFinite(fps) || fps <= 0) return Math.round(ms)
+  return Math.round((Math.round((ms * fps) / 1000) * 1000) / fps)
+}
+
+/**
+ * Collapse cuts whose kept island is shorter than `MIN_KEPT_ISLAND_MS`: the
+ * island reads as a click and would otherwise become its own pair of splices.
+ * Edge islands (before the first cut / after the last) count too — a recording
+ * that opens with 80 ms of room tone should not keep a one-clip head.
+ */
+function mergeTinyKeptIslands(
+  ranges: SilenceRange[],
+  coverageStartMs?: number,
+  coverageEndMs?: number,
+): SilenceRange[] {
+  const merged = ranges.map((range) => ({ ...range }))
+  if (merged.length === 0) return merged
+  const first = merged[0]!
+  if (
+    coverageStartMs !== undefined &&
+    first.startMs > coverageStartMs &&
+    first.startMs - coverageStartMs < MIN_KEPT_ISLAND_MS
+  ) {
+    first.startMs = coverageStartMs
+  }
+  for (let index = 1; index < merged.length; index++) {
+    const previous = merged[index - 1]!
+    const range = merged[index]!
+    if (range.startMs - previous.endMs < MIN_KEPT_ISLAND_MS) {
+      previous.endMs = Math.max(previous.endMs, range.endMs)
+      merged.splice(index, 1)
+      index--
+    }
+  }
+  const last = merged[merged.length - 1]!
+  if (
+    coverageEndMs !== undefined &&
+    coverageEndMs > last.endMs &&
+    coverageEndMs - last.endMs < MIN_KEPT_ISLAND_MS
+  ) {
+    last.endMs = coverageEndMs
+  }
+  return merged
 }
 
 /** Milliseconds of source audio covered by one peak window. */
@@ -263,13 +321,17 @@ export function analyzeSilenceRanges(
   const silent = subtractIntervals(subtractIntervals(coverageUnion, activityUnion), protectedUnion)
 
   const minKeep = Math.max(MIN_KEPT_RANGE_MS, options.paddingMs / 2)
-  const ranges: SilenceRange[] = silent
-    .filter((range) => range.endMs - range.startMs >= options.minDurationMs)
-    .map((range) => ({
-      startMs: Math.round(range.startMs + options.paddingMs),
-      endMs: Math.round(range.endMs - options.paddingMs),
-    }))
-    .filter((range) => range.endMs - range.startMs >= minKeep)
+  const ranges = mergeTinyKeptIslands(
+    silent
+      .filter((range) => range.endMs - range.startMs >= options.minDurationMs)
+      .map((range) => ({
+        startMs: snapRangeEdgeToFrame(range.startMs + options.paddingMs, options.fps),
+        endMs: snapRangeEdgeToFrame(range.endMs - options.paddingMs, options.fps),
+      }))
+      .filter((range) => range.endMs - range.startMs >= minKeep),
+    coverageUnion[0]?.startMs,
+    coverageUnion[coverageUnion.length - 1]?.endMs,
+  )
 
   const removedMs = ranges.reduce((total, range) => total + (range.endMs - range.startMs), 0)
   const audibleCoverageMs = coverageUnion.reduce(
@@ -287,7 +349,7 @@ export function analyzeSilenceRanges(
 export function mapSourceRangesToTimeline(
   state: TimelineState,
   ranges: SilenceRange[],
-  options?: { paddingMs?: number; minKeepMs?: number },
+  options?: { paddingMs?: number; minKeepMs?: number; fps?: number },
 ): SilenceRange[] {
   const padding = options?.paddingMs ?? 0
   const minKeep = Math.max(options?.minKeepMs ?? MIN_KEPT_RANGE_MS, padding / 2)
@@ -305,12 +367,22 @@ export function mapSourceRangesToTimeline(
     }
   }
 
-  return mergeIntervals(mapped)
-    .map((range) => ({
-      startMs: Math.round(range.startMs + padding),
-      endMs: Math.round(range.endMs - padding),
-    }))
-    .filter((range) => range.endMs - range.startMs >= minKeep)
+  const coverage = mergeIntervals(
+    collectCaptureAudioClips(state).map((clip) => ({
+      startMs: clip.startMs,
+      endMs: clip.startMs + clip.durationMs,
+    })),
+  )
+  return mergeTinyKeptIslands(
+    mergeIntervals(mapped)
+      .map((range) => ({
+        startMs: snapRangeEdgeToFrame(range.startMs + padding, options?.fps),
+        endMs: snapRangeEdgeToFrame(range.endMs - padding, options?.fps),
+      }))
+      .filter((range) => range.endMs - range.startMs >= minKeep),
+    coverage[0]?.startMs,
+    coverage[coverage.length - 1]?.endMs,
+  )
 }
 
 /**

@@ -472,15 +472,7 @@ pub(crate) fn render_timeline_on_gpu(
         .map(|(dir, _)| super::TempExportDir(dir.clone()));
     let caption_script = caption_dir.as_ref().map(|(_, script)| script.as_path());
 
-    let mut cameras = build_cameras(
-        ffmpeg_path,
-        plan,
-        project_id,
-        asset_paths,
-        shared,
-        canvas,
-        fps,
-    )?;
+    let mut cameras = build_cameras(ffmpeg_path, plan, project_id, asset_paths, shared, fps)?;
     let encode_process = encode::spawn(
         ffmpeg_path,
         output_path,
@@ -1069,55 +1061,36 @@ fn build_cameras(
     project_id: &str,
     asset_paths: &HashMap<String, PathBuf>,
     shared: &CompositionShared,
-    canvas: &super::cursor::RenderCanvas,
     fps: u32,
 ) -> Result<Vec<CameraRuntime>> {
     let mut cameras = Vec::new();
-    for overlay in plan.overlays.iter().filter(|overlay| {
-        overlay.visible
-            && overlay.output_end_ms > overlay.output_start_ms
-            && overlay.output_start_ms < plan.duration_ms
-            && overlay.output_end_ms > 0
-    }) {
-        if !overlay.speed.is_finite() || overlay.speed <= 0.0 {
-            return Err(InternalError::Media("camera overlay speed is invalid".into()).into());
-        }
-        let video_delay_s = asset_paths
-            .get(&overlay.asset_id)
-            .map(|path| shared.probe.video_start_delay_s(path, &overlay.asset_id))
-            .unwrap_or(0.0);
-        let Some(clamp) = super::camera_window_clamp(
-            overlay.output_start_ms,
-            overlay.output_end_ms,
-            overlay.source_in_ms,
-            overlay.source_out_ms,
-            overlay.speed,
-            canvas.fps as f64,
-            0.0,
-            plan.duration_ms as f64,
-            video_delay_s,
-        ) else {
-            continue;
-        };
-        let width = ((overlay.width.round() as u32) / 2 * 2).max(2);
-        let height = ((overlay.height.round() as u32) / 2 * 2).max(2);
-        let camera_plan = decode::plan_camera(
+    // Smart Cut splits one camera clip into hundreds of pieces; coalescing
+    // them keeps one decoder process per contiguous, visually-identical run.
+    let tracks = super::coalesce_camera_overlays(&plan.overlays);
+    for track in tracks
+        .iter()
+        .filter(|track| track.is_renderable(plan.duration_ms))
+    {
+        let Some(camera_plan) = decode::plan_camera(
             project_id,
-            overlay,
+            track,
+            &plan.overlays,
             asset_paths,
             shared,
-            &clamp,
-            width,
-            height,
+            plan.duration_ms,
             fps,
-        )?;
+        )?
+        else {
+            continue;
+        };
         let process = decode::DecodeProcess::spawn_camera(ffmpeg_path, &camera_plan)?;
         // Index the compositor's camera inventory, not the plan overlay list:
-        // hidden/zero-length overlays never reach either.
+        // hidden/zero-length overlays never reach either, and both lists apply
+        // the identical coalesce + renderable filter.
         cameras.push(CameraRuntime {
             index: cameras.len(),
-            start_ms: overlay.output_start_ms,
-            end_ms: overlay.output_end_ms,
+            start_ms: track.start_ms,
+            end_ms: track.end_ms,
             process,
             done: false,
         });
@@ -1247,12 +1220,14 @@ fn compositor_spec(
             .map(|rect| compositor::PlaneInfo { rect });
     }
 
-    for overlay in plan.overlays.iter().filter(|overlay| {
-        overlay.visible
-            && overlay.output_end_ms > overlay.output_start_ms
-            && overlay.output_start_ms < plan.duration_ms
-            && overlay.output_end_ms > 0
-    }) {
+    // Same coalesced inventory/order as `build_cameras`, so a camera frame's
+    // index addresses the config the compositor built for that track.
+    let tracks = super::coalesce_camera_overlays(&plan.overlays);
+    for track in tracks
+        .iter()
+        .filter(|track| track.is_renderable(plan.duration_ms))
+    {
+        let overlay = &plan.overlays[track.first_overlay()];
         let width = ((overlay.width.round() as u32) / 2 * 2).max(2);
         let height = ((overlay.height.round() as u32) / 2 * 2).max(2);
         let x = (overlay.x.round() as i32) / 2 * 2;

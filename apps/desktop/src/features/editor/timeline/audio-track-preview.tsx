@@ -1,13 +1,25 @@
-import { useEffect, useMemo, useRef } from "react"
-import type { AudioClip, MediaAudioTrackOutput, TimelineTrack } from "@recordforge/contracts"
-import { computePreviewMediaSync, evaluateVolumeEnvelope } from "@recordforge/editor-core"
+import { useMemo, useRef } from "react"
+import type {
+  AudioClip,
+  MediaAudioTrackOutput,
+  TimelineClip,
+  TimelineTrack,
+} from "@recordforge/contracts"
+import {
+  buildPreviewSegments,
+  evaluateVolumeEnvelope,
+  type PreviewSegment,
+} from "@recordforge/editor-core"
 import { toAssetUrl } from "../../../lib/assets"
+import { useDualMediaSlots } from "./playback/use-dual-media-slots"
 import { usePlayheadMs } from "./use-playback-state"
 
-interface PreviewAudioTrack {
+interface PreviewAudioTrackGroup {
+  /** Timeline track id. */
   id: string
-  clip: AudioClip
-  source: string
+  clips: AudioClip[]
+  /** clip id → playable URL. */
+  sourceByClip: Map<string, string>
   volume: number
   muted: boolean
 }
@@ -29,39 +41,129 @@ function fadeMultiplier(clip: AudioClip, playheadMs: number): number {
   return clip.volume > 0 ? envelopeVolume / clip.volume : 0
 }
 
+function clipAt(clips: AudioClip[], playheadMs: number): AudioClip | null {
+  return (
+    clips.find(
+      (clip) => playheadMs >= clip.startMs && playheadMs < clip.startMs + clip.durationMs,
+    ) ?? null
+  )
+}
+
 function buildPreviewTracks(
   tracks: TimelineTrack[],
   outputs: MediaAudioTrackOutput[],
   assetPaths: Record<string, string>,
   workDir?: string | null,
-): PreviewAudioTrack[] {
+): PreviewAudioTrackGroup[] {
   const outputsByStream = new Map(outputs.map((output) => [output.streamIndex, output]))
   const hasSoloTrack = tracks.some((track) => track.kind === "audio" && track.solo)
 
   return tracks.flatMap((track) => {
     if (track.kind !== "audio") return []
     const isExcludedBySolo = hasSoloTrack && !track.solo
-
-    return track.clips.flatMap((clip) => {
-      if (clip.kind !== "audio") return []
+    const clips: AudioClip[] = []
+    const sourceByClip = new Map<string, string>()
+    for (const clip of track.clips) {
+      if (clip.kind !== "audio") continue
       const output = outputsByStream.get(clip.streamIndex ?? -1)
       const sourcePath = output?.audioPath ?? assetPaths[clip.assetId]
-      if (!sourcePath) return []
-
+      if (!sourcePath) continue
       const source = toAssetUrl(sourcePath, workDir)
-      if (!source) return []
-
-      return [
-        {
-          id: clip.id,
-          clip,
-          source,
-          volume: Math.max(0, Math.min(1, track.volume * clip.volume)),
-          muted: track.muted || isExcludedBySolo,
-        },
-      ]
-    })
+      if (!source) continue
+      clips.push(clip)
+      sourceByClip.set(clip.id, source)
+    }
+    if (clips.length === 0) return []
+    return [
+      {
+        id: track.id,
+        clips,
+        sourceByClip,
+        volume: Math.max(0, Math.min(1, track.volume)),
+        muted: track.muted || isExcludedBySolo,
+      },
+    ]
   })
+}
+
+interface AudioTrackPreviewTrackProps extends Omit<
+  AudioTrackPreviewProps,
+  "tracks" | "outputs" | "assetPaths" | "workDir"
+> {
+  group: PreviewAudioTrackGroup
+}
+
+/**
+ * One audio track on a pair of media elements. The standby is pre-seeked to
+ * the next segment so a cut swaps elements instead of seeking a cold one.
+ */
+function AudioTrackPreviewTrack({
+  group,
+  isPlaying,
+  playbackRate,
+  frameMs,
+  isVideoSeeking = false,
+}: AudioTrackPreviewTrackProps) {
+  const playheadMs = usePlayheadMs()
+  const slot0 = useRef<HTMLAudioElement>(null)
+  const slot1 = useRef<HTMLAudioElement>(null)
+  const slots = useMemo(
+    () =>
+      [slot0, slot1] as [
+        React.RefObject<HTMLAudioElement | null>,
+        React.RefObject<HTMLAudioElement | null>,
+      ],
+    [],
+  )
+  const segments = useMemo(
+    () =>
+      buildPreviewSegments(
+        group.clips as TimelineClip[],
+        (clip) => group.sourceByClip.get(clip.id) ?? "",
+      ),
+    [group.clips, group.sourceByClip],
+  )
+
+  const { activeSlot } = useDualMediaSlots({
+    segments,
+    playheadMs,
+    // A user scrub pauses the screen element; cut swaps no longer seek, so the
+    // audio only needs to stop for real seeks.
+    isPlaying: isPlaying && !isVideoSeeking,
+    playbackRate,
+    frameMs,
+    kind: "audio",
+    enabled: !group.muted && group.volume > 0,
+    slots,
+    sourceUrlOf: (sourceKey) => sourceKey || null,
+    onSync: (_slot, segment: PreviewSegment | null, element, isActive) => {
+      if (!isActive || !segment) {
+        element.muted = true
+        element.volume = 0
+        return
+      }
+      const clip = clipAt(group.clips, playheadMs)
+      element.muted = group.muted
+      element.volume = clip ? Math.min(1, group.volume * fadeMultiplier(clip, playheadMs)) : 0
+    },
+  })
+
+  return (
+    <>
+      <audio
+        ref={slot0}
+        preload="auto"
+        aria-hidden
+        style={{ display: activeSlot === 0 ? undefined : "none" }}
+      />
+      <audio
+        ref={slot1}
+        preload="auto"
+        aria-hidden
+        style={{ display: activeSlot === 1 ? undefined : "none" }}
+      />
+    </>
+  )
 }
 
 export function AudioTrackPreview({
@@ -74,60 +176,21 @@ export function AudioTrackPreview({
   workDir,
   isVideoSeeking = false,
 }: AudioTrackPreviewProps) {
-  // Subscribed internally — playback frames sync these hidden audio elements
-  // without re-rendering the parent canvas stack.
-  const playheadMs = usePlayheadMs()
-  const audioRefs = useRef<Record<string, HTMLAudioElement | null>>({})
   const previewTracks = useMemo(
     () => buildPreviewTracks(tracks, outputs, assetPaths, workDir),
     [assetPaths, outputs, tracks, workDir],
   )
 
-  useEffect(() => {
-    for (const previewTrack of previewTracks) {
-      const element = audioRefs.current[previewTrack.id]
-      if (!element) continue
-      const isTrackActive = !previewTrack.muted && previewTrack.volume > 0
-      const canPlay = isTrackActive && !isVideoSeeking
-      const decision = computePreviewMediaSync({
-        kind: "audio",
-        clip: previewTrack.clip,
-        playheadMs,
-        currentTimeMs: element.currentTime * 1000,
-        playbackRate,
-        isPlaying: isPlaying && canPlay,
-        frameMs,
-      })
-      element.volume = Math.min(
-        1,
-        previewTrack.volume * fadeMultiplier(previewTrack.clip, playheadMs),
-      )
-      element.muted = previewTrack.muted
-      element.preservesPitch = decision.preservesPitch
-      if (Math.abs(element.playbackRate - decision.playbackRate) > 0.001) {
-        element.playbackRate = decision.playbackRate
-      }
-      if (decision.shouldSeek || (decision.shouldPlay && element.paused)) {
-        element.currentTime = decision.targetSourceMs / 1000
-      }
-      if (decision.shouldPlay) {
-        if (element.paused) void element.play().catch(() => undefined)
-      } else if (decision.shouldPause) {
-        element.pause()
-      }
-    }
-  }, [frameMs, isPlaying, isVideoSeeking, playbackRate, playheadMs, previewTracks])
-
   return (
     <div className="hidden" aria-hidden>
-      {previewTracks.map((previewTrack) => (
-        <audio
-          key={previewTrack.id}
-          ref={(element) => {
-            audioRefs.current[previewTrack.id] = element
-          }}
-          src={previewTrack.source}
-          preload="auto"
+      {previewTracks.map((group) => (
+        <AudioTrackPreviewTrack
+          key={group.id}
+          group={group}
+          isPlaying={isPlaying}
+          playbackRate={playbackRate}
+          frameMs={frameMs}
+          isVideoSeeking={isVideoSeeking}
         />
       ))}
     </div>

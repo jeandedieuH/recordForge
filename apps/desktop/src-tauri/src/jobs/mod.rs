@@ -457,7 +457,18 @@ impl JobManager {
         let active = media_db::list_jobs(&conn, &project.recording_id)?;
         let active = active_export_for_output(&active, None, &destination.to_string_lossy());
         if let Some(active) = active {
-            return Ok(active.clone());
+            // Only a job with a live worker may swallow a duplicate request.
+            // A pending/running row left by a dead worker (app exit, panic)
+            // would otherwise keep returning a job that will never progress.
+            let has_worker = self
+                .active_tokens
+                .lock()
+                .map(|tokens| tokens.contains_key(&active.id))
+                .unwrap_or(false);
+            if has_worker {
+                return Ok(active.clone());
+            }
+            media_db::cancel_job(&conn, &active.id)?;
         }
 
         let mut request = request;
@@ -552,7 +563,15 @@ impl JobManager {
             .as_deref()
             .and_then(|output| active_export_for_output(&active, Some(&existing.id), output))
         {
-            return Ok(active.clone());
+            let has_worker = self
+                .active_tokens
+                .lock()
+                .map(|tokens| tokens.contains_key(&active.id))
+                .unwrap_or(false);
+            if has_worker {
+                return Ok(active.clone());
+            }
+            media_db::cancel_job(&conn, &active.id)?;
         }
         let request: ExportRequest =
             serde_json::from_value(existing.options.clone()).map_err(|error| {
@@ -802,56 +821,16 @@ impl JobManager {
                 continue;
             }
             if matches!(job.kind, crate::database::media::MediaJobKind::Export) {
-                let request = match serde_json::from_value::<ExportRequest>(job.options.clone()) {
-                    Ok(request) => request,
-                    Err(_) => {
-                        self.fail_unresumable_job(
-                            &job.id,
-                            "stored export request is incompatible with this app version",
-                        )?;
-                        continue;
-                    }
-                };
-                if request.plan.validate().is_err() {
-                    self.fail_unresumable_job(&job.id, "stored export timeline is invalid")?;
-                    continue;
-                }
-                if crate::exports::validate_export_settings(&request.settings, &request.plan)
-                    .is_err()
-                {
-                    self.fail_unresumable_job(&job.id, "stored export settings are invalid")?;
-                    continue;
-                }
-                // A Pro export persisted before the license lapsed must not
-                // slip through on resume — re-check current entitlements.
-                if self
-                    .license
-                    .enforce_export(&request.plan, &request.settings)
-                    .is_err()
-                {
-                    self.fail_unresumable_job(&job.id, "stored export requires RecordForge Pro")?;
-                    continue;
-                }
-                let expected_ext = expected_export_extension(&request.settings);
-                let destination = Path::new(&request.output_path);
-                if !destination
-                    .extension()
-                    .and_then(|value| value.to_str())
-                    .is_some_and(|value| value.eq_ignore_ascii_case(expected_ext))
-                    || self
-                        .path_policy
-                        .validate_export_destination(destination)
-                        .is_err()
-                {
-                    self.fail_unresumable_job(&job.id, "stored export destination is invalid")?;
-                    continue;
-                }
-                let token = Arc::new(AtomicBool::new(false));
-                self.active_tokens
-                    .lock()
-                    .map_err(|_| InternalError::Unknown("active tokens mutex poisoned".into()))?
-                    .insert(job.id.clone(), token.clone());
-                self.spawn_export(job, request, token);
+                // Exports are explicit user actions whose persisted render
+                // plan can go stale while the app is closed, and a row left
+                // behind by the previous process (pending or "running") makes
+                // `start_export` dedupe every new request to a job that has no
+                // worker. Fail it instead: the UI offers Retry, which starts a
+                // fresh job from the current timeline.
+                self.fail_unresumable_job(
+                    &job.id,
+                    "Export was interrupted when the app exited. Retry the export to start again.",
+                )?;
                 continue;
             }
             if !matches!(job.kind, crate::database::media::MediaJobKind::Prepare) {

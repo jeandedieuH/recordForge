@@ -40,6 +40,7 @@ import {
   validateNoOverlap,
 } from "@recordforge/domain"
 import { canvasSizeForAspectRatio, clampZoomTarget, getManualZoomSegments } from "./composition"
+import { partitionAudioEnvelope } from "./audio-envelope"
 import { resolveCaptionDesign } from "./captions/caption-layout"
 import {
   captionWords,
@@ -1307,6 +1308,23 @@ function applyTrimClip(
   return { ok: true, value: updateTrackInState(withClip, track.id, trackResult.value) }
 }
 
+/**
+ * Envelope fields for an audio piece created by a split or range delete.
+ * Audio only: video clips have no fade/volume envelope to partition.
+ */
+function audioPieceEnvelope(
+  clip: TimelineClip,
+  piece: {
+    durationMs: number
+    sourceInMs: number
+    keepFadeIn: boolean
+    keepFadeOut: boolean
+  },
+): Pick<AudioClip, "fadeInMs" | "fadeOutMs" | "volumeKeyframes"> | Record<string, never> {
+  if (clip.kind !== "audio") return {}
+  return partitionAudioEnvelope(clip, piece)
+}
+
 function applySplitClip(
   state: TimelineState,
   command: SplitClipCommand,
@@ -1419,6 +1437,9 @@ function applySplitClip(
       ? partitionCaptionWordTimingByIndex(clip.sourceWords, captionSplit[0], captionSplit[1])
       : undefined
 
+  // A split leaves each half with only its own real edge: the left piece keeps
+  // the clip's fade-in, the right piece its fade-out. Copies of both would fade
+  // at every one of Smart Cut's hundreds of splices.
   const left: TimelineClip = {
     ...clip,
     id: leftClipId,
@@ -1426,6 +1447,12 @@ function applySplitClip(
     sourceInMs: leftSourceIn,
     sourceOutMs: leftSourceOut,
     ...(captionSplit ? { text: captionSplit[0] } : {}),
+    ...audioPieceEnvelope(clip, {
+      durationMs: leftDuration,
+      sourceInMs: leftSourceIn,
+      keepFadeIn: true,
+      keepFadeOut: false,
+    }),
   }
 
   const right: TimelineClip = {
@@ -1436,6 +1463,12 @@ function applySplitClip(
     sourceInMs: rightSourceIn,
     sourceOutMs: rightSourceOut,
     ...(captionSplit ? { text: captionSplit[1] } : {}),
+    ...audioPieceEnvelope(clip, {
+      durationMs: rightDuration,
+      sourceInMs: rightSourceIn,
+      keepFadeIn: false,
+      keepFadeOut: true,
+    }),
   }
   if (clip.kind === "caption") {
     const hadProvenance = hasCaptionProvenance(clip)
@@ -2017,6 +2050,12 @@ function clipSegmentsAfterRange(
       durationMs: Math.round(leftDurationMs),
       sourceOutMs: clip.sourceInMs + Math.round(leftDurationMs * clip.speed),
       ...(isCaption ? { text: leftText ?? clip.text } : {}),
+      ...audioPieceEnvelope(clip, {
+        durationMs: leftDurationMs,
+        sourceInMs: clip.sourceInMs,
+        keepFadeIn: true,
+        keepFadeOut: false,
+      }),
     }
     if (isCaption) {
       finalizeCaptionPiece(
@@ -2032,13 +2071,20 @@ function clipSegmentsAfterRange(
   if (hasRight && clipEndMs > rightStartMs && keepRight) {
     const rightDurationMs = clipEndMs - rightStartMs
     const nextStartMs = ripple ? deleteStartMs : rightStartMs
+    const rightSourceInMs = clip.sourceInMs + Math.round((rightStartMs - clip.startMs) * clip.speed)
     const rightClip: TimelineClip = {
       ...clip,
       id: hasLeft ? `${clip.id}:range:${deleteStartMs}:${deleteEndMs}:right` : clip.id,
       startMs: nextStartMs,
       durationMs: Math.round(rightDurationMs),
-      sourceInMs: clip.sourceInMs + Math.round((rightStartMs - clip.startMs) * clip.speed),
+      sourceInMs: rightSourceInMs,
       ...(isCaption ? { text: rightText ?? clip.text } : {}),
+      ...audioPieceEnvelope(clip, {
+        durationMs: rightDurationMs,
+        sourceInMs: rightSourceInMs,
+        keepFadeIn: false,
+        keepFadeOut: true,
+      }),
     }
     if (isCaption) {
       finalizeCaptionPiece(
@@ -2056,18 +2102,32 @@ function clipSegmentsAfterRange(
     // The text no longer matches stored timings — drop them.
     const leftDur = leftEndMs - clip.startMs
     const rightDur = clipEndMs - rightStartMs
+    const fallbackRightSourceIn =
+      clip.sourceInMs + Math.round((rightStartMs - clip.startMs) * clip.speed)
     const fallback: TimelineClip =
       leftDur >= rightDur
         ? {
             ...clip,
             durationMs: Math.round(leftDur),
             sourceOutMs: clip.sourceInMs + Math.round(leftDur * clip.speed),
+            ...audioPieceEnvelope(clip, {
+              durationMs: leftDur,
+              sourceInMs: clip.sourceInMs,
+              keepFadeIn: true,
+              keepFadeOut: false,
+            }),
           }
         : {
             ...clip,
             startMs: ripple ? deleteStartMs : rightStartMs,
             durationMs: Math.round(rightDur),
-            sourceInMs: clip.sourceInMs + Math.round((rightStartMs - clip.startMs) * clip.speed),
+            sourceInMs: fallbackRightSourceIn,
+            ...audioPieceEnvelope(clip, {
+              durationMs: rightDur,
+              sourceInMs: fallbackRightSourceIn,
+              keepFadeIn: false,
+              keepFadeOut: true,
+            }),
           }
     finalizeCaptionPiece(fallback as CaptionClip, undefined, undefined, hadProvenance)
     segments.push(fallback)

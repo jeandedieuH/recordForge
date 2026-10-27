@@ -1,4 +1,4 @@
-import type { AudioClip } from "@recordforge/contracts"
+import type { AudioClip, AudioVolumeKeyframe } from "@recordforge/contracts"
 
 /**
  * Evaluates the volume gain multiplier for an AudioClip at a given time inside the clip.
@@ -61,4 +61,91 @@ export function evaluateVolumeEnvelope(clip: AudioClip, clipTimeMs: number): num
       : 1
 
   return Math.max(0, Math.min(2, clip.volume * Math.min(fadeInGain, fadeOutGain)))
+}
+
+/** Volume envelope fields a surviving audio piece carries after a cut. */
+export interface AudioPieceEnvelope {
+  fadeInMs: number
+  fadeOutMs: number
+  volumeKeyframes?: AudioVolumeKeyframe[]
+}
+
+function interpolateKeyframeVolume(keyframes: AudioVolumeKeyframe[], timeMs: number): number {
+  if (keyframes.length === 0) return 1
+  const first = keyframes[0]!
+  const last = keyframes[keyframes.length - 1]!
+  if (timeMs <= first.timeMs) return first.volume
+  if (timeMs >= last.timeMs) return last.volume
+  for (let index = 0; index < keyframes.length - 1; index++) {
+    const left = keyframes[index]!
+    const right = keyframes[index + 1]!
+    if (timeMs >= left.timeMs && timeMs <= right.timeMs) {
+      const span = right.timeMs - left.timeMs
+      const ratio = span > 0 ? (timeMs - left.timeMs) / span : 0
+      return left.volume + ratio * (right.volume - left.volume)
+    }
+  }
+  return last.volume
+}
+
+/**
+ * Split one audio clip's envelope so a surviving piece fades only on the side
+ * that is still the clip's real edge.
+ *
+ * Keyframe times are clip-local source milliseconds (the same clock the
+ * preview's `evaluateVolumeEnvelope` uses), so a piece's keyframes are
+ * rebased by its source offset and get interpolated edge points — otherwise a
+ * cut through a ramp would restart it from the first stored keyframe.
+ */
+export function partitionAudioEnvelope(
+  clip: AudioClip,
+  piece: {
+    durationMs: number
+    sourceInMs: number
+    keepFadeIn: boolean
+    keepFadeOut: boolean
+  },
+): AudioPieceEnvelope {
+  const durationMs = Math.max(0, piece.durationMs)
+  const fadeInMs = piece.keepFadeIn ? Math.min(clip.fadeInMs, durationMs) : 0
+  const fadeOutMs = piece.keepFadeOut ? Math.min(clip.fadeOutMs, durationMs) : 0
+  const keyframes = clip.volumeKeyframes
+  if (!keyframes || keyframes.length === 0) {
+    return { fadeInMs, fadeOutMs }
+  }
+
+  const sorted = [...keyframes].sort((left, right) => left.timeMs - right.timeMs)
+  const speed = clip.speed > 0 ? clip.speed : 1
+  const fromMs = Math.max(0, piece.sourceInMs - clip.sourceInMs)
+  const coveredMs = Math.max(0, Math.round(durationMs * speed))
+  const toMs = fromMs + coveredMs
+
+  const rebased: AudioVolumeKeyframe[] = sorted
+    .filter((keyframe) => keyframe.timeMs >= fromMs - 0.5 && keyframe.timeMs <= toMs + 0.5)
+    .map((keyframe) => ({
+      ...keyframe,
+      timeMs: Math.max(0, Math.round(keyframe.timeMs - fromMs)),
+    }))
+
+  if (rebased.length === 0 || rebased[0]!.timeMs > 0) {
+    rebased.unshift({
+      id: `${clip.id}:piece:start`,
+      timeMs: 0,
+      volume: interpolateKeyframeVolume(sorted, fromMs),
+    })
+  } else {
+    rebased[0] = { ...rebased[0]!, timeMs: 0 }
+  }
+  const last = rebased[rebased.length - 1]!
+  if (last.timeMs < coveredMs) {
+    rebased.push({
+      id: `${clip.id}:piece:end`,
+      timeMs: coveredMs,
+      volume: interpolateKeyframeVolume(sorted, toMs),
+    })
+  } else {
+    rebased[rebased.length - 1] = { ...last, timeMs: coveredMs }
+  }
+
+  return { fadeInMs, fadeOutMs, volumeKeyframes: rebased }
 }

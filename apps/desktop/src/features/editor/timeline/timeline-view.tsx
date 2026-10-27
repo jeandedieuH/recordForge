@@ -60,7 +60,6 @@ import {
   selectAllClipIds,
   toggleClipSelection,
   sourceToTimelineForTrack,
-  type PlaybackBoundary,
   canvasShadowStyle,
   computeBackgroundImageLayerStyle,
 } from "@recordforge/editor-core"
@@ -375,7 +374,10 @@ export function TimelineView({
   const missingAssets = useEditorStore((state) => state.missingAssets)
   const { toast } = useToast()
 
-  const videoRef = useRef<HTMLVideoElement>(null)
+  const videoRef = useRef<HTMLVideoElement | null>(null)
+  // Wrapper around the screen's A/B video slots. Zoom transforms target this
+  // element so a slot swap mid-zoom keeps one continuous transform.
+  const screenSurfaceRef = useRef<HTMLDivElement | null>(null)
   const monitorRef = useRef<HTMLDivElement>(null)
   const canvasRef = useRef<HTMLDivElement>(null)
   const [videoBounds, setVideoBounds] = useState<VideoBounds | null>(null)
@@ -735,27 +737,33 @@ export function TimelineView({
     }
   }, [videoBounds, timeline, view.previewQuality])
 
-  const handleClockBoundary = useCallback(
-    (boundary: PlaybackBoundary) => {
-      if (boundary.kind === "end") {
-        pause()
-        seek(boundary.timelineMs)
-      } else {
-        seek(boundary.timelineMs)
-      }
-    },
-    [pause, seek],
-  )
-
-  const { isSeeking: isVideoSeeking, videoProps: playbackVideoProps } = usePlaybackClock({
-    videoRef,
+  const {
+    isSeeking: isVideoSeeking,
+    activeSlot: activeScreenSlot,
+    screenSlots,
+    videoProps: playbackVideoProps,
+  } = usePlaybackClock({
     timeline,
     previewQuality: view.previewQuality,
     mediaUrl,
     onSeek: seek,
     onPause: pause,
-    onPlayNext: handleClockBoundary,
   })
+
+  // The active/standby pair swaps at cuts. `videoRef` remains the one ref the
+  // rest of the view (masks, zoom overlays, bounds) reads, so it always points
+  // at the slot that is actually on screen.
+  const [activeScreenVideo, setActiveScreenVideo] = useState<HTMLVideoElement | null>(null)
+  useEffect(() => {
+    const active = screenSlots[activeScreenSlot].current
+    videoRef.current = active
+    setActiveScreenVideo(active)
+    screenSlots.forEach((slot, index) => {
+      const element = slot.current
+      if (element) element.muted = isPreviewMuted || index !== activeScreenSlot
+    })
+    updateVideoBounds()
+  }, [activeScreenSlot, isPreviewMuted, mediaUrl, screenSlots, updateVideoBounds])
 
   useEffect(() => {
     setVideoBounds(null)
@@ -771,6 +779,55 @@ export function TimelineView({
   }, [mediaUrl, updateVideoBounds])
 
   const frameMs = Math.max(1, Math.round(1000 / Math.max(1, timeline?.canvas.fps ?? 30)))
+
+  // Two media slots share the screen source. The active one is visible; the
+  // standby is pre-seeked to the next Smart Cut segment and takes over at the
+  // cut without a seek. Events from the standby are ignored.
+  const screenVideoSlots =
+    mediaUrl && !mediaError ? (
+      <div ref={screenSurfaceRef} className="relative size-full" style={{ transformOrigin: "0 0" }}>
+        {([0, 1] as const).map((slot) => (
+          <video
+            key={`${mediaUrl}-${slot}`}
+            ref={screenSlots[slot]}
+            src={mediaUrl}
+            {...playbackVideoProps}
+            className="absolute inset-0 size-full object-contain cursor-pointer"
+            // Zoom transform is applied imperatively by PlaybackOverlays so
+            // playback frames bypass React. The standby is always muted.
+            muted={isPreviewMuted || activeScreenSlot !== slot}
+            playsInline
+            style={{ visibility: activeScreenSlot === slot ? "visible" : "hidden" }}
+            onError={() => {
+              if (activeScreenSlot !== slot) return
+              setVideoBounds(null)
+              if (isUsingProxy && originalPath) {
+                setUseOriginalMedia(true)
+                setMediaError(false)
+                return
+              }
+              if (!isUsingProxy && proxyPath && !rescueWithProxy) {
+                // Original failed to decode — fall back to the proxy.
+                setRescueWithProxy(true)
+                setMediaError(false)
+                return
+              }
+              setMediaError(true)
+            }}
+            onLoadedMetadata={(event) => {
+              event.currentTarget.muted = isPreviewMuted || activeScreenSlot !== slot
+              if (activeScreenSlot === slot) updateVideoBounds()
+            }}
+            onLoadedData={(event) => {
+              event.currentTarget.muted = isPreviewMuted || activeScreenSlot !== slot
+              if (activeScreenSlot !== slot) return
+              setMediaError(false)
+              updateVideoBounds()
+            }}
+          />
+        ))}
+      </div>
+    ) : null
 
   function stepFrame(direction: -1 | 1) {
     seek(Math.max(0, Math.min(view.durationMs, getPlayheadSnapshot() + direction * frameMs)))
@@ -2112,87 +2169,11 @@ export function TimelineView({
                   isPlaying={view.isPlaying}
                   style={screenStyle}
                 >
-                  <video
-                    key={mediaUrl}
-                    ref={videoRef}
-                    src={mediaUrl}
-                    {...playbackVideoProps}
-                    className="size-full object-contain cursor-pointer"
-                    // Zoom transform is applied imperatively by
-                    // PlaybackOverlays so playback frames bypass React.
-                    muted={isPreviewMuted}
-                    playsInline
-                    onError={() => {
-                      setVideoBounds(null)
-                      if (isUsingProxy && originalPath) {
-                        setUseOriginalMedia(true)
-                        setMediaError(false)
-                        return
-                      }
-                      if (!isUsingProxy && proxyPath && !rescueWithProxy) {
-                        // Original failed to decode — fall back to the proxy.
-                        setRescueWithProxy(true)
-                        setMediaError(false)
-                        return
-                      }
-                      setMediaError(true)
-                    }}
-                    onLoadedMetadata={() => {
-                      if (videoRef.current) {
-                        videoRef.current.muted = isPreviewMuted
-                      }
-                      updateVideoBounds()
-                    }}
-                    onLoadedData={() => {
-                      if (videoRef.current) {
-                        videoRef.current.muted = isPreviewMuted
-                      }
-                      setMediaError(false)
-                      updateVideoBounds()
-                    }}
-                  />
+                  {screenVideoSlots}
                 </VideoCanvasControls>
               ) : mediaUrl && !mediaError ? (
                 <div style={screenStyle} onClick={togglePlay}>
-                  <video
-                    key={mediaUrl}
-                    ref={videoRef}
-                    src={mediaUrl}
-                    {...playbackVideoProps}
-                    className="size-full object-contain cursor-pointer"
-                    // Zoom transform is applied imperatively by
-                    // PlaybackOverlays so playback frames bypass React.
-                    muted={isPreviewMuted}
-                    playsInline
-                    onError={() => {
-                      setVideoBounds(null)
-                      if (isUsingProxy && originalPath) {
-                        setUseOriginalMedia(true)
-                        setMediaError(false)
-                        return
-                      }
-                      if (!isUsingProxy && proxyPath && !rescueWithProxy) {
-                        // Original failed to decode — fall back to the proxy.
-                        setRescueWithProxy(true)
-                        setMediaError(false)
-                        return
-                      }
-                      setMediaError(true)
-                    }}
-                    onLoadedMetadata={() => {
-                      if (videoRef.current) {
-                        videoRef.current.muted = isPreviewMuted
-                      }
-                      updateVideoBounds()
-                    }}
-                    onLoadedData={() => {
-                      if (videoRef.current) {
-                        videoRef.current.muted = isPreviewMuted
-                      }
-                      setMediaError(false)
-                      updateVideoBounds()
-                    }}
-                  />
+                  {screenVideoSlots}
                 </div>
               ) : (
                 <div className="flex flex-col items-center gap-3 text-center">
@@ -2239,7 +2220,7 @@ export function TimelineView({
                   clips={maskClips}
                   canvasWidth={timeline.canvas.width}
                   canvasHeight={timeline.canvas.height}
-                  videoElement={videoRef.current}
+                  videoElement={activeScreenVideo}
                   videoBounds={videoBounds}
                   selectedClipId={
                     view.selection?.kind === "clip" ? view.selection.primaryClipId : null
@@ -2271,7 +2252,7 @@ export function TimelineView({
                   timeline={timeline}
                   cursorEngine={cursorEngine}
                   cursorTelemetry={cursorTelemetry}
-                  videoRef={videoRef}
+                  surfaceRef={screenSurfaceRef}
                   videoBounds={videoBounds}
                   isZoomFraming={isZoomFraming}
                   selectedZoomSegment={selectedZoomSegment}

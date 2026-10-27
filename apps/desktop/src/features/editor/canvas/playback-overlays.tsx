@@ -22,7 +22,8 @@ interface PlaybackOverlaysProps {
   timeline: TimelineState
   cursorEngine: CursorEngine | null
   cursorTelemetry: CursorTelemetryFile | null
-  videoRef: React.RefObject<HTMLVideoElement | null>
+  /** Wrapper around the screen's A/B video slots (the zoom transform target). */
+  surfaceRef: React.RefObject<HTMLDivElement | null>
   videoBounds: PlaybackVideoBounds
   isZoomFraming: boolean
   selectedZoomSegment: ManualZoomSegment | null
@@ -45,7 +46,7 @@ export function PlaybackOverlays({
   timeline,
   cursorEngine,
   cursorTelemetry,
-  videoRef,
+  surfaceRef,
   videoBounds,
   isZoomFraming,
   selectedZoomSegment,
@@ -70,20 +71,21 @@ export function PlaybackOverlays({
     [composition?.screen.zoomTransform, timeline.canvas, videoBounds],
   )
 
-  // Imperative transform: the <video> element carries no transform in its
-  // React style prop, so writes here survive parent re-renders untouched.
+  // Imperative transform on the slot wrapper: neither <video> element carries a
+  // transform in its React style, so writes here survive both parent re-renders
+  // and the A/B slot swap at a cut.
   useEffect(() => {
-    const video = videoRef.current
-    if (!video) return
+    const surface = surfaceRef.current
+    if (!surface) return
     const css = isZoomFraming ? undefined : cssZoomTransform
-    video.style.transform = css ?? ""
-    video.style.transformOrigin = "0 0"
-    video.style.willChange = css ? "transform" : ""
+    surface.style.transform = css ?? ""
+    surface.style.transformOrigin = "0 0"
+    surface.style.willChange = css ? "transform" : ""
     return () => {
-      video.style.transform = ""
-      video.style.willChange = ""
+      surface.style.transform = ""
+      surface.style.willChange = ""
     }
-  }, [cssZoomTransform, isZoomFraming, videoRef])
+  }, [cssZoomTransform, isZoomFraming, surfaceRef])
 
   const cursorPointAtPlayhead = useMemo(() => {
     if (composition?.cursor.zoomSpacePoint) return composition.cursor.zoomSpacePoint

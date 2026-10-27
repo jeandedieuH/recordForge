@@ -19,8 +19,9 @@ use tracing::warn;
 
 use super::super::{
     collect_input_assets, corrected_source_in_s, fmt_secs, plan_segment_inputs,
-    resolve_video_stream_specifier, validate_segment_known, CompositionShared, CompositionWindow,
-    RenderPlan, RenderSegment, SegmentJob, SourceRequest, SEEK_TAIL_MARGIN_S,
+    resolve_video_stream_specifier, validate_segment_known, window_frame_span, CameraTrack,
+    CompositionShared, CompositionWindow, RenderPlan, RenderPlanOverlay, RenderSegment, SegmentJob,
+    SourceRequest, SEEK_PREROLL_S, SEEK_TAIL_MARGIN_S,
 };
 use super::gpu_error;
 
@@ -162,6 +163,17 @@ pub(super) fn plan(
     let mut filters: Vec<String> = Vec::new();
     let mut labels: Vec<String> = Vec::new();
     for job in &segment_jobs {
+        // Same frame-grid snapping as the compatibility renderer, so both
+        // paths emit the identical number of frames per segment.
+        let Some((start_frame, end_frame)) =
+            window_frame_span(window, fps as f64, job.clamped_start, job.clamped_end)
+        else {
+            continue;
+        };
+        let frames = end_frame - start_frame;
+        if frames == 0 {
+            continue;
+        }
         let segment = &plan.segments[job.segment_index];
         validate_segment_known(segment, project_id, asset_paths)?;
         let (input_index, seek_s) = segment_inputs[job.request_index];
@@ -186,6 +198,7 @@ pub(super) fn plan(
             height,
             content,
             fps,
+            frames,
             &label,
         ));
         labels.push(format!("[{label}]"));
@@ -234,6 +247,7 @@ fn segment_filter(
     height: u32,
     content: (f64, f64, f64, f64),
     fps: u32,
+    frames: u64,
     label: &str,
 ) -> String {
     let speed = segment.speed;
@@ -252,8 +266,7 @@ fn segment_filter(
     if (speed - 1.0).abs() > f64::EPSILON {
         filter.push_str(&format!(",setpts=PTS/{:.6}", speed));
     }
-    let segment_duration =
-        fmt_secs((request.source_out_s - request.source_in_s).max(0.0) / speed.max(1e-6));
+    let segment_duration = fmt_secs(frames as f64 / fps.max(1) as f64);
     // Scale into the fitted content rect, then pad out to the canvas at that
     // rect's origin: the frame handed to the compositor is canvas-sized with the
     // picture already framed, which is what the background/radius composite
@@ -264,48 +277,119 @@ fn segment_filter(
 pad={width}:{height}:{content_x:.0}:{content_y:.0}:color=black,fps={fps},setsar=1,\
 tpad=stop_mode=clone:stop_duration={segment_duration},\
 tpad=stop_mode=add:stop_duration={segment_duration}:color=black,\
-trim=duration={segment_duration},setpts=PTS-STARTPTS[{label}]"
+trim=end_frame={frames},setpts=PTS-STARTPTS[{label}]"
     ));
     filter
 }
 
-/// A camera overlay's dedicated decode pass: its own FFmpeg process emitting
-/// overlay-sized NV12 frames, one per output frame inside the overlay window.
+/// A camera track's decode pass: one FFmpeg process emitting overlay-sized NV12
+/// frames for every piece of the (coalesced) track, in output order.
 pub(super) struct CameraPlan {
-    pub input: DecodeInput,
+    pub inputs: Vec<DecodeInput>,
     pub filter: String,
     pub width: u32,
     pub height: u32,
     pub fps: u32,
 }
 
-/// Plan one camera overlay's decode chain. Mirrors the compatibility graph's
-/// camera stream (`trim`, speed, cover/contain crop, fps, tpad) so the bubble
-/// sees the same frames the FFmpeg renderer composites.
+/// Plan one camera track's decode chain. Each piece is trimmed, retimed and
+/// frame-snapped exactly like the compatibility renderer, then the pieces are
+/// concatenated and the shared geometry applied once.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn plan_camera(
     project_id: &str,
-    overlay: &super::super::RenderPlanOverlay,
+    track: &CameraTrack,
+    overlays: &[RenderPlanOverlay],
     asset_paths: &HashMap<String, PathBuf>,
     shared: &CompositionShared,
-    clamp: &super::super::CameraClamp,
-    width: u32,
-    height: u32,
+    duration_ms: u64,
     fps: u32,
-) -> Result<CameraPlan> {
+) -> Result<Option<CameraPlan>> {
+    let first = &overlays[track.first_overlay()];
     let asset_path = asset_paths
-        .get(&overlay.asset_id)
+        .get(&first.asset_id)
         .cloned()
         .ok_or_else(|| InternalError::Media("camera overlay references an unknown asset".into()))?;
-    let seek_s = super::super::floor_to_ms(clamp.src_in_s - super::super::SEEK_PREROLL_S).max(0.0);
+    let width = ((first.width.round() as u32) / 2 * 2).max(2);
+    let height = ((first.height.round() as u32) / 2 * 2).max(2);
+
+    let mut clamps = Vec::new();
+    for &overlay_index in &track.pieces {
+        let overlay = &overlays[overlay_index];
+        if !overlay.speed.is_finite() || overlay.speed <= 0.0 {
+            return Err(InternalError::Media("camera overlay speed is invalid".into()).into());
+        }
+        let video_delay_s = shared
+            .probe
+            .video_start_delay_s(&asset_path, &overlay.asset_id);
+        if let Some(clamp) = super::super::camera_window_clamp(
+            overlay.output_start_ms,
+            overlay.output_end_ms,
+            overlay.source_in_ms,
+            overlay.source_out_ms,
+            overlay.speed,
+            fps as f64,
+            0.0,
+            duration_ms as f64,
+            video_delay_s,
+        ) {
+            clamps.push((overlay_index, clamp));
+        }
+    }
+    if clamps.is_empty() {
+        return Ok(None);
+    }
+
+    let src_in_s = clamps
+        .iter()
+        .map(|(_, clamp)| clamp.src_in_s)
+        .fold(f64::INFINITY, f64::min);
+    let src_out_s = clamps
+        .iter()
+        .map(|(_, clamp)| clamp.src_out_s)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let seek_s = super::super::floor_to_ms(src_in_s - SEEK_PREROLL_S).max(0.0);
     let input = resolve_video_stream_specifier(
         &shared.probe,
         &asset_path,
-        &overlay.asset_id,
+        &first.asset_id,
         0,
-        overlay.stream_index,
+        first.stream_index,
     )?;
-    let geometry = if let Some(crop) = &overlay.crop {
+
+    let mut filters = Vec::new();
+    let mut labels = Vec::new();
+    let frame_rate = fps.max(1) as f64;
+    for (piece_index, (overlay_index, clamp)) in clamps.iter().enumerate() {
+        let overlay = &overlays[*overlay_index];
+        let frames = ((clamp.chain_dur_s * frame_rate).round().max(0.0) as u64).max(1);
+        let duration = fmt_secs(frames as f64 / frame_rate);
+        let label = format!("cam{piece_index}");
+        filters.push(format!(
+            "{input}trim=start={}:end={},setpts=(PTS-STARTPTS+{:.6}/TB)/{:.6},fps={fps},setsar=1,\
+tpad=stop_mode=clone:stop_duration={duration},tpad=stop_mode=add:stop_duration={duration}:color=black,\
+trim=end_frame={frames},setpts=PTS-STARTPTS[{label}]",
+            fmt_secs(clamp.src_in_s - seek_s),
+            fmt_secs(clamp.src_out_s - seek_s),
+            clamp.cut_out_s * overlay.speed,
+            overlay.speed.max(1e-6),
+        ));
+        labels.push(format!("[{label}]"));
+    }
+    let joined = if labels.len() == 1 {
+        labels.remove(0)
+    } else {
+        filters.push(format!(
+            "{}concat=n={}:v=1:a=0[cam_concat]",
+            labels.join(""),
+            labels.len()
+        ));
+        "[cam_concat]".to_string()
+    };
+
+    // Geometry is shared by every piece (coalescing requires identical visual
+    // props), so it runs once over the joined stream.
+    let geometry = if let Some(crop) = &first.crop {
         format!(
             ",crop={}:{}:{}:{},scale={width}:{height}:force_original_aspect_ratio=decrease:force_divisible_by=2:threads=auto,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black@0",
             crop.width, crop.height, crop.x, crop.y
@@ -315,28 +399,24 @@ pub(super) fn plan_camera(
             ",scale={width}:{height}:force_original_aspect_ratio=increase:force_divisible_by=2:threads=auto,crop={width}:{height}:(iw-ow)/2:(ih-oh)/2"
         )
     };
-    let duration = fmt_secs(clamp.chain_dur_s);
-    let filter = format!(
-        "{input}trim=start={}:end={},setpts=(PTS-STARTPTS+{:.6}/TB)/{:.6}{geometry},fps={fps},setsar=1,\
-tpad=stop_mode=clone:stop_duration={duration},trim=duration={duration},setpts=PTS-STARTPTS,format=nv12[vout]",
-        fmt_secs(clamp.src_in_s - seek_s),
-        fmt_secs(clamp.src_out_s - seek_s),
-        clamp.cut_out_s * overlay.speed,
-        overlay.speed.max(1e-6),
-    );
+    filters.push(format!(
+        "{joined}{},format=nv12[vout]",
+        geometry.trim_start_matches(',')
+    ));
     let _ = project_id;
-    Ok(CameraPlan {
-        input: DecodeInput {
+
+    Ok(Some(CameraPlan {
+        inputs: vec![DecodeInput {
             path: asset_path,
             seek_s: Some(seek_s),
-            duration_s: Some(clamp.src_out_s - seek_s + SEEK_TAIL_MARGIN_S),
+            duration_s: Some(src_out_s - seek_s + SEEK_TAIL_MARGIN_S),
             hwaccel: false,
-        },
-        filter,
+        }],
+        filter: filters.join(";\n"),
         width,
         height,
         fps,
-    })
+    }))
 }
 
 /// A spawned decode pass. Frames are read straight off stdout as raw NV12.
@@ -362,7 +442,7 @@ impl DecodeProcess {
     pub(super) fn spawn_camera(ffmpeg_path: &str, plan: &CameraPlan) -> Result<Self> {
         Self::spawn_with(
             ffmpeg_path,
-            std::slice::from_ref(&plan.input),
+            &plan.inputs,
             &plan.filter,
             plan.width,
             plan.height,

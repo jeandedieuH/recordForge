@@ -100,8 +100,17 @@ export function useSmartCutAnalysis({
       thresholdDb: options.thresholdDb ?? suggestedThresholdDb ?? -38,
       minDurationMs: options.minDurationMs,
       paddingMs: options.paddingMs,
+      // Snap cut edges to the canvas frame grid so every kept piece is a
+      // whole number of frames for the renderers.
+      fps: timeline?.canvas.fps,
     }),
-    [options.thresholdDb, options.minDurationMs, options.paddingMs, suggestedThresholdDb],
+    [
+      options.thresholdDb,
+      options.minDurationMs,
+      options.paddingMs,
+      suggestedThresholdDb,
+      timeline?.canvas.fps,
+    ],
   )
 
   // Instant path: analyze the live timeline against prepared peak envelopes.
@@ -219,6 +228,7 @@ export function useSmartCutAnalysis({
   if (current?.status === "ready" && current.ranges && timeline) {
     const ranges = mapSourceRangesToTimeline(timeline, current.ranges, {
       paddingMs: resolvedOptions.paddingMs,
+      fps: resolvedOptions.fps,
     })
     return {
       status: "ready",
