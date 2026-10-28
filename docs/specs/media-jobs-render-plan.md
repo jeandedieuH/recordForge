@@ -269,17 +269,18 @@ for the rest of the process (a success resets the count).
 `gpu::plan_limitations` is the feature gate. The compositor handles the full
 canvas frame (padding, background colour/gradient/image, blur, dim, rounded
 corners, shadow), the fitted screen rect and zoom, cursor/overlay items,
-camera + side-by-side layout windows, redact/pixelate privacy masks, keystrokes,
-burned-in captions (encode-side libass), chapters, HEVC, the license output cap
-and selected-range plans. Timeline gaps/coverage holes, mixed source dimensions,
-animated containers (GIF/WebP), non-4×2-grid canvases, blur privacy masks (the
-shader's scaled-average blur measured below the parity floor; see
-`docs/benchmarks/phase-5-results.md`), and the keystroke + burned-caption pair
-(badges must sit above captions, which run after the GPU raster) keep the
-compatibility renderer. Explicit `gpu` requests outside the gate degrade with a
-logged reason rather than failing the export, and a runtime failure (no hardware
-adapter, device loss, sidecar error) falls back once to the FFmpeg renderer —
-mirroring the hardware→software encoder retry.
+camera + side-by-side layout windows, redact/pixelate/blur privacy masks,
+keystrokes, burned-in captions (encode-side libass), chapters, HEVC, the license
+output cap and selected-range plans. Timeline gaps/coverage holes, mixed source
+dimensions, animated containers (GIF/WebP), non-4×2-grid canvases, and the
+keystroke + burned-caption pair (badges must sit above captions, which run after
+the GPU raster) keep the compatibility renderer. Blur masks use per-plane YUV
+passes that reproduce swscale's widened downscale, `avgblur` and the bilinear
+upscale (47.78 dB mean / 29.83 dB min on the synthetic fixture; see
+`docs/benchmarks/phase-5-results.md`). Explicit `gpu` requests outside the gate
+degrade with a logged reason rather than failing the export, and a runtime
+failure (no hardware adapter, device loss, sidecar error) falls back once to the
+FFmpeg renderer — mirroring the hardware→software encoder retry.
 
 The pipeline is an FFmpeg **decode sidecar** (the same `trim`/`setpts` chain,
 scaling each segment into the **fitted content rect** and padding out to the
@@ -293,20 +294,27 @@ background plate or solid colour, converts `YUV→RGB` at BT.601 limited through
 an integer crop from `zoompan_integer_crop`, samples Catmull-Rom bicubic,
 applies an analytic signed-distance rounded-corner mask, and draws layers in the
 compatibility stack order: cursor tile, camera shadow/bubble/border, privacy
-masks (two `Rgba16Float` stages ping-pong through the mask shader), overlay
+masks (two `Rgba16Float` stages ping-pong through the mask shader; a blur mask
+uses separate Y/chroma downscale + avgblur targets), overlay
 items, then keystroke badges. A compute `RGB→NV12` pass writes a storage buffer
 byte-identical to the encoder's expected pixel format. Identity-zoom frames with
 no visible layer bypass the GPU entirely, even when captions/chapters/codec/
 output-cap work is pending in the encode sidecar.
 
-The wgpu device, adapter and pipelines (screen composite, layer, mask, NV12
-pack) are process-wide and cached (`RECORDFORGE_EXPORT_GPU_CACHE=0` disables
-reuse), so only the size-dependent planes, stage targets, layer textures and
-readback buffers are allocated per export. Readback
+The wgpu device, adapter and pipelines (screen composite, layer, mask,
+blur-downscale/avgblur, NV12 pack) are process-wide and cached
+(`RECORDFORGE_EXPORT_GPU_CACHE=0` disables reuse), so only the size-dependent
+planes, stage targets, layer textures and readback buffers are allocated per
+export. Readback
 runs through a three-buffer host-visible ring: a submit returns the frame that
 has been on the GPU longest, which lets the GPU compose while the CPU copies and
 feeds the encoder. Decode and encode sidecar queues hold 8 and 6 frames by
-default (`RECORDFORGE_EXPORT_GPU_DECODE_QUEUE` / `_ENCODE_QUEUE`).
+default (`RECORDFORGE_EXPORT_GPU_DECODE_QUEUE` / `_ENCODE_QUEUE`). Each camera
+decoder reads ahead by `RECORDFORGE_EXPORT_GPU_CAMERA_QUEUE` frames (default 2)
+so the compose loop never blocks on a camera pipe for a frame it does not need
+yet. The finish log splits the hop into `decode_read_ms`, `upload_ms`,
+`readback_ms` and `pipe_write_ms` alongside `compose_ms` and the queue waits, so
+a change to interop or the stage can be attributed to one side.
 
 Software adapters (CPU device type, WARP/llvmpipe/SwiftShader) are rejected so
 the GPU path can never silently become a slower software path.

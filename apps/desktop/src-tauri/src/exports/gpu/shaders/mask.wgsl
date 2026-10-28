@@ -1,10 +1,14 @@
-// Privacy-mask pass.
+// Privacy-mask composite pass.
 //
 // Reads the composed canvas stage, writes the same raster with one mask applied
 // inside its rect. The compatibility renderer implements the same modes with
 // FFmpeg filters: `redact` fills a box, `blur` downsamples + averages +
 // upsamples, and `pixelate` downsamples with nearest-neighbour. The shader
 // reproduces each result from the stage texture so no extra copy is needed.
+//
+// Multi-scale blur is pre-rendered into a small texture by `blur.wgsl`
+// (`fs_downscale` + `fs_avgblur`); this pass only samples that result with the
+// compatibility graph's final bilinear upscale.
 //
 // A mask pass writes every pixel (outside the rect it passes the source
 // through), so the destination stage never needs a clear.
@@ -14,9 +18,9 @@ struct MaskParams {
     rect: vec4<f32>,
     // rgb = redact colour.
     color: vec4<f32>,
-    // x = mode (0 redact, 1 blur, 2 pixelate), y = blur factor / pixel size,
-    // z = 1 when the blur is the multi-scale approximation (radius > 3), 0 when
-    // it is a direct avgblur window like the compatibility graph's small-radius
+    // x = mode (0 redact, 1 blur, 2 pixelate), y = blur radius / pixel size,
+    // z = 1 when the blur reads a pre-rendered multi-scale texture, 0 when it
+    // is a direct avgblur window like the compatibility graph's small-radius
     // branch.
     params: vec4<f32>,
 };
@@ -24,6 +28,15 @@ struct MaskParams {
 @group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var src_sampler: sampler;
 @group(0) @binding(2) var<uniform> mask: MaskParams;
+@group(0) @binding(3) var blurred_y: texture_2d<f32>;
+@group(0) @binding(4) var blurred_uv: texture_2d<f32>;
+
+fn yuv_to_rgb(yuv: vec3<f32>) -> vec3<f32> {
+    let r = yuv.x + 1.402 * yuv.z;
+    let b = yuv.x + 1.772 * yuv.y;
+    let g = yuv.x - 0.344136 * yuv.y - 0.714136 * yuv.z;
+    return vec3<f32>(r, g, b);
+}
 
 struct VsOut {
     @builtin(position) position: vec4<f32>,
@@ -54,9 +67,9 @@ fn load_px(px: vec2<f32>) -> vec3<f32> {
     return textureLoad(src, coord, 0).rgb;
 }
 
-// Small-grid dimensions for the multi-scale blur / pixelate chains: the
-// compatibility graph rounds the factor, then truncates each side to an even
-// number (`((w / factor) / 2 * 2)`), minimum 2.
+// Small-grid dimensions for the pixelate chain: the compatibility graph rounds
+// the factor, then truncates each side to an even number
+// (`((w / factor) / 2 * 2)`), minimum 2.
 fn small_grid() -> vec2<f32> {
     let factor = max(mask.params.y, 1.0);
     let sw = max(2u, u32(round(mask.rect.z / factor)) / 2u * 2u);
@@ -64,75 +77,28 @@ fn small_grid() -> vec2<f32> {
     return vec2<f32>(f32(sw), f32(sh));
 }
 
-// One small-grid pixel's colour. The compatibility graph reaches the small
-// image through swscale's bilinear *downscale*, whose support widens with the
-// scale factor (≈ an area average over the cell), so one centre tap is far too
-// sharp. Nine integer taps spread over the cell approximate that average.
-// `textureLoad` (not a filtered sample) keeps each tap an exact texel, so the
-// cell average is deterministic across adapters.
-fn cell_value(cell: vec2<f32>, grid: vec2<f32>) -> vec3<f32> {
-    let clamped = clamp(cell, vec2<f32>(0.0, 0.0), grid - vec2<f32>(1.0, 1.0));
-    let cell_size = mask.rect.zw / grid;
-    let centre = mask.rect.xy + (clamped + vec2<f32>(0.5, 0.5)) * cell_size;
-    let step = cell_size / 3.0;
-    var sum = vec3<f32>(0.0, 0.0, 0.0);
-    for (var j = -1; j <= 1; j = j + 1) {
-        for (var i = -1; i <= 1; i = i + 1) {
-            sum = sum + load_px(centre + vec2<f32>(f32(i), f32(j)) * step);
-        }
-    }
-    return sum / 9.0;
-}
-
-// Multi-scale blur: `scale(bilinear, small) → avgblur(3×3) → scale(bilinear)`.
-// The blurred small image is reconstructed per cell (9 taps) and then sampled
-// bilinearly at the fragment's own small-grid position, so neighbouring pixels
-// inside one cell agree instead of each sampling the full-res canvas at its own
-// phase.
-fn multi_scale_blur(px: vec2<f32>, grid: vec2<f32>) -> vec3<f32> {
-    let cell = mask.rect.zw / grid;
-    // `px` is the fragment centre (i + 0.5); small-grid coordinates put each
-    // cell centre at k + 0.5.
-    let rel = (px - mask.rect.xy) / cell - vec2<f32>(0.5, 0.5);
-    let base = floor(rel);
-    let frac = rel - base;
-
-    var sum = vec3<f32>(0.0, 0.0, 0.0);
-    for (var j = 0; j < 2; j = j + 1) {
-        for (var i = 0; i < 2; i = i + 1) {
-            let index = base + vec2<f32>(f32(i), f32(j));
-            var blurred = vec3<f32>(0.0, 0.0, 0.0);
-            for (var by = -1; by <= 1; by = by + 1) {
-                for (var bx = -1; bx <= 1; bx = bx + 1) {
-                    blurred = blurred + cell_value(index + vec2<f32>(f32(bx), f32(by)), grid);
-                }
-            }
-            blurred = blurred / 9.0;
-            let wx = select(1.0 - frac.x, frac.x, i == 1);
-            let wy = select(1.0 - frac.y, frac.y, j == 1);
-            sum = sum + blurred * wx * wy;
-        }
-    }
-    return sum;
-}
-
-// Small-radius blur (`avgblur=sizeX=r` directly on the region). Taps are exact
-// texel loads for the same reason as `cell_value`.
+// Small-radius blur (`avgblur=sizeX=r` directly on the region). `sizeX` is a
+// radius, so the window is (2r+1)² with edge-replicated samples and a fixed
+// divisor — exactly libavfilter's sliding window. The loop is fixed at the
+// maximum direct radius (3) so FXC can unroll it; the uniform radius gates the
+// taps that count.
 fn direct_blur(px: vec2<f32>) -> vec3<f32> {
-    let window = max(mask.params.y, 1.0);
-    let step = max((window - 1.0) * 0.5, 0.0);
+    let radius = i32(max(mask.params.y, 1.0));
+    let lo = vec2<i32>(i32(mask.rect.x), i32(mask.rect.y));
+    let hi = lo + vec2<i32>(i32(mask.rect.z), i32(mask.rect.w)) - vec2<i32>(1, 1);
+    let centre = vec2<i32>(px);
     var sum = vec3<f32>(0.0, 0.0, 0.0);
-    for (var j = -1; j <= 1; j = j + 1) {
-        for (var i = -1; i <= 1; i = i + 1) {
-            let tap = clamp(
-                px + vec2<f32>(f32(i), f32(j)) * step,
-                mask.rect.xy + vec2<f32>(0.5, 0.5),
-                mask.rect.xy + mask.rect.zw - vec2<f32>(0.5, 0.5),
-            );
-            sum = sum + load_px(tap);
+    for (var dy = -3; dy <= 3; dy = dy + 1) {
+        for (var dx = -3; dx <= 3; dx = dx + 1) {
+            if (abs(dx) > radius || abs(dy) > radius) {
+                continue;
+            }
+            let coord = clamp(centre + vec2<i32>(dx, dy), lo, hi);
+            sum = sum + textureLoad(src, coord, 0).rgb;
         }
     }
-    return sum / 9.0;
+    let area = f32((2 * radius + 1) * (2 * radius + 1));
+    return sum / max(area, 1.0);
 }
 
 @fragment
@@ -155,7 +121,13 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
     if (mode < 1.5) {
         if (mask.params.z > 0.5) {
-            return vec4<f32>(multi_scale_blur(px, small_grid()), 1.0);
+            // The small grids span exactly the mask rect, so the full-res
+            // pixel's relative position is the normalized sample coordinate
+            // for both planes.
+            let uv = (px - rect.xy) / rect.zw;
+            let y = textureSample(blurred_y, src_sampler, uv).r;
+            let uv_plane = textureSample(blurred_uv, src_sampler, uv).rg;
+            return vec4<f32>(yuv_to_rgb(vec3<f32>(y, uv_plane)), 1.0);
         }
         return vec4<f32>(direct_blur(px), 1.0);
     }

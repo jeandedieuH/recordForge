@@ -365,10 +365,10 @@ const captions = [
   },
   { id: "cap-3", text: "final caption for chunked seams", startMs: 26_000, endMs: 29_500 },
 ]
-// Privacy masks cover the two shader-exact modes: an opaque redact block and a
-// pixelate window. Blur masks stay on the compatibility renderer (see
-// `spec_fallback_blur`), because the GPU approximation of FFmpeg's
-// downscale/avgblur/upscale chain does not clear the parity floor.
+// Privacy masks cover all three modes: an opaque redact block, a pixelate
+// window, and a blur. The blur chain is rendered on the GPU via swscale's
+// triangle downscale + avgblur + bilinear upscale, and the standalone `blur`
+// spec below exercises it.
 const masks = [
   {
     id: "mask-redact",
@@ -540,10 +540,10 @@ interface SpecEntry {
 }
 
 const specs: SpecEntry[] = []
-// A blur mask is deliberately outside the GPU gate: the shader's approximation
-// of FFmpeg's scaled avgblur is below the parity floor, so this spec proves the
-// automatic fallback still produces the compatibility output (100 dB) and gives
-// the matrix a second gated shape besides the timeline gap.
+// A blur mask over a textured region: the GPU reproduces swscale's widened
+// bilinear downscale, avgblur radius semantics and the final bilinear upscale,
+// so this spec is now inside the gate and participates in the parity budget
+// rather than proving a fallback.
 const blurMaskPlan = {
   ...plainPlan(),
   durationMs: 10_000,
@@ -629,8 +629,8 @@ if (longMode) {
       forceSinglePass: single,
     })
     specs.push({
-      name: `spec_fallback_blur_${mode}${variantSuffix}`,
-      outputName: `render_fallback_blur_${mode}${variantSuffix}.mp4`,
+      name: `spec_blur_${mode}${variantSuffix}`,
+      outputName: `render_blur_${mode}${variantSuffix}.mp4`,
       plan: blurMaskPlan,
       assetPaths: baseAssetPaths,
       forceSinglePass: single,

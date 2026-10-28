@@ -99,18 +99,19 @@ still tries (the user asked for it).
 `gpu::plan_limitations` is the single source of truth for what the compositor
 supports. Anything outside it keeps the FFmpeg renderer: timeline gaps and
 coverage holes, mixed or unknown source dimensions, animated containers
-(GIF/WebP), canvases that are not a 4×2 NV12 grid, blur privacy masks, and the
-one stack-order pair the hybrid cannot express (keystroke badges must sit above
-burned-in captions, but captions run through libass in the encode sidecar after
-the GPU raster). Redact and pixelate masks are shader-exact; blur approximates
-FFmpeg's scaled `avgblur` chain and measured 33 dB inside the mask rect (G4), so
-it stays on FFmpeg until the shader reproduces swscale's widened bilinear
-downscale. Canvas framing, letterboxed fits, zoom, cursor/items, camera and
-side-by-side, privacy masks (redact/pixelate), keystrokes, burned-in captions,
-chapters, HEVC, the license output cap, and selected-range plans are in scope.
-Explicit `gpu` requests that fall outside the gate render on FFmpeg with the
-reason logged — failing an export over a renderer preference would be worse than
-rendering it on the path that works.
+(GIF/WebP), canvases that are not a 4×2 NV12 grid, and the one stack-order pair
+the hybrid cannot express (keystroke badges must sit above burned-in captions,
+but captions run through libass in the encode sidecar after the GPU raster).
+Redact and pixelate masks are shader-exact. Multi-scale blur masks reproduce
+the compatibility graph's swscale downscale (separable triangle with radius =
+scale), `avgblur`'s radius semantics and the final bilinear upscale in
+dedicated GPU passes, so they are in scope too. Canvas framing, letterboxed
+fits, zoom, cursor/items, camera and side-by-side, privacy masks
+(redact/pixelate/blur), keystrokes, burned-in captions, chapters, HEVC, the
+license output cap, and selected-range plans are in scope. Explicit `gpu`
+requests that fall outside the gate render on FFmpeg with the reason logged —
+failing an export over a renderer preference would be worse than rendering it
+on the path that works.
 
 Runtime failures (no qualifying adapter, device loss, sidecar failure) also
 fall back once to the compatibility renderer, mirroring the existing
@@ -167,8 +168,9 @@ see `docs/benchmarks/phase-5-results.md`.
   path.
 - A cross-process pipeline (decode | compose | encode) adds an NV12 copy per
   frame over what a single FFmpeg process does. That is ~3.1 MB/frame at
-  1080p, which the pipe handles; 4K tops out around 100 fps over pipes, and
-  D3D11/Metal interop is future work.
+  1080p, which the pipe handles; 4K tops out around 100 fps over pipes.
+  Sharing the decoder/encoder surface is a separate proposal (ADR 019), as is
+  the YUV stage target.
 - Any pixel difference (colour conversion, resampler) needs the parity gate,
   not visual review.
 - Driver bugs and device loss are inherent to shipping a GPU path; the

@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::io::{BufReader, Read};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdout, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 
 use crate::errors::{InternalError, Result};
 use tracing::warn;
@@ -422,9 +422,75 @@ trim=end_frame={frames},setpts=PTS-STARTPTS[{label}]",
 /// A spawned decode pass. Frames are read straight off stdout as raw NV12.
 pub(super) struct DecodeProcess {
     child: Child,
-    stdout: BufReader<ChildStdout>,
+    stdout: Option<BufReader<ChildStdout>>,
     stderr: Arc<Mutex<Vec<u8>>>,
     frame_len: usize,
+}
+
+/// A bounded read-ahead reader for one camera decoder.
+///
+/// The compose loop used to call `read_frame` inline, so it blocked on the
+/// camera's pipe while the GPU and the screen pipeline sat idle. This thread
+/// keeps at most `depth` frames queued and blocks on the pipe by itself; the
+/// compose loop only waits for the next frame it actually needs.
+pub(super) struct PrefetchReader {
+    receiver: Option<mpsc::Receiver<Result<Option<Vec<u8>>>>>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl PrefetchReader {
+    /// Block for the next prefetched frame. `Ok(None)` means the camera stream
+    /// ended.
+    pub(super) fn next_frame(&self) -> Result<Option<Vec<u8>>> {
+        match self.receiver.as_ref() {
+            Some(receiver) => match receiver.recv() {
+                Ok(frame) => frame,
+                Err(_) => Ok(None),
+            },
+            None => Ok(None),
+        }
+    }
+
+    /// Stop the reader. The child must be killed first so a read blocked on the
+    /// pipe can finish; dropping the receiver then unblocks a full queue.
+    fn stop(&mut self) {
+        drop(self.receiver.take());
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl Drop for PrefetchReader {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// Read exactly one NV12 frame from `stdout`. `Ok(None)` means EOF.
+fn read_frame_from(
+    stdout: &mut BufReader<ChildStdout>,
+    frame_len: usize,
+) -> Result<Option<Vec<u8>>> {
+    let mut frame = vec![0u8; frame_len];
+    let mut filled = 0usize;
+    while filled < frame_len {
+        match stdout.read(&mut frame[filled..]) {
+            Ok(0) => break,
+            Ok(read) => filled += read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => {
+                return Err(InternalError::Media(format!("read GPU decode frame: {error}")).into());
+            }
+        }
+    }
+    if filled == 0 {
+        return Ok(None);
+    }
+    if filled != frame_len {
+        return Err(gpu_error("GPU decode pass ended with a partial frame"));
+    }
+    Ok(Some(frame))
 }
 
 impl DecodeProcess {
@@ -528,7 +594,7 @@ impl DecodeProcess {
 
         Ok(Self {
             child,
-            stdout: BufReader::with_capacity(4 << 20, stdout),
+            stdout: Some(BufReader::with_capacity(4 << 20, stdout)),
             stderr,
             frame_len: (width as usize * height as usize * 3 / 2).max(1),
         })
@@ -536,27 +602,37 @@ impl DecodeProcess {
 
     /// Read exactly one NV12 frame. `Ok(None)` means the stream ended early.
     pub(super) fn read_frame(&mut self) -> Result<Option<Vec<u8>>> {
-        let mut frame = vec![0u8; self.frame_len];
-        let mut filled = 0usize;
-        while filled < self.frame_len {
-            match self.stdout.read(&mut frame[filled..]) {
-                Ok(0) => break,
-                Ok(read) => filled += read,
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(error) => {
-                    return Err(
-                        InternalError::Media(format!("read GPU decode frame: {error}")).into(),
-                    );
+        let stdout = self
+            .stdout
+            .as_mut()
+            .ok_or_else(|| gpu_error("GPU decode stdout was already handed to a prefetcher"))?;
+        read_frame_from(stdout, self.frame_len)
+    }
+
+    /// Move stdout onto a bounded read-ahead thread. The child (and `kill` /
+    /// `finish`) stays with this process, so the compose loop can still reap a
+    /// decoder that is blocked on a full pipe.
+    pub(super) fn start_prefetch(&mut self, depth: usize) -> Result<PrefetchReader> {
+        let stdout = self
+            .stdout
+            .take()
+            .ok_or_else(|| gpu_error("GPU decode prefetch was started twice"))?;
+        let frame_len = self.frame_len;
+        let (sender, receiver) = mpsc::sync_channel::<Result<Option<Vec<u8>>>>(depth.max(1));
+        let handle = std::thread::spawn(move || {
+            let mut stdout = stdout;
+            loop {
+                let frame = read_frame_from(&mut stdout, frame_len);
+                let ended = matches!(frame, Ok(None) | Err(_));
+                if sender.send(frame).is_err() || ended {
+                    break;
                 }
             }
-        }
-        if filled == 0 {
-            return Ok(None);
-        }
-        if filled != self.frame_len {
-            return Err(gpu_error("GPU decode pass ended with a partial frame"));
-        }
-        Ok(Some(frame))
+        });
+        Ok(PrefetchReader {
+            receiver: Some(receiver),
+            handle: Some(handle),
+        })
     }
 
     /// Wait for the decoder and turn a non-zero exit into a diagnostic.

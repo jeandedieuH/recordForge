@@ -37,6 +37,7 @@ use super::gpu_error;
 const COMPOSITE_WGSL: &str = include_str!("shaders/composite.wgsl");
 const LAYER_WGSL: &str = include_str!("shaders/layer.wgsl");
 const MASK_WGSL: &str = include_str!("shaders/mask.wgsl");
+const BLUR_WGSL: &str = include_str!("shaders/blur.wgsl");
 const NV12_WGSL: &str = include_str!("shaders/nv12_encode.wgsl");
 
 /// Readback buffers kept in flight. Three is enough to cover the copy-out while
@@ -95,11 +96,13 @@ pub(super) enum Shape {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) enum MaskMode {
     Redact([f32; 3]),
-    /// Blur. `factor` is the small-grid step for the multi-scale approximation
-    /// (`scale → avgblur(3×3) → scale`) or the `avgblur` window size for the
-    /// small-radius direct branch.
+    /// Blur. The multi-scale branch mirrors the compatibility graph's
+    /// `scale(bilinear) → avgblur(3×3) → scale(bilinear)` chain: `small` is the
+    /// downscaled grid and `radius` is avgblur's radius (3 = a 7×7 window).
+    /// The direct branch is `avgblur` over the full-res region.
     Blur {
-        factor: f32,
+        small: (u32, u32),
+        radius: u32,
         multi_scale: bool,
     },
     /// Pixel block size in px.
@@ -261,6 +264,14 @@ struct MaskParams {
     params: [f32; 4],
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct BlurParams {
+    rect: [f32; 4],
+    grid: [f32; 4],
+    opts: [f32; 4],
+}
+
 /// Minimal `Pod` substitute so the crate does not take a `bytemuck` dependency
 /// for its uniform structs. Safety: all types are `#[repr(C)]`, made entirely
 /// of `u32`/`f32`, and contain no padding.
@@ -273,6 +284,7 @@ mod bytemuck_free {
     unsafe impl Pod for super::Nv12Params {}
     unsafe impl Pod for super::LayerParams {}
     unsafe impl Pod for super::MaskParams {}
+    unsafe impl Pod for super::BlurParams {}
     unsafe impl Pod for [f32; 4] {}
 }
 
@@ -288,10 +300,15 @@ struct SharedGpu {
     compute_layout: wgpu::BindGroupLayout,
     layer_layout: wgpu::BindGroupLayout,
     mask_layout: wgpu::BindGroupLayout,
+    blur_layout: wgpu::BindGroupLayout,
     render_pipeline: wgpu::RenderPipeline,
     compute_pipeline: wgpu::ComputePipeline,
     layer_pipeline: wgpu::RenderPipeline,
     mask_pipeline: wgpu::RenderPipeline,
+    blur_down_pipeline: wgpu::RenderPipeline,
+    blur_avg_pipeline: wgpu::RenderPipeline,
+    blur_down_uv_pipeline: wgpu::RenderPipeline,
+    blur_avg_uv_pipeline: wgpu::RenderPipeline,
 }
 
 static SHARED_GPU: OnceLock<Mutex<Option<Arc<SharedGpu>>>> = OnceLock::new();
@@ -328,6 +345,36 @@ struct CameraResources {
 
 struct MaskResources {
     binds: [wgpu::BindGroup; 2],
+    blur: Option<BlurResources>,
+}
+
+/// Per-mask small-grid textures for the multi-scale blur chain.
+///
+/// Y and chroma are kept separate: `horizontal_*` keeps every source row/row
+/// pair, `small_*` is the final grid and `blurred_*` holds the avgblur output
+/// the mask pass samples. Chroma is half-resolution in both axes.
+struct BlurResources {
+    horizontal_y: wgpu::TextureView,
+    horizontal_uv: wgpu::TextureView,
+    small_y: wgpu::TextureView,
+    small_uv: wgpu::TextureView,
+    blurred_y: wgpu::TextureView,
+    blurred_uv: wgpu::TextureView,
+    horizontal_y_binds: [wgpu::BindGroup; 2],
+    horizontal_uv_binds: [wgpu::BindGroup; 2],
+    vertical_y_bind: wgpu::BindGroup,
+    vertical_uv_bind: wgpu::BindGroup,
+    avg_y_bind: wgpu::BindGroup,
+    avg_uv_bind: wgpu::BindGroup,
+}
+
+struct BlurTextures {
+    horizontal_y: wgpu::TextureView,
+    horizontal_uv: wgpu::TextureView,
+    small_y: wgpu::TextureView,
+    small_uv: wgpu::TextureView,
+    blurred_y: wgpu::TextureView,
+    blurred_uv: wgpu::TextureView,
 }
 
 /// GPU resources for one composition pass at a fixed output size.
@@ -358,6 +405,14 @@ pub(super) struct Compositor {
     ring: Vec<RingSlot>,
     ring_next: usize,
     pending: VecDeque<Inflight>,
+    /// CPU→GPU plane upload time, accumulated over composed frames.
+    upload_time: std::time::Duration,
+    /// GPU→CPU readback/map time, accumulated over composed frames.
+    readback_time: std::time::Duration,
+    /// Portion of `readback_time` spent waiting for the GPU / map completion.
+    readback_wait_time: std::time::Duration,
+    /// Portion of `readback_time` spent copying mapped bytes into a `Vec`.
+    readback_copy_time: std::time::Duration,
     /// The first frame handed back is checked for a degenerate (all-zero)
     /// result.
     checked_output: bool,
@@ -704,6 +759,7 @@ impl Compositor {
             });
         }
 
+        let placeholder_view = placeholder.create_view(&wgpu::TextureViewDescriptor::default());
         let masks = spec
             .masks
             .iter()
@@ -715,6 +771,176 @@ impl Compositor {
                     &format!("gpu-export-mask-{index}"),
                     &mask_params(mask),
                 );
+                let blur = match mask.mode {
+                    MaskMode::Blur {
+                        small,
+                        radius,
+                        multi_scale: true,
+                    } => {
+                        let textures = create_blur_textures(
+                            &device,
+                            mask.rect.3,
+                            small,
+                            &format!("mask{index}"),
+                        );
+                        let rect = [
+                            mask.rect.0 as f32,
+                            mask.rect.1 as f32,
+                            mask.rect.2 as f32,
+                            mask.rect.3 as f32,
+                        ];
+                        let (small_w, small_h) = small;
+                        let (chroma_w, chroma_h) = (small_w / 2, small_h / 2);
+                        let horizontal_y_binds = std::array::from_fn(|stage| {
+                            let params = create_uniform(
+                                &device,
+                                &queue,
+                                &format!("gpu-export-mask-{index}-down-y-h-{stage}"),
+                                &BlurParams {
+                                    rect,
+                                    grid: [
+                                        small_w as f32,
+                                        mask.rect.3 as f32,
+                                        mask.rect.2 as f32,
+                                        mask.rect.3 as f32,
+                                    ],
+                                    opts: [0.0, 0.0, 0.0, 0.0],
+                                },
+                            );
+                            blur_bind(
+                                &device,
+                                &shared,
+                                &format!("gpu-export-mask-{index}-down-y-h-{stage}"),
+                                &stage_views[stage],
+                                &params,
+                            )
+                        });
+                        let horizontal_uv_binds = std::array::from_fn(|stage| {
+                            let params = create_uniform(
+                                &device,
+                                &queue,
+                                &format!("gpu-export-mask-{index}-down-uv-h-{stage}"),
+                                &BlurParams {
+                                    rect,
+                                    grid: [
+                                        chroma_w as f32,
+                                        (mask.rect.3 / 2) as f32,
+                                        (mask.rect.2 / 2) as f32,
+                                        (mask.rect.3 / 2) as f32,
+                                    ],
+                                    opts: [0.0, 0.0, 0.0, 0.0],
+                                },
+                            );
+                            blur_bind(
+                                &device,
+                                &shared,
+                                &format!("gpu-export-mask-{index}-down-uv-h-{stage}"),
+                                &stage_views[stage],
+                                &params,
+                            )
+                        });
+                        let vertical_y_params = create_uniform(
+                            &device,
+                            &queue,
+                            &format!("gpu-export-mask-{index}-down-y-v"),
+                            &BlurParams {
+                                rect,
+                                grid: [
+                                    small_w as f32,
+                                    small_h as f32,
+                                    small_w as f32,
+                                    mask.rect.3 as f32,
+                                ],
+                                opts: [0.0, 1.0, 0.0, 0.0],
+                            },
+                        );
+                        let vertical_y_bind = blur_bind(
+                            &device,
+                            &shared,
+                            &format!("gpu-export-mask-{index}-down-y-v"),
+                            &textures.horizontal_y,
+                            &vertical_y_params,
+                        );
+                        let vertical_uv_params = create_uniform(
+                            &device,
+                            &queue,
+                            &format!("gpu-export-mask-{index}-down-uv-v"),
+                            &BlurParams {
+                                rect,
+                                grid: [
+                                    chroma_w as f32,
+                                    chroma_h as f32,
+                                    chroma_w as f32,
+                                    (mask.rect.3 / 2) as f32,
+                                ],
+                                opts: [0.0, 1.0, 0.0, 0.0],
+                            },
+                        );
+                        let vertical_uv_bind = blur_bind(
+                            &device,
+                            &shared,
+                            &format!("gpu-export-mask-{index}-down-uv-v"),
+                            &textures.horizontal_uv,
+                            &vertical_uv_params,
+                        );
+                        let avg_params = create_uniform(
+                            &device,
+                            &queue,
+                            &format!("gpu-export-mask-{index}-avg"),
+                            &BlurParams {
+                                rect,
+                                grid: [
+                                    small_w as f32,
+                                    small_h as f32,
+                                    small_w as f32,
+                                    small_h as f32,
+                                ],
+                                opts: [radius as f32, 0.0, 0.0, 0.0],
+                            },
+                        );
+                        let avg_y_bind = blur_bind(
+                            &device,
+                            &shared,
+                            &format!("gpu-export-mask-{index}-avg-y"),
+                            &textures.small_y,
+                            &avg_params,
+                        );
+                        let avg_uv_bind = blur_bind(
+                            &device,
+                            &shared,
+                            &format!("gpu-export-mask-{index}-avg-uv"),
+                            &textures.small_uv,
+                            &avg_params,
+                        );
+                        Some((
+                            BlurResources {
+                                horizontal_y: textures.horizontal_y,
+                                horizontal_uv: textures.horizontal_uv,
+                                small_y: textures.small_y,
+                                small_uv: textures.small_uv,
+                                blurred_y: textures.blurred_y.clone(),
+                                blurred_uv: textures.blurred_uv.clone(),
+                                horizontal_y_binds,
+                                horizontal_uv_binds,
+                                vertical_y_bind,
+                                vertical_uv_bind,
+                                avg_y_bind,
+                                avg_uv_bind,
+                            },
+                            textures.blurred_y,
+                            textures.blurred_uv,
+                        ))
+                    }
+                    _ => None,
+                };
+                let blurred_y: &wgpu::TextureView = blur
+                    .as_ref()
+                    .map(|(_, y, _)| y)
+                    .unwrap_or(&placeholder_view);
+                let blurred_uv: &wgpu::TextureView = blur
+                    .as_ref()
+                    .map(|(_, _, uv)| uv)
+                    .unwrap_or(&placeholder_view);
                 let binds = std::array::from_fn(|stage| {
                     device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some(&format!("gpu-export-mask-{index}-bind-{stage}")),
@@ -732,10 +958,21 @@ impl Compositor {
                                 binding: 2,
                                 resource: uniform.as_entire_binding(),
                             },
+                            wgpu::BindGroupEntry {
+                                binding: 3,
+                                resource: wgpu::BindingResource::TextureView(blurred_y),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 4,
+                                resource: wgpu::BindingResource::TextureView(blurred_uv),
+                            },
                         ],
                     })
                 });
-                MaskResources { binds }
+                MaskResources {
+                    binds,
+                    blur: blur.map(|(resources, _, _)| resources),
+                }
             })
             .collect();
 
@@ -783,12 +1020,32 @@ impl Compositor {
             ring,
             ring_next: 0,
             pending: VecDeque::with_capacity(READBACK_RING + 1),
+            upload_time: std::time::Duration::ZERO,
+            readback_time: std::time::Duration::ZERO,
+            readback_wait_time: std::time::Duration::ZERO,
+            readback_copy_time: std::time::Duration::ZERO,
             checked_output: false,
         })
     }
 
     pub(super) fn adapter_label(&self) -> &str {
         &self.shared.adapter_label
+    }
+
+    pub(super) fn upload_time(&self) -> std::time::Duration {
+        self.upload_time
+    }
+
+    pub(super) fn readback_time(&self) -> std::time::Duration {
+        self.readback_time
+    }
+
+    pub(super) fn readback_wait_time(&self) -> std::time::Duration {
+        self.readback_wait_time
+    }
+
+    pub(super) fn readback_copy_time(&self) -> std::time::Duration {
+        self.readback_copy_time
     }
 
     /// Submit one frame and return the frame that has been in flight longest.
@@ -847,10 +1104,12 @@ impl Compositor {
     }
 
     fn read_back(&mut self, slot: usize) -> Result<Vec<u8>> {
+        let readback_started = std::time::Instant::now();
         let receiver = self.ring[slot]
             .mapped
             .take()
             .ok_or_else(|| gpu_error("GPU readback slot was not mapped"))?;
+        let wait_started = std::time::Instant::now();
         self.device
             .poll(wgpu::PollType::wait_indefinitely())
             .map_err(|error| gpu_error(&format!("GPU readback poll failed: {error}")))?;
@@ -861,12 +1120,15 @@ impl Compositor {
             }
             Err(_) => return Err(gpu_error("GPU readback was cancelled")),
         }
+        self.readback_wait_time += wait_started.elapsed();
+        let copy_started = std::time::Instant::now();
         let slice = self.ring[slot].buffer.slice(..);
         let data = slice
             .get_mapped_range()
             .map_err(|error| gpu_error(&format!("GPU readback failed: {error}")))?
             .to_vec();
         self.ring[slot].buffer.unmap();
+        self.readback_copy_time += copy_started.elapsed();
         if self.shared.lost.load(Ordering::Relaxed) {
             return Err(gpu_error("GPU device was lost during composition"));
         }
@@ -881,14 +1143,23 @@ impl Compositor {
                 ));
             }
         }
+        self.readback_time += readback_started.elapsed();
         Ok(data)
     }
 
     fn dispatch(&mut self, frame: Nv12Frame, request: &FrameRequest, slot: usize) -> Result<()> {
+        let upload_started = std::time::Instant::now();
         self.upload(&frame);
+        self.upload_time += upload_started.elapsed();
         // Drop the caller's buffer before the copy so only the plane textures
         // hold the decoded frame.
         drop(frame);
+
+        // Debug builds surface a validation error as a render failure instead
+        // of letting it become an all-zero readback (which only the first-frame
+        // check would catch). Release builds skip the extra poll.
+        #[cfg(debug_assertions)]
+        let error_scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
 
         let full = self.full_rect();
         let radius = self.radius_for(request, request.dest);
@@ -952,6 +1223,9 @@ impl Compositor {
             let Some(mask) = self.masks.get(*index) else {
                 continue;
             };
+            if let Some(blur) = &mask.blur {
+                self.draw_blur(&mut encoder, stage, blur);
+            }
             self.draw_mask(&mut encoder, stage, mask);
             stage = 1 - stage;
         }
@@ -990,6 +1264,12 @@ impl Compositor {
         let target = &self.ring[slot];
         encoder.copy_buffer_to_buffer(&self.out_buffer, 0, &target.buffer, 0, out_len);
         self.queue.submit(Some(encoder.finish()));
+        #[cfg(debug_assertions)]
+        if let Some(error) = block_on(error_scope.pop()) {
+            return Err(gpu_error(&format!(
+                "GPU frame validation failed: {error:?}"
+            )));
+        }
 
         // Start the (async) map now so the copy-out lands while the next frame
         // is already being composed.
@@ -1101,6 +1381,75 @@ impl Compositor {
         });
         pass.set_pipeline(&self.shared.mask_pipeline);
         pass.set_bind_group(0, &mask.binds[stage], &[]);
+        pass.draw(0..3, 0..1);
+    }
+
+    /// Horizontal and vertical downscale for Y and chroma, then the two
+    /// avgblur passes. The mask pass samples the two blurred planes.
+    fn draw_blur(&self, encoder: &mut wgpu::CommandEncoder, stage: usize, blur: &BlurResources) {
+        self.blur_pass(
+            encoder,
+            &blur.horizontal_y,
+            &blur.horizontal_y_binds[stage],
+            &self.shared.blur_down_pipeline,
+        );
+        self.blur_pass(
+            encoder,
+            &blur.horizontal_uv,
+            &blur.horizontal_uv_binds[stage],
+            &self.shared.blur_down_uv_pipeline,
+        );
+        self.blur_pass(
+            encoder,
+            &blur.small_y,
+            &blur.vertical_y_bind,
+            &self.shared.blur_down_pipeline,
+        );
+        self.blur_pass(
+            encoder,
+            &blur.small_uv,
+            &blur.vertical_uv_bind,
+            &self.shared.blur_down_uv_pipeline,
+        );
+        self.blur_pass(
+            encoder,
+            &blur.blurred_y,
+            &blur.avg_y_bind,
+            &self.shared.blur_avg_pipeline,
+        );
+        self.blur_pass(
+            encoder,
+            &blur.blurred_uv,
+            &blur.avg_uv_bind,
+            &self.shared.blur_avg_uv_pipeline,
+        );
+    }
+
+    fn blur_pass(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        bind: &wgpu::BindGroup,
+        pipeline: &wgpu::RenderPipeline,
+    ) {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("gpu-export-blur"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, bind, &[]);
         pass.draw(0..3, 0..1);
     }
 
@@ -1222,11 +1571,12 @@ fn mask_params(mask: &MaskConfig) -> MaskParams {
     let (mode, factor, extra, color) = match mask.mode {
         MaskMode::Redact(color) => (0.0, 1.0, 0.0, [color[0], color[1], color[2], 1.0]),
         MaskMode::Blur {
-            factor,
+            radius,
             multi_scale,
+            ..
         } => (
             1.0,
-            factor.max(1.0),
+            (radius as f32).max(1.0),
             if multi_scale { 1.0 } else { 0.0 },
             [0.0, 0.0, 0.0, 0.0],
         ),
@@ -1258,6 +1608,81 @@ fn create_uniform<T: bytemuck_free::Pod>(
     });
     queue.write_buffer(&buffer, 0, pod_bytes(value));
     buffer
+}
+
+/// Two separable downscale targets plus the avgblur output for one blur mask.
+fn create_blur_textures(
+    device: &wgpu::Device,
+    rect_height: u32,
+    small: (u32, u32),
+    label: &str,
+) -> BlurTextures {
+    let target = |width: u32, height: u32, name: &str| {
+        device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some(name),
+                size: wgpu::Extent3d {
+                    width: width.max(1),
+                    height: height.max(1),
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba16Float,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&wgpu::TextureViewDescriptor::default())
+    };
+    BlurTextures {
+        horizontal_y: target(
+            small.0,
+            rect_height,
+            &format!("gpu-export-{label}-down-y-h"),
+        ),
+        horizontal_uv: target(
+            small.0 / 2,
+            rect_height / 2,
+            &format!("gpu-export-{label}-down-uv-h"),
+        ),
+        small_y: target(small.0, small.1, &format!("gpu-export-{label}-small-y")),
+        small_uv: target(
+            small.0 / 2,
+            small.1 / 2,
+            &format!("gpu-export-{label}-small-uv"),
+        ),
+        blurred_y: target(small.0, small.1, &format!("gpu-export-{label}-blurred-y")),
+        blurred_uv: target(
+            small.0 / 2,
+            small.1 / 2,
+            &format!("gpu-export-{label}-blurred-uv"),
+        ),
+    }
+}
+
+fn blur_bind(
+    device: &wgpu::Device,
+    shared: &SharedGpu,
+    label: &str,
+    source: &wgpu::TextureView,
+    params: &wgpu::Buffer,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some(label),
+        layout: &shared.blur_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(source),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: params.as_entire_binding(),
+            },
+        ],
+    })
 }
 
 impl Quad {
@@ -1630,6 +2055,10 @@ fn create_shared_gpu() -> Result<SharedGpu> {
         label: Some("gpu-export-mask"),
         source: wgpu::ShaderSource::Wgsl(MASK_WGSL.into()),
     });
+    let blur_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("gpu-export-blur"),
+        source: wgpu::ShaderSource::Wgsl(BLUR_WGSL.into()),
+    });
     let nv12_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("gpu-export-nv12"),
         source: wgpu::ShaderSource::Wgsl(NV12_WGSL.into()),
@@ -1692,6 +2121,15 @@ fn create_shared_gpu() -> Result<SharedGpu> {
                 count: None,
             },
             uniform_binding(2),
+            texture_binding(3, wgpu::ShaderStages::FRAGMENT),
+            texture_binding(4, wgpu::ShaderStages::FRAGMENT),
+        ],
+    });
+    let blur_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("gpu-export-blur-layout"),
+        entries: &[
+            texture_binding(0, wgpu::ShaderStages::FRAGMENT),
+            uniform_binding(1),
         ],
     });
 
@@ -1811,6 +2249,146 @@ fn create_shared_gpu() -> Result<SharedGpu> {
         cache: None,
     });
 
+    let blur_down_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("gpu-export-blur-downscale-pipeline"),
+        layout: Some(
+            &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("gpu-export-blur-downscale-pipeline-layout"),
+                bind_group_layouts: &[Some(&blur_layout)],
+                immediate_size: 0,
+            }),
+        ),
+        vertex: wgpu::VertexState {
+            module: &blur_module,
+            entry_point: Some("vs_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[],
+        },
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            ..Default::default()
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &blur_module,
+            entry_point: Some("fs_downscale_y"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Rgba16Float,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    });
+
+    let blur_avg_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("gpu-export-blur-avg-pipeline"),
+        layout: Some(
+            &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("gpu-export-blur-avg-pipeline-layout"),
+                bind_group_layouts: &[Some(&blur_layout)],
+                immediate_size: 0,
+            }),
+        ),
+        vertex: wgpu::VertexState {
+            module: &blur_module,
+            entry_point: Some("vs_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[],
+        },
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            ..Default::default()
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &blur_module,
+            entry_point: Some("fs_avgblur_y"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Rgba16Float,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    });
+
+    let blur_down_uv_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("gpu-export-blur-downscale-uv-pipeline"),
+        layout: Some(
+            &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("gpu-export-blur-downscale-uv-pipeline-layout"),
+                bind_group_layouts: &[Some(&blur_layout)],
+                immediate_size: 0,
+            }),
+        ),
+        vertex: wgpu::VertexState {
+            module: &blur_module,
+            entry_point: Some("vs_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[],
+        },
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            ..Default::default()
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &blur_module,
+            entry_point: Some("fs_downscale_uv"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Rgba16Float,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    });
+
+    let blur_avg_uv_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("gpu-export-blur-avg-uv-pipeline"),
+        layout: Some(
+            &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("gpu-export-blur-avg-uv-pipeline-layout"),
+                bind_group_layouts: &[Some(&blur_layout)],
+                immediate_size: 0,
+            }),
+        ),
+        vertex: wgpu::VertexState {
+            module: &blur_module,
+            entry_point: Some("vs_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[],
+        },
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            ..Default::default()
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &blur_module,
+            entry_point: Some("fs_avgblur_uv"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Rgba16Float,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    });
+
     let compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: Some("gpu-export-nv12-pipeline"),
         layout: Some(
@@ -1850,10 +2428,15 @@ fn create_shared_gpu() -> Result<SharedGpu> {
         compute_layout,
         layer_layout,
         mask_layout,
+        blur_layout,
         render_pipeline,
         compute_pipeline,
         layer_pipeline,
         mask_pipeline,
+        blur_down_pipeline,
+        blur_avg_pipeline,
+        blur_down_uv_pipeline,
+        blur_avg_uv_pipeline,
     })
 }
 
@@ -2334,6 +2917,26 @@ mod tests {
         Nv12Frame { data }
     }
 
+    /// Flat luma with one bright column, for box-filter probes.
+    fn column_frame(width: u32, height: u32, base: u8, column: u32, bright: u8) -> Nv12Frame {
+        let mut frame = flat_frame(width, height, base);
+        for y in 0..height as usize {
+            frame.data[y * width as usize + column as usize] = bright;
+        }
+        frame
+    }
+
+    /// Flat luma with a vertical step at `edge`, for downscale probes.
+    fn step_frame(width: u32, height: u32, edge: u32, left: u8, right: u8) -> Nv12Frame {
+        let mut frame = flat_frame(width, height, left);
+        for y in 0..height as usize {
+            for x in edge as usize..width as usize {
+                frame.data[y * width as usize + x] = right;
+            }
+        }
+        frame
+    }
+
     #[test]
     fn padded_content_shows_the_background_and_rounded_corners() {
         let (width, height) = (64, 32);
@@ -2500,6 +3103,145 @@ mod tests {
         // Each 8-px cell samples the block centre, so a whole cell is flat.
         assert_eq!(luma(0, 4), luma(7, 4), "pixelate cell is not flat");
         assert_ne!(luma(4, 4), luma(20, 4), "pixelate cells did not move");
+    }
+
+    #[test]
+    fn direct_blur_uses_avgblur_radius_and_edge_replication() {
+        let (width, height) = (64, 32);
+        let spec = CompositorSpec {
+            masks: vec![MaskConfig {
+                rect: (16, 8, 32, 16),
+                mode: MaskMode::Blur {
+                    small: (32, 16),
+                    radius: 1,
+                    multi_scale: false,
+                },
+            }],
+            ..Default::default()
+        };
+        let Some(mut compositor) =
+            Compositor::new(width, height, &plain_frame(width, height), &spec).ok()
+        else {
+            return;
+        };
+        let mut req = request(
+            width,
+            height,
+            Crop {
+                x: 0,
+                y: 0,
+                width,
+                height,
+            },
+        );
+        req.masks.push(0);
+        compositor
+            .submit(
+                Frame::Compose(column_frame(width, height, 100, 32, 200)),
+                req,
+            )
+            .expect("submit");
+        let out = compositor.drain().expect("drain").remove(0);
+        let luma = |x: u32, y: u32| out[y as usize * width as usize + x as usize] as i16;
+        // A radius-1 avgblur is a 3×3 box: the bright column stays in the
+        // window for all three rows, so the centre is (6*100 + 3*200)/9.
+        assert!((luma(31, 16) - 133).abs() <= 8, "left {}", luma(31, 16));
+        assert!((luma(32, 16) - 133).abs() <= 8, "centre {}", luma(32, 16));
+        assert!((luma(33, 16) - 133).abs() <= 8, "right {}", luma(33, 16));
+        // Two texels away the column is outside the 3×3 window again.
+        assert!((luma(34, 16) - 100).abs() <= 3, "two away {}", luma(34, 16));
+        assert!(
+            (luma(4, 16) - 100).abs() <= 3,
+            "outside luma {}",
+            luma(4, 16)
+        );
+    }
+
+    #[test]
+    fn multi_scale_blur_softens_a_step_inside_its_rect() {
+        let (width, height) = (128, 64);
+        let spec = CompositorSpec {
+            masks: vec![MaskConfig {
+                rect: (32, 16, 64, 32),
+                // radius 12 → factor 3 → 64/3 = 21 → 20, 32/3 = 10.
+                mode: MaskMode::Blur {
+                    small: (20, 10),
+                    radius: 3,
+                    multi_scale: true,
+                },
+            }],
+            ..Default::default()
+        };
+        let Some(mut compositor) =
+            Compositor::new(width, height, &plain_frame(width, height), &spec).ok()
+        else {
+            return;
+        };
+        let mut req = request(
+            width,
+            height,
+            Crop {
+                x: 0,
+                y: 0,
+                width,
+                height,
+            },
+        );
+        req.masks.push(0);
+        compositor
+            .submit(Frame::Compose(step_frame(width, height, 64, 50, 200)), req)
+            .expect("submit");
+        let out = compositor.drain().expect("drain").remove(0);
+        let luma = |x: u32, y: u32| out[y as usize * width as usize + x as usize] as i16;
+        // Outside the rect is untouched.
+        assert!(
+            (luma(8, 32) - 50).abs() <= 3,
+            "outside luma {}",
+            luma(8, 32)
+        );
+        // Inside, the wide triangle downscale + 7×7 avgblur + bilinear upscale
+        // must leave the step softened, not a hard edge. Far from the step the
+        // flat sides survive; just either side of it the values mix.
+        let left = luma(44, 32);
+        let right = luma(84, 32);
+        assert!((left - 50).abs() <= 6, "left flat side {left}");
+        assert!((right - 200).abs() <= 10, "right flat side {right}");
+        let centre = luma(64, 32);
+        let near_left = luma(58, 32);
+        let near_right = luma(70, 32);
+        assert!(
+            centre > 55 && centre < 195,
+            "step not softened: centre {centre}"
+        );
+        assert!(
+            near_left > 50 && near_left < 200,
+            "left transition {near_left}"
+        );
+        assert!(
+            near_right > 50 && near_right < 200,
+            "right transition {near_right}"
+        );
+    }
+
+    #[test]
+    fn shader_pipelines_validate_on_a_hardware_adapter() {
+        // `compositor()` skips when setup fails, which would hide a WGSL or
+        // pipeline-layout regression. Only a missing/software adapter may skip;
+        // a validation error must fail.
+        match create_shared_gpu() {
+            Ok(_) => {}
+            Err(error) => {
+                let message = format!("{error:?}");
+                if message.contains("no GPU adapter")
+                    || message.contains("software")
+                    || message.contains("device request failed")
+                {
+                    eprintln!("skipping GPU pipeline validation: {message}");
+                    return;
+                }
+                panic!("GPU pipeline setup failed: {message}");
+            }
+        }
     }
 
     #[test]

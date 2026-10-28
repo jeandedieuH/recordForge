@@ -7,8 +7,8 @@
 //!
 //! Milestone state: G0–G5 are complete. The GPU pass owns canvas framing,
 //! zoom, cursor/overlay items, camera and side-by-side layout, redact/pixelate
-//! privacy masks and keystroke badges; the encode sidecar owns burned-in
-//! captions (libass), chapters, HEVC tagging and the license output cap.
+//! and blur privacy masks and keystroke badges; the encode sidecar owns
+//! burned-in captions (libass), chapters, HEVC tagging and the license output cap.
 //! [`plan_limitations`] keeps structurally unsupported plans on the FFmpeg
 //! renderer, which stays the authoritative output and the fallback for every
 //! feature.
@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::errors::{InternalError, Result};
@@ -217,10 +217,9 @@ fn plan_is_passthrough_only(plan: &RenderPlan, settings: &ExportSettings) -> boo
 ///
 /// The remaining exclusions are structural: animated containers (GIF/WebP),
 /// timeline gaps/coverage holes the decode pass cannot synthesise, mixed source
-/// dimensions, non-NV12 canvases, blur privacy masks (the shader approximation
-/// of FFmpeg's scaled avgblur is below the parity floor), and the one ordering
-/// pair the hybrid pipeline cannot express (keystrokes must sit above captions,
-/// but captions run in the encode sidecar after the GPU raster).
+/// dimensions, non-NV12 canvases, and the one ordering pair the hybrid pipeline
+/// cannot express (keystrokes must sit above captions, but captions run in the
+/// encode sidecar after the GPU raster).
 pub(crate) fn plan_limitations(
     plan: &RenderPlan,
     settings: &ExportSettings,
@@ -263,19 +262,10 @@ pub(crate) fn plan_limitations(
         reasons.push("keystroke overlay with burned-in captions".into());
     }
 
-    // Blur masks emulate FFmpeg's `scale → avgblur(3×3) → scale` chain in the
-    // mask shader. Measured on the G4 matrix the approximation is 18.6 dB on the
-    // worst frame (33 dB inside the rect) versus the 28 dB floor: swscale's
-    // widened bilinear downscale is a different kernel, not a rounding detail.
-    // Redact and pixelate are exact, so only blur keeps the FFmpeg renderer
-    // until the shader reproduces swscale's kernel.
-    if plan
-        .masks
-        .iter()
-        .any(|mask| mask.enabled && mask.mode == "blur")
-    {
-        reasons.push("blur privacy masks".into());
-    }
+    // Blur masks are rendered by the GPU downscale/avgblur chain. The mask
+    // pass reproduces swscale's widened bilinear downscale (separable triangle
+    // with radius = scale), avgblur's radius semantics and the final bilinear
+    // upscale, so they no longer force the FFmpeg renderer.
 
     // Timeline coverage: a gap needs a solid-fill source, which the decode
     // pass does not synthesise yet.
@@ -334,6 +324,13 @@ fn queue_frames(name: &str, default: usize) -> usize {
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|value| (1..=64).contains(value))
         .unwrap_or(default)
+}
+
+/// Frames each camera decoder may read ahead of the compose loop. Two frames
+/// (~0.3 MB at a 320×320 overlay) cover a decoder hiccup without turning each
+/// camera into a large buffer.
+fn camera_prefetch_frames() -> usize {
+    queue_frames("RECORDFORGE_EXPORT_GPU_CAMERA_QUEUE", 2)
 }
 
 /// Plate-producer threads. The compatibility renderer spreads the same CPU work
@@ -541,12 +538,27 @@ pub(crate) fn render_timeline_on_gpu(
     let mut decode_wait = std::time::Duration::ZERO;
     let mut encode_wait = std::time::Duration::ZERO;
     let mut pipeline_wall = std::time::Duration::ZERO;
+    let camera_prefetch = camera_prefetch_frames();
+    // The hop instrumentation is split by direction: decode read, CPU→GPU
+    // upload, GPU→CPU readback and the encoder's stdin write. Aggregate only;
+    // per-frame timings would allocate in the hot loop.
+    let decode_read_time = Arc::new(Mutex::new(std::time::Duration::ZERO));
+    let pipe_write_time = Arc::new(Mutex::new(std::time::Duration::ZERO));
+    let plate_raster_time = Arc::new(Mutex::new(std::time::Duration::ZERO));
+    let mut plate_wait = std::time::Duration::ZERO;
+    let mut camera_wait = std::time::Duration::ZERO;
     let setup_ms = started.elapsed().as_millis() as u64;
 
     let result = std::thread::scope(|scope| -> Result<()> {
+        let reader_sink = Arc::clone(&decode_read_time);
         let reader = scope.spawn(move || -> Result<()> {
             loop {
-                match decoder.read_frame() {
+                let read_started = Instant::now();
+                let frame = decoder.read_frame();
+                *reader_sink
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) += read_started.elapsed();
+                match frame {
                     Ok(Some(frame)) => {
                         if decode_tx.send(frame).is_err() {
                             // The compose loop stopped (cancel or error): kill
@@ -565,10 +577,16 @@ pub(crate) fn render_timeline_on_gpu(
             decoder.finish()
         });
 
+        let writer_sink = Arc::clone(&pipe_write_time);
         let writer = scope.spawn(move || -> Result<()> {
             let mut encode_process = encode_process;
             for frame in encode_rx {
-                if let Err(error) = encode_process.write_frame(&frame) {
+                let write_started = Instant::now();
+                let written = encode_process.write_frame(&frame);
+                *writer_sink
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) += write_started.elapsed();
+                if let Err(error) = written {
                     // The encoder died mid-stream; kill it so `wait` cannot
                     // block on a half-written pipe.
                     encode_process.kill();
@@ -585,6 +603,7 @@ pub(crate) fn render_timeline_on_gpu(
         for (worker_index, runtime) in plate_runtimes.into_iter().enumerate() {
             let sender = plate_senders[worker_index].clone();
             let cancel = Arc::clone(&cancel);
+            let raster_sink = Arc::clone(&plate_raster_time);
             let count = plate_count as u64;
             plate_handles.push(scope.spawn(move || -> Result<()> {
                 let mut runtime = runtime;
@@ -597,10 +616,15 @@ pub(crate) fn render_timeline_on_gpu(
                     if cancel.load(Ordering::Relaxed) {
                         return Ok(());
                     }
+                    let raster_started = Instant::now();
                     let (planes, _) = runtime
                         .worker
                         .render_planes(index, fps)
                         .map_err(|error| gpu_error(&error))?;
+                    *raster_sink
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) +=
+                        raster_started.elapsed();
                     let cursor = planes.cursor.and_then(|data| {
                         plane_frame(
                             cursor_rect,
@@ -673,7 +697,10 @@ pub(crate) fn render_timeline_on_gpu(
             // rendered by the plate workers ahead of this frame.
             let planes = if plate_count > 0 {
                 let worker = emitted as usize % plate_count;
-                match plate_receivers[worker].recv() {
+                let wait_started = Instant::now();
+                let received = plate_receivers[worker].recv();
+                plate_wait += wait_started.elapsed();
+                match received {
                     Ok(planes) => planes,
                     Err(_) => {
                         main_result = Err(gpu_error("GPU overlay plate producer stopped"));
@@ -691,17 +718,23 @@ pub(crate) fn render_timeline_on_gpu(
                     continue;
                 }
                 if output_ms >= camera.end_ms as f64 {
-                    camera.process.kill();
+                    camera.stop();
                     camera.done = true;
                     continue;
                 }
                 if output_ms >= camera.start_ms as f64 {
-                    match camera.process.read_frame() {
+                    let wait_started = Instant::now();
+                    let frame = camera.next_frame(camera_prefetch);
+                    camera_wait += wait_started.elapsed();
+                    match frame {
                         Ok(Some(data)) => camera_frames.push(compositor::CameraFrame {
                             index: camera.index,
                             data,
                         }),
-                        Ok(None) => camera.done = true,
+                        Ok(None) => {
+                            camera.stop();
+                            camera.done = true;
+                        }
                         Err(error) => {
                             main_result = Err(error);
                             break;
@@ -803,7 +836,7 @@ pub(crate) fn render_timeline_on_gpu(
             }
         }
         for camera in &mut cameras {
-            camera.process.kill();
+            camera.stop();
         }
         drop(encode_tx);
         drop(decode_rx);
@@ -838,6 +871,24 @@ pub(crate) fn render_timeline_on_gpu(
     });
 
     let elapsed = started.elapsed();
+    let upload_ms = compositor.upload_time().as_millis() as u64;
+    let readback_ms = compositor.readback_time().as_millis() as u64;
+    let readback_wait_ms = compositor.readback_wait_time().as_millis() as u64;
+    let readback_copy_ms = compositor.readback_copy_time().as_millis() as u64;
+    let plate_raster_ms = plate_raster_time
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .as_millis() as u64;
+    let plate_wait_ms = plate_wait.as_millis() as u64;
+    let camera_wait_ms = camera_wait.as_millis() as u64;
+    let decode_read_ms = decode_read_time
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .as_millis() as u64;
+    let pipe_write_ms = pipe_write_time
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .as_millis() as u64;
     match &result {
         Ok(()) => info!(
             elapsed_ms = elapsed.as_millis() as u64,
@@ -850,6 +901,15 @@ pub(crate) fn render_timeline_on_gpu(
             compose_ms = compose_time.as_millis() as u64,
             decode_wait_ms = decode_wait.as_millis() as u64,
             encode_wait_ms = encode_wait.as_millis() as u64,
+            decode_read_ms,
+            upload_ms,
+            readback_ms,
+            readback_wait_ms,
+            readback_copy_ms,
+            plate_raster_ms,
+            plate_wait_ms,
+            camera_wait_ms,
+            pipe_write_ms,
             realtime_x = (total_frames as f64 / (fps as f64)) / elapsed.as_secs_f64().max(1e-6),
             "gpu export: finished"
         ),
@@ -926,14 +986,37 @@ struct CameraRuntime {
     start_ms: u64,
     end_ms: u64,
     process: decode::DecodeProcess,
+    /// Bounded read-ahead created on the camera's first visible frame.
+    prefetch: Option<decode::PrefetchReader>,
     done: bool,
+}
+
+impl CameraRuntime {
+    /// Next camera frame, starting the read-ahead thread on first use.
+    fn next_frame(&mut self, depth: usize) -> Result<Option<Vec<u8>>> {
+        if self.prefetch.is_none() {
+            self.prefetch = Some(self.process.start_prefetch(depth)?);
+        }
+        match self.prefetch.as_ref() {
+            Some(prefetch) => prefetch.next_frame(),
+            None => Ok(None),
+        }
+    }
+
+    /// Reap the decoder. Killing the child first unblocks a reader parked on
+    /// the pipe; dropping the prefetch then joins its thread.
+    fn stop(&mut self) {
+        self.process.kill();
+        self.prefetch.take();
+    }
 }
 
 impl Drop for CameraRuntime {
     fn drop(&mut self) {
         // Any early return (cancel, sidecar failure, a later setup error) must
-        // reap the camera decoder instead of leaving it blocked on its pipe.
-        self.process.kill();
+        // reap the camera decoder and its read-ahead thread instead of leaving
+        // them blocked on a pipe.
+        self.stop();
     }
 }
 
@@ -1092,6 +1175,7 @@ fn build_cameras(
             start_ms: track.start_ms,
             end_ms: track.end_ms,
             process,
+            prefetch: None,
             done: false,
         });
     }
@@ -1343,16 +1427,22 @@ fn mask_config(
         "blur" => {
             let radius = mask.blur_radius.clamp(1.0, 128.0);
             // Radius > 3 takes the compatibility graph's multi-scale branch
-            // (downscale → avgblur(3×3) → upscale); smaller radii run avgblur
-            // directly on the region.
+            // (downscale → avgblur(3×3 radius) → upscale); smaller radii run
+            // avgblur directly on the region. `avgblur`'s sizeX/sizeY are
+            // radii, so sizeX=3 is a 7×7 window.
             if radius > 3.0 {
+                let factor = ((radius / 4.0).round() as u32).clamp(2, 16);
+                let small_w = ((width / factor) / 2 * 2).max(2);
+                let small_h = ((height / factor) / 2 * 2).max(2);
                 compositor::MaskMode::Blur {
-                    factor: (radius / 4.0).round().clamp(2.0, 16.0) as f32,
+                    small: (small_w, small_h),
+                    radius: 3,
                     multi_scale: true,
                 }
             } else {
                 compositor::MaskMode::Blur {
-                    factor: (radius.round() as u32).max(1) as f32,
+                    small: (width, height),
+                    radius: (radius.round() as u32).max(1),
                     multi_scale: false,
                 }
             }
@@ -1506,6 +1596,69 @@ mod tests {
         assert!(limitations(&plan_with_canvas(gated_canvas())).is_empty());
     }
 
+    fn blur_mask(radius: f64) -> crate::exports::RenderPlanMask {
+        crate::exports::RenderPlanMask {
+            id: "mask".into(),
+            asset_id: None,
+            start_ms: 0,
+            end_ms: 1_000,
+            mode: "blur".into(),
+            rect: crate::exports::RenderCropFloat {
+                x: 1_100.0,
+                y: 500.0,
+                width: 520.0,
+                height: 340.0,
+            },
+            blur_radius: radius,
+            pixel_size: 8,
+            redact_color: "#000000".into(),
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn blur_mask_config_matches_the_compatibility_grid() {
+        let canvas = gated_canvas();
+        // radius > 3 → factor = round(r/4), then the graph's even truncation.
+        let config = mask_config(&blur_mask(24.0), &canvas).expect("multi-scale mask");
+        assert_eq!(config.rect, (1_100, 500, 520, 340));
+        match config.mode {
+            compositor::MaskMode::Blur {
+                small,
+                radius,
+                multi_scale,
+            } => {
+                assert_eq!(small, (86, 56), "520/6 and 340/6 even-truncated");
+                assert_eq!(radius, 3, "avgblur sizeX=3 is the graph's radius");
+                assert!(multi_scale);
+            }
+            other => panic!("expected a multi-scale blur, got {other:?}"),
+        }
+
+        // Small radii stay on the direct avgblur branch, where sizeX is a
+        // radius (so 3 means a 7×7 window).
+        let config = mask_config(&blur_mask(3.0), &canvas).expect("direct mask");
+        match config.mode {
+            compositor::MaskMode::Blur {
+                small,
+                radius,
+                multi_scale,
+            } => {
+                assert_eq!(small, (520, 340));
+                assert_eq!(radius, 3);
+                assert!(!multi_scale);
+            }
+            other => panic!("expected a direct blur, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn blur_masks_are_gpu_compatible() {
+        let mut plan = plan_with_canvas(gated_canvas());
+        plan.masks.push(blur_mask(24.0));
+        assert!(limitations(&plan).is_empty());
+    }
+
     #[test]
     fn canvas_framing_is_gpu_compatible() {
         // G1: padding, corner radius, shadow and background treatments are
@@ -1647,39 +1800,6 @@ mod tests {
             reasons.iter().any(|reason| reason.contains("keystroke")),
             "{reasons:?}"
         );
-    }
-
-    #[test]
-    fn blur_privacy_masks_stay_on_the_ffmpeg_renderer() {
-        // Redact and pixelate are shader-exact; the scaled-average blur is an
-        // approximation that measured below the parity floor (G4).
-        let mut plan = plan_with_canvas(gated_canvas());
-        plan.masks.push(crate::exports::RenderPlanMask {
-            id: "mask".into(),
-            asset_id: None,
-            start_ms: 0,
-            end_ms: 1_000,
-            mode: "blur".into(),
-            rect: crate::exports::RenderCropFloat {
-                x: 0.0,
-                y: 0.0,
-                width: 100.0,
-                height: 100.0,
-            },
-            blur_radius: 24.0,
-            pixel_size: 8,
-            redact_color: "#000000".into(),
-            enabled: true,
-        });
-        let reasons = limitations(&plan);
-        assert!(
-            reasons.iter().any(|reason| reason.contains("blur")),
-            "{reasons:?}"
-        );
-
-        // A disabled blur mask is not a limitation.
-        plan.masks[0].enabled = false;
-        assert!(limitations(&plan).is_empty());
     }
 
     #[test]

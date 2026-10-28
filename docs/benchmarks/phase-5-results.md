@@ -299,6 +299,28 @@ row.
 
 ### Blur masks stay on FFmpeg (deliberate limit)
 
+> **Update 2026-10-28:** this limit is closed. The GPU path now reproduces
+> swscale's widened bilinear downscale in dedicated passes, keeps Y and chroma
+> separate (chroma at half resolution, like the graph), uses avgblur's radius
+> semantics and samples the result with the graph's bilinear upscale. Blur
+> masks are back inside `plan_limitations`, and the fixture emits a
+> `spec_blur_*` matrix row instead of `spec_fallback_blur_*`.
+>
+> Measured with the synthetic fixture at equal single-pass segmentation
+> (`parity.ts --profile renderer`): 300/300 frames, **47.78 dB mean / 29.83 dB
+> min** with software x264, and **50.36 / 29.89** in the G6 NVENC matrix — both
+> pass the 40/28 renderer floor with audio Δ0 ms. The earlier G4 approximation
+> scored 33 dB inside the rect; the per-plane chain is what closed the gap, not
+> a looser threshold.
+>
+> Reproduce: `export-synth-spec.ts out/blur --single-pass` writes
+> `spec_blur_single.json`; copy it with `settings.renderer = "gpu"` and a distinct
+> `outputPath`, render both specs with `export_harness`, then
+> `parity.ts render_blur_single.mp4 render_blur_single_gpu.mp4 --profile renderer`.
+>
+> The paragraph below records the original G4 evidence and why the limit
+> existed.
+
 The compatibility graph's blur is `crop → scale(bilinear, ÷factor) →
 avgblur(3×3) → scale(bilinear)`. swscale's bilinear **downscale** widens its
 support with the factor (≈ an area average), so the shader cannot match it with
@@ -369,12 +391,27 @@ selector and the env opt-out remain available.
 1. **Pipe overhead.** The decode → Rust → encode hop costs ~3.1 MB/frame each
    way. D3D11/Metal interop (or feeding the encoder from the decoder's shared
    texture) is what would make `auto` a clear win for layered plans too.
+   → Design and platform matrix in ADR 019 (proposed). The Phase 6 hop
+   instrumentation shows readback + the encoder stdin write dominate composed
+   plans, so the encode-side shared texture is the first prototype.
 2. **Blur parity.** Reproduce swscale's widened bilinear downscale in a
    dedicated GPU downscale pass (or pre-blur the rect on the CPU) so blur masks
    can come back into the gate.
+   → Implemented 2026-10-28: per-plane Y and chroma passes with a separable
+   triangle downscale (radius = scale), `avgblur` radius semantics (sizeX=3 is
+   7×7), and the bilinear upscale in the mask pass. Blur masks are no longer in
+   `plan_limitations`; the G6 matrix row is 50.36 dB mean / 29.89 dB min.
 3. **Camera decoders are read synchronously** in the compose loop; a bounded
    prefetch per camera overlay is the next producer-side optimisation if
    `abl-camera` stays compose-bound.
+   → Implemented 2026-10-28: `RECORDFORGE_EXPORT_GPU_CAMERA_QUEUE` (default 2)
+   frames of read-ahead per camera, started on the first visible frame and
+   reaped with the decoder. A release-harness 1/2/4 depth sweep on `abl-camera`
+   showed no clear win (12.01/11.96/12.04 s averages); keep the default for
+   latency smoothing, not as a claimed speedup. See `phase-6-results.md`.
 4. **Compose cost.** The 1:1 luma fast path helped only marginally; an
    `Rgba16Float` stage is 8 bytes/pixel, so a 16-bit-per-channel YUV stage or a
    direct NV12 blend target is the larger lever.
+   → Candidate layouts and validation plan in ADR 019 (proposed). Direct
+   NV12 (1.5 B/px) is the measured target; 16-bit YUV (4 B/px) is the fallback
+   if 8-bit parity does not hold.
