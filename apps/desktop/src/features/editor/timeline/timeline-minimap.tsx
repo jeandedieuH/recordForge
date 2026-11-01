@@ -2,6 +2,7 @@ import { memo, useCallback, useMemo, useRef, useState } from "react"
 import type { TimelineState } from "@recordforge/contracts"
 import { cn } from "@recordforge/ui"
 import { formatTimelineTime } from "./timeline-ruler"
+import { getTrackLaneTheme, laneStyle } from "./lanes/lane-theme"
 import { usePlayheadMs } from "./use-playback-state"
 
 export interface TimelineMinimapProps {
@@ -52,21 +53,10 @@ export const TimelineMinimap = memo(function TimelineMinimap({
     Math.min(100 - lensLeftPercent, (visibleSpanMs / effectiveDuration) * 100),
   )
 
-  // Flatten all track clips into color-coded mini blocks
+  // Flatten all track clips into lane-accented mini blocks
   const miniClips = useMemo(() => {
     return timeline.tracks.flatMap((track) => {
-      let colorClass = "bg-muted-foreground/40"
-      if (track.kind === "screen") colorClass = "bg-track-screen/70"
-      else if (track.kind === "camera") colorClass = "bg-track-webcam/70"
-      else if (track.kind === "cursor") colorClass = "bg-primary/70"
-      else if (track.kind === "audio") colorClass = "bg-track-mic/70"
-      else if (track.kind === "captions") colorClass = "bg-track-captions/70"
-      else if (track.kind === "effects") colorClass = "bg-warning/70"
-      else if (track.kind === "annotations") colorClass = "bg-track-annotation/70"
-      else if (track.kind === "titles") colorClass = "bg-track-title/70"
-      else if (track.kind === "graphics") colorClass = "bg-track-graphic/70"
-      else if (track.kind === "overlay") colorClass = "bg-secondary/70"
-
+      const colorVar = getTrackLaneTheme(track).colorVar
       return track.clips.map((clip) => {
         const left = (clip.startMs / effectiveDuration) * 100
         const width = (clip.durationMs / effectiveDuration) * 100
@@ -74,7 +64,7 @@ export const TimelineMinimap = memo(function TimelineMinimap({
           id: clip.id,
           left,
           width: Math.max(0.2, width),
-          colorClass,
+          colorVar,
         }
       })
     })
@@ -200,8 +190,8 @@ export const TimelineMinimap = memo(function TimelineMinimap({
         {miniClips.map((clip) => (
           <div
             key={clip.id}
-            className={cn("absolute inset-y-0 rounded-xs", clip.colorClass)}
-            style={{ left: `${clip.left}%`, width: `${clip.width}%` }}
+            className="absolute inset-y-0 rounded-xs bg-lane/70"
+            style={{ ...laneStyle(clip.colorVar), left: `${clip.left}%`, width: `${clip.width}%` }}
           />
         ))}
 
@@ -209,7 +199,7 @@ export const TimelineMinimap = memo(function TimelineMinimap({
         {miniZoomSegments.map((zoom) => (
           <div
             key={zoom.id}
-            className="absolute top-0 h-1 rounded-xs bg-primary shadow-xs"
+            className="absolute top-0 h-1 rounded-xs bg-track-zoom shadow-xs"
             style={{ left: `${zoom.left}%`, width: `${zoom.width}%` }}
           />
         ))}

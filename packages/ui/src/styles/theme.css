@@ -67,6 +67,16 @@
   --color-track-annotation: #e879f9; /* Fuchsia */
   --color-track-title: #f59e0b; /* Amber / Gold */
   --color-track-graphic: #22d3ee; /* Neon Cyan */
+  --color-track-cursor: #fb923c; /* Orange */
+  --color-track-effects: #f87171; /* Red (privacy masks) */
+  --color-track-zoom: #818cf8; /* Indigo */
+  --color-track-overlay: #c084fc; /* Purple */
+  --color-track-music: #2dd4bf; /* Teal */
+
+  /* Per-lane accent, overridden inline by timeline lanes via
+     style={{ "--color-lane": "var(--color-track-…)" }} so a single class set
+     (bg-lane/20, ring-lane/40, text-lane) themes every lane. */
+  --color-lane: var(--color-primary);
 
   /* Typography — Professional Trust system (DESIGN.md) */
   --font-serif: "Noto Serif", Georgia, serif;

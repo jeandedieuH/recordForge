@@ -35,7 +35,6 @@ import type {
   WaveformResources,
 } from "../media/derivative-resources"
 import { toAssetUrl } from "../media/derivative-resources"
-import { TimelineClipItem } from "./timeline-clip-item"
 import { TimelineMarquee } from "./timeline-marquee"
 import { SilencePreviewLayer } from "./silence-preview-layer"
 import { TimelineMinimap } from "./timeline-minimap"
@@ -45,6 +44,12 @@ import { TimelineSnapBadge } from "./timeline-snap-badge"
 import { TimelineTrackHeader } from "./timeline-track-header"
 import type { TimelineTool } from "./timeline-toolbar"
 import { ZoomTrackRow } from "./zoom-track"
+import { useEdgeAutoScroll } from "./lanes/use-edge-auto-scroll"
+import { TimelineHoverLine, type TimelineHoverLineHandle } from "./lanes/timeline-hover-line"
+import { TimelineGestureOverlay, type TimelineGestureInfo } from "./lanes/timeline-gesture-overlay"
+import { TimelineLaneRow } from "./lanes/timeline-lane-row"
+import { getClipLaneTheme, getTrackLaneTheme, laneStyle } from "./lanes/lane-theme"
+import { computeClipRuns, type ClipRuns } from "./lanes/timeline-clip-runs"
 import { getPlayheadSnapshot, subscribeToPlayhead, usePlayheadMs } from "./use-playback-state"
 import { useTimelineStore } from "../../../stores/timeline-store"
 
@@ -142,6 +147,9 @@ export interface TimelineLanesProps {
   onToggleTrackLocked: (track: TimelineTrack) => void
   onToggleTrackCollapsed: (track: TimelineTrack) => void
   onCycleTrackHeight: (track: TimelineTrack) => void
+  onSetTrackHeight?: (track: TimelineTrack, height: number) => void
+  // Source media duration — lets trims clamp at the real end of media.
+  sourceDurationMs?: number
   onRenameTrack?: (track: TimelineTrack, name: string) => void
   onMoveTrack?: (trackId: string, newIndex: number) => void
   onUpdateClipAudio?: (
@@ -180,83 +188,9 @@ function getTrackHeight(
   return view.trackHeights[track.id] ?? TRACK_ROW_HEIGHT
 }
 
-/**
- * Greedily assigns overlapping clips to sub-lanes per connected cluster
- * so simultaneous overlay items (e.g. multiple titles/annotations) do not visually occlude
- * one another, while non-overlapping clips remain at full height.
- */
-export function computeClipSublanes(
-  clips: TimelineClip[],
-): Map<string, { index: number; count: number }> {
-  const result = new Map<string, { index: number; count: number }>()
-  if (clips.length <= 1) {
-    for (const clip of clips) {
-      result.set(clip.id, { index: 0, count: 1 })
-    }
-    return result
-  }
-
-  const sorted = [...clips].sort((a, b) => a.startMs - b.startMs)
-  const clusters: TimelineClip[][] = []
-  let currentCluster: TimelineClip[] = []
-  let currentClusterEnd = -1
-
-  for (const clip of sorted) {
-    const clipEnd = clip.startMs + clip.durationMs
-    if (currentCluster.length === 0) {
-      currentCluster.push(clip)
-      currentClusterEnd = clipEnd
-    } else if (clip.startMs < currentClusterEnd) {
-      currentCluster.push(clip)
-      currentClusterEnd = Math.max(currentClusterEnd, clipEnd)
-    } else {
-      clusters.push(currentCluster)
-      currentCluster = [clip]
-      currentClusterEnd = clipEnd
-    }
-  }
-  if (currentCluster.length > 0) {
-    clusters.push(currentCluster)
-  }
-
-  for (const cluster of clusters) {
-    if (cluster.length <= 1) {
-      for (const clip of cluster) {
-        result.set(clip.id, { index: 0, count: 1 })
-      }
-      continue
-    }
-
-    const laneEndTimes: number[] = []
-    const clusterAssignments = new Map<string, number>()
-    for (const clip of cluster) {
-      let placedLane = -1
-      for (let i = 0; i < laneEndTimes.length; i++) {
-        if (clip.startMs >= laneEndTimes[i]) {
-          placedLane = i
-          laneEndTimes[i] = clip.startMs + clip.durationMs
-          break
-        }
-      }
-      if (placedLane === -1) {
-        placedLane = laneEndTimes.length
-        laneEndTimes.push(clip.startMs + clip.durationMs)
-      }
-      clusterAssignments.set(clip.id, placedLane)
-    }
-
-    const clusterMaxLanes = Math.min(3, Math.max(1, laneEndTimes.length))
-    for (const clip of cluster) {
-      const lane = clusterAssignments.get(clip.id) ?? 0
-      result.set(clip.id, {
-        index: Math.min(lane, clusterMaxLanes - 1),
-        count: clusterMaxLanes,
-      })
-    }
-  }
-
-  return result
-}
+// Re-exported from the lanes module so existing tests/imports keep working;
+// overlap-lane rows consume it via TimelineLaneRow.
+export { computeClipSublanes } from "./lanes/timeline-clip-runs"
 
 export function TimelineLanes({
   timeline,
@@ -296,6 +230,8 @@ export function TimelineLanes({
   onToggleTrackLocked,
   onToggleTrackCollapsed,
   onCycleTrackHeight,
+  onSetTrackHeight,
+  sourceDurationMs,
   onRenameTrack,
   onMoveTrack,
   onUpdateClipAudio,
@@ -325,8 +261,14 @@ export function TimelineLanes({
     topPx: number
     bottomPx: number
   } | null>(null)
-  const [razorHoverMs, setRazorHoverMs] = useState<number | null>(null)
   const [snapGuide, setSnapGuide] = useState<SnapTarget | null>(null)
+  // Lanes-level gesture HUD — clips report their live move/trim geometry here
+  // instead of rendering (and clipping) a per-clip pill.
+  const [gestureInfo, setGestureInfo] = useState<TimelineGestureInfo | null>(null)
+  const onGestureHud = useCallback((info: TimelineGestureInfo | null) => setGestureInfo(info), [])
+  const edgeAutoScroll = useEdgeAutoScroll(scrollRef)
+  const hoverLineRef = useRef<TimelineHoverLineHandle>(null)
+  const razorLineRef = useRef<TimelineHoverLineHandle>(null)
 
   const marqueePointerRef = useRef<{
     pointerId: number
@@ -334,6 +276,7 @@ export function TimelineLanes({
     startContentY: number
     moved: boolean
   } | null>(null)
+  const lastMarqueePointerRef = useRef<{ clientX: number; clientY: number } | null>(null)
 
   const selectedClipIds = new Set(view.selection?.kind === "clip" ? view.selection.clipIds : [])
   const selectedMarkerId = view.selection?.kind === "marker" ? view.selection.markerId : null
@@ -675,7 +618,7 @@ export function TimelineLanes({
       })
       if (snap.snapped) {
         targetSeekMs = snap.timeMs
-        setSnapGuide(snap.target)
+        onSnapGuideCallback(snap.target)
       }
     }
     onSeek(targetSeekMs)
@@ -699,23 +642,13 @@ export function TimelineLanes({
     onAddZoomAtTime?.(startMs)
   }
 
-  function handlePointerMove(e: React.PointerEvent<HTMLDivElement>) {
-    if (tool === "split") {
-      const rawMs = timelineTimeFromClientX(e.clientX)
-      const snap = snapTime(rawMs, snapTargets, {
-        enabled: view.snapEnabled && !e.altKey,
-        thresholdMs: view.snapThresholdMs,
-      })
-      const currentMs = snap.snapped ? snap.timeMs : Math.round(rawMs)
-      setRazorHoverMs(currentMs)
-      setSnapGuide(snap.snapped ? snap.target : null)
-    }
-
+  // Marquee geometry from a pointer position — also driven by the edge
+  // auto-scroll loop while a marquee drag hugs the viewport edge.
+  function updateMarqueeFromPointer(clientX: number, clientY: number) {
     const gesture = marqueePointerRef.current
-    if (!gesture || gesture.pointerId !== e.pointerId) return
-
-    const currentMs = timelineTimeFromClientX(e.clientX)
-    const currentContentY = timelineContentYFromClientY(e.clientY)
+    if (!gesture) return
+    const currentMs = timelineTimeFromClientX(clientX)
+    const currentContentY = timelineContentYFromClientY(clientY)
     if (
       Math.abs(currentMs - gesture.startMs) < 40 &&
       Math.abs(currentContentY - gesture.startContentY) < 8 &&
@@ -732,7 +665,38 @@ export function TimelineLanes({
       topPx,
       bottomPx,
     })
-    e.preventDefault()
+  }
+
+  function handlePointerMove(e: React.PointerEvent<HTMLDivElement>) {
+    if (tool === "split") {
+      const rawMs = timelineTimeFromClientX(e.clientX)
+      const snap = snapTime(rawMs, snapTargets, {
+        enabled: view.snapEnabled && !e.altKey,
+        thresholdMs: view.snapThresholdMs,
+      })
+      const currentMs = snap.snapped ? snap.timeMs : Math.round(rawMs)
+      razorLineRef.current?.show(currentMs)
+      hoverLineRef.current?.hide()
+      onSnapGuideCallback(snap.snapped ? snap.target : null)
+    } else if (e.buttons === 0) {
+      // Scrub line follows a hovering pointer; hidden while any button is
+      // held so it never fights a drag gesture.
+      razorLineRef.current?.hide()
+      hoverLineRef.current?.show(timelineTimeFromClientX(e.clientX))
+    } else {
+      razorLineRef.current?.hide()
+      hoverLineRef.current?.hide()
+    }
+
+    const gesture = marqueePointerRef.current
+    if (!gesture || gesture.pointerId !== e.pointerId) return
+    lastMarqueePointerRef.current = { clientX: e.clientX, clientY: e.clientY }
+    updateMarqueeFromPointer(e.clientX, e.clientY)
+    edgeAutoScroll.track(e.clientX, () => {
+      const last = lastMarqueePointerRef.current
+      if (last) updateMarqueeFromPointer(last.clientX, last.clientY)
+    })
+    if (gesture.moved) e.preventDefault()
   }
 
   function handlePointerUp(e: React.PointerEvent<HTMLDivElement>) {
@@ -789,8 +753,10 @@ export function TimelineLanes({
     }
 
     marqueePointerRef.current = null
+    lastMarqueePointerRef.current = null
+    edgeAutoScroll.stop()
     setMarquee(null)
-    setSnapGuide(null)
+    onSnapGuideCallback(null)
     if (e.currentTarget.hasPointerCapture(e.pointerId)) {
       e.currentTarget.releasePointerCapture(e.pointerId)
     }
@@ -819,7 +785,33 @@ export function TimelineLanes({
     [timeline, cursorClickTimesMs],
   )
 
-  const onSnapGuideCallback = useCallback((target: SnapTarget | null) => setSnapGuide(target), [])
+  // Identity-stable guard: pointermove fires per pixel but the snap target
+  // rarely changes — skip the state write (and the lanes re-render) when it
+  // resolves to the same target.
+  const onSnapGuideCallback = useCallback((target: SnapTarget | null) => {
+    setSnapGuide((prev) =>
+      prev?.id === target?.id && prev?.timeMs === target?.timeMs ? prev : target,
+    )
+  }, [])
+
+  // Seamless-strip run layout per non-overlap lane; overlap lanes keep
+  // sub-lane stacking instead (handled inside the row).
+  const laneLayouts = useMemo(() => {
+    const map = new Map<string, ClipRuns | null>()
+    for (const track of timeline.tracks) {
+      map.set(
+        track.id,
+        trackAllowsOverlap(track) ? null : computeClipRuns(track.clips, pixelsPerMs),
+      )
+    }
+    return map
+  }, [timeline.tracks, pixelsPerMs])
+
+  // When any audio lane is soloed, the others visually dim like a mixer.
+  const anySoloAudio = useMemo(
+    () => timeline.tracks.some((t) => t.kind === "audio" && t.solo),
+    [timeline.tracks],
+  )
 
   const [emptyLanesContextMenuTimeMs, setEmptyLanesContextMenuTimeMs] = useState<number | null>(
     null,
@@ -942,14 +934,14 @@ export function TimelineLanes({
 
       <div className="flex min-h-0 flex-1 select-none overflow-hidden">
         {/* Left Column: Track Headers */}
-        <div className="w-56 shrink-0 overflow-hidden border-r border-border bg-surface shadow-e1 z-20">
+        <div className="w-48 shrink-0 overflow-hidden border-r border-border bg-surface shadow-e1 z-20">
           {/* Top Header Placeholder corresponding to Ruler Height */}
-          <div className="flex h-13 flex-col justify-center border-b border-border/80 bg-surface-dim/95 px-3">
+          <div className="flex h-13 items-center justify-between border-b border-border/80 bg-surface-dim/95 px-3">
             <span className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">
-              Tracks & Layers
+              Tracks
             </span>
-            <span className="text-[9px] text-subtle-foreground font-mono">
-              {timeline.tracks.length} active tracks
+            <span className="rounded-full bg-surface-container-high px-1.5 py-px font-mono text-[9px] text-subtle-foreground">
+              {timeline.tracks.length}
             </span>
           </div>
 
@@ -1005,6 +997,7 @@ export function TimelineLanes({
                     onToggleTrackLocked={onToggleTrackLocked}
                     onToggleTrackCollapsed={onToggleTrackCollapsed}
                     onCycleTrackHeight={onCycleTrackHeight}
+                    onSetTrackHeight={onSetTrackHeight}
                     onRenameTrack={onRenameTrack}
                     onSelectTrackClips={onSelectTrackClips}
                   />
@@ -1028,8 +1021,9 @@ export function TimelineLanes({
           onPointerUp={handlePointerUp}
           onPointerCancel={handlePointerUp}
           onPointerLeave={() => {
-            setRazorHoverMs(null)
-            setSnapGuide(null)
+            razorLineRef.current?.hide()
+            hoverLineRef.current?.hide()
+            onSnapGuideCallback(null)
           }}
           onDragOver={handleAssetDragOver}
           onDrop={handleAssetDrop}
@@ -1124,21 +1118,50 @@ export function TimelineLanes({
                   <TimelineSnapBadge target={snapGuide} pixelsPerMs={pixelsPerMs} />
                 ) : null}
 
-                {/* Razor Tool Hover Indicator */}
-                {tool === "split" && razorHoverMs !== null ? (
-                  <div
-                    className="pointer-events-none absolute inset-y-0 z-30 flex flex-col items-center -translate-x-1/2"
-                    style={{ left: `${razorHoverMs * pixelsPerMs}px` }}
-                  >
-                    <div className="flex items-center gap-1 rounded-md bg-destructive px-1.5 py-0.5 text-foreground shadow-e2">
-                      <Scissors className="size-3" />
-                      <span className="font-mono text-[10px] font-semibold leading-none">
-                        {formatTimelineTime(razorHoverMs)}
-                      </span>
-                    </div>
-                    <div className="h-full w-px bg-destructive shadow-xs" />
-                  </div>
-                ) : null}
+                {/* Hover scrub line + razor indicator — imperative handles keep
+                    pointermove off the lanes render path. */}
+                <TimelineHoverLine
+                  ref={hoverLineRef}
+                  variant="hover"
+                  pixelsPerMs={pixelsPerMs}
+                  chipTop={scrollTop + 2}
+                />
+                <TimelineHoverLine
+                  ref={razorLineRef}
+                  variant="razor"
+                  pixelsPerMs={pixelsPerMs}
+                  chipTop={scrollTop + 2}
+                />
+
+                {/* Gesture ghost + HUD chip for the active move/trim */}
+                {gestureInfo
+                  ? (() => {
+                      const bounds = trackRowBounds.find(
+                        (row) => row.trackId === gestureInfo.trackId,
+                      )
+                      const gestureTrack = timeline.tracks.find((t) => t.id === gestureInfo.trackId)
+                      if (!bounds || !gestureTrack) return null
+                      const gestureClip = gestureTrack.clips.find(
+                        (c) => c.id === gestureInfo.clipId,
+                      )
+                      return (
+                        <TimelineGestureOverlay
+                          info={gestureInfo}
+                          pixelsPerMs={pixelsPerMs}
+                          rowBounds={{
+                            top: bounds.top,
+                            height: bounds.bottom - bounds.top,
+                          }}
+                          laneColorVar={
+                            gestureClip
+                              ? getClipLaneTheme(gestureClip, gestureTrack).colorVar
+                              : getTrackLaneTheme(gestureTrack).colorVar
+                          }
+                          minTop={scrollMargin}
+                        />
+                      )
+                    })()
+                  : null}
 
                 {/* Playhead Needle */}
                 <TimelinePlayhead
@@ -1152,7 +1175,7 @@ export function TimelineLanes({
                   snapTargets={snapTargets}
                   snapEnabled={view.snapEnabled}
                   snapThresholdMs={view.snapThresholdMs}
-                  onSnapGuide={setSnapGuide}
+                  onSnapGuide={onSnapGuideCallback}
                   isSplitTool={tool === "split"}
                 />
 
@@ -1162,166 +1185,102 @@ export function TimelineLanes({
 
                   if (track.kind === "zoom") {
                     return (
-                      <ZoomTrackRow
+                      <div
                         key={track.id}
-                        timeline={timeline}
-                        track={track}
-                        top={virtualTrack.start}
-                        height={virtualTrack.size}
-                        visibleStartMs={visibleStartMs}
-                        visibleEndMs={visibleEndMs}
-                        pixelsPerMs={pixelsPerMs}
-                        selectedZoomId={selectedZoomId}
-                        snapEnabled={view.snapEnabled}
-                        snapThresholdMs={view.snapThresholdMs}
-                        cursorClickTimesMs={cursorClickTimesMs}
-                        getTimelineTime={timelineTimeFromClientX}
-                        tool={tool}
-                        onSelectZoom={onSelectZoom}
-                        onAddZoomAtTime={onAddZoomAtTime}
-                        onZoomSegmentAction={onZoomSegmentAction}
-                        onMoveZoomSegment={onMoveZoomSegment}
-                        onResizeZoomSegment={onResizeZoomSegment}
-                      />
+                        style={laneStyle("--color-track-zoom")}
+                        className="contents"
+                      >
+                        <ZoomTrackRow
+                          timeline={timeline}
+                          track={track}
+                          top={virtualTrack.start}
+                          height={virtualTrack.size}
+                          visibleStartMs={visibleStartMs}
+                          visibleEndMs={visibleEndMs}
+                          pixelsPerMs={pixelsPerMs}
+                          selectedZoomId={selectedZoomId}
+                          snapEnabled={view.snapEnabled}
+                          snapThresholdMs={view.snapThresholdMs}
+                          snapTargets={snapTargets}
+                          getTimelineTime={timelineTimeFromClientX}
+                          tool={tool}
+                          onSelectZoom={onSelectZoom}
+                          onAddZoomAtTime={onAddZoomAtTime}
+                          onZoomSegmentAction={onZoomSegmentAction}
+                          onMoveZoomSegment={onMoveZoomSegment}
+                          onResizeZoomSegment={onResizeZoomSegment}
+                          onSnapGuide={onSnapGuideCallback}
+                          onGestureHud={onGestureHud}
+                          edgeAutoScroll={edgeAutoScroll}
+                        />
+                      </div>
                     )
                   }
 
+                  const isScreenTrack = track.kind === "screen"
                   const visibleClips = track.clips.filter((clip) =>
                     clipIntersectsWindow(clip, visibleStartMs, visibleEndMs),
                   )
-
-                  const isCameraTrack = track.kind === "camera"
-                  const isScreenTrack = track.kind === "screen"
-
-                  let trackThumbnailData: ThumbnailManifest | null = null
-                  let trackSpriteUrl: string | null = null
-
-                  if (isScreenTrack) {
-                    trackThumbnailData = thumbnailData
-                    trackSpriteUrl = spriteUrl
-                  }
-
-                  // Camera clips resolve their sprite by stream index so each
-                  // webcam stream shows its own frames; fall back to the first
-                  // loaded manifest when the clip carries no index.
-                  const cameraThumbnailFor = (clip: (typeof track.clips)[number]) => {
-                    if (!isCameraTrack || !videoThumbnailResources) return null
-                    const resources = [...videoThumbnailResources.byStream.entries()]
-                    const streamIndex = clip.kind === "camera" ? clip.streamIndex : undefined
-                    const byIndex =
-                      streamIndex !== undefined
-                        ? videoThumbnailResources.byStream.get(streamIndex)
-                        : undefined
-                    const resolved =
-                      byIndex?.status === "content"
-                        ? byIndex
-                        : resources
-                            .map(([, resource]) => resource)
-                            .find((resource) => resource.status === "content")
-                    if (!resolved || resolved.status !== "content") return null
-                    return {
-                      manifest: resolved.data,
-                      spriteUrl: toAssetUrl(resolved.data.spritePath, workDir),
-                    }
-                  }
+                  // An invalid move shows the clip at its ORIGINAL position —
+                  // keep it mounted even when auto-scroll pushes it outside
+                  // the visible window, or the gesture would lose its target.
+                  const rowClips =
+                    gestureInfo &&
+                    gestureInfo.trackId === track.id &&
+                    !visibleClips.some((c) => c.id === gestureInfo.clipId)
+                      ? [...visibleClips, ...track.clips.filter((c) => c.id === gestureInfo.clipId)]
+                      : visibleClips
 
                   return (
-                    <div
+                    <TimelineLaneRow
                       key={track.id}
-                      className={cn(
-                        "absolute inset-x-0 flex items-center border-b border-border/70",
-                        tool === "split" && "cursor-crosshair",
-                      )}
-                      style={{ top: virtualTrack.start, height: virtualTrack.size }}
-                    >
-                      {/* Render Gap-Closing Affordances on Screen Track */}
-                      {isScreenTrack
-                        ? screenGaps
-                            .filter(
-                              (gap) => gap.startMs <= visibleEndMs && gap.endMs >= visibleStartMs,
-                            )
-                            .map((gap) => {
-                              const gapLeft = gap.startMs * pixelsPerMs
-                              const gapWidth = Math.max(16, (gap.endMs - gap.startMs) * pixelsPerMs)
-                              const gapSec = ((gap.endMs - gap.startMs) / 1000).toFixed(1)
-                              return (
-                                <div
-                                  key={`gap-${gap.startMs}-${gap.endMs}`}
-                                  className="group/gap absolute inset-y-1.5 z-10 flex items-center justify-center rounded-md border border-dashed border-border/80 bg-surface-dim/30 hover:border-primary/80 hover:bg-primary/10 transition-colors"
-                                  style={{ left: `${gapLeft}px`, width: `${gapWidth}px` }}
-                                >
-                                  {onRippleDeleteRange && gapWidth >= 48 ? (
-                                    <button
-                                      type="button"
-                                      className="flex items-center gap-1 rounded bg-surface/95 border border-border/80 px-1.5 py-0.5 font-mono text-[9px] font-semibold text-muted-foreground hover:text-primary hover:border-primary/80 shadow-xs opacity-0 group-hover/gap:opacity-100 transition-opacity whitespace-nowrap cursor-pointer"
-                                      onClick={(e) => {
-                                        e.stopPropagation()
-                                        onRippleDeleteRange(gap.startMs, gap.endMs)
-                                      }}
-                                      title={`Close ${gapSec}s gap (ripple delete)`}
-                                    >
-                                      <Sparkles className="size-2.5 text-primary" />
-                                      <span>Close {gapSec}s</span>
-                                    </button>
-                                  ) : null}
-                                </div>
-                              )
-                            })
-                        : null}
-
-                      {(() => {
-                        const allowsOverlap = trackAllowsOverlap(track)
-                        const sublaneMap = allowsOverlap ? computeClipSublanes(visibleClips) : null
-                        return visibleClips.map((clip) => {
-                          const sublane = sublaneMap?.get(clip.id)
-                          const clipThumbnails = isCameraTrack ? cameraThumbnailFor(clip) : null
-                          return (
-                            <TimelineClipItem
-                              key={clip.id}
-                              clip={clip}
-                              track={track}
-                              height={virtualTrack.size}
-                              sublaneIndex={sublane?.index}
-                              sublaneCount={sublane?.count}
-                              pixelsPerMs={pixelsPerMs}
-                              selected={selectedClipIds.has(clip.id)}
-                              tool={tool}
-                              frameMs={Math.max(
-                                1,
-                                Math.round(1000 / Math.max(1, timeline.canvas.fps)),
-                              )}
-                              collapsed={view.collapsedTrackIds.includes(track.id)}
-                              thumbnailManifest={
-                                clipThumbnails ? clipThumbnails.manifest : trackThumbnailData
-                              }
-                              spriteUrl={clipThumbnails ? clipThumbnails.spriteUrl : trackSpriteUrl}
-                              visibleStartMs={visibleStartMs}
-                              visibleEndMs={visibleEndMs}
-                              waveformResources={waveformResources}
-                              snapTargets={snapTargets}
-                              snapEnabled={view.snapEnabled}
-                              snapThresholdMs={view.snapThresholdMs}
-                              onSelectClip={onSelectClip}
-                              onMoveClip={onMoveClip}
-                              onTrimClip={onTrimClip}
-                              getTimelineTime={timelineTimeFromClientX}
-                              onSnapGuide={onSnapGuideCallback}
-                              onSpriteError={onSpriteError}
-                              onDuplicateClip={onDuplicateClip}
-                              onSplitClip={onSplitClip}
-                              onDeleteClip={onDeleteClip}
-                              onSeek={onSeek}
-                              onCursorRangeAction={onCursorRangeAction}
-                              onUpdateAudio={onUpdateClipAudio}
-                              canGroup={selectionCanGroup}
-                              canUngroup={selectionHasGroup}
-                              onGroupClips={onGroupClips}
-                              onUngroupClips={onUngroupClips}
-                            />
-                          )
-                        })
-                      })()}
-                    </div>
+                      track={track}
+                      index={virtualTrack.index}
+                      top={virtualTrack.start}
+                      height={virtualTrack.size}
+                      pixelsPerMs={pixelsPerMs}
+                      visibleStartMs={visibleStartMs}
+                      visibleEndMs={visibleEndMs}
+                      scrollLeftPx={scrollLeft}
+                      tool={tool}
+                      collapsed={view.collapsedTrackIds.includes(track.id)}
+                      frameMs={Math.max(1, Math.round(1000 / Math.max(1, timeline.canvas.fps)))}
+                      clips={rowClips}
+                      runLayout={laneLayouts.get(track.id) ?? null}
+                      laneTheme={getTrackLaneTheme(track)}
+                      sourceDurationMs={sourceDurationMs}
+                      screenGaps={screenGaps}
+                      hasSelectedClip={track.clips.some((clip) => selectedClipIds.has(clip.id))}
+                      soloDimmed={anySoloAudio && track.kind === "audio" && !track.solo}
+                      selectedClipIds={selectedClipIds}
+                      canGroup={selectionCanGroup}
+                      canUngroup={selectionHasGroup}
+                      thumbnailManifest={isScreenTrack ? thumbnailData : null}
+                      spriteUrl={isScreenTrack ? spriteUrl : null}
+                      videoThumbnailResources={videoThumbnailResources}
+                      workDir={workDir}
+                      waveformResources={waveformResources}
+                      snapTargets={snapTargets}
+                      snapEnabled={view.snapEnabled}
+                      snapThresholdMs={view.snapThresholdMs}
+                      edgeAutoScroll={edgeAutoScroll}
+                      onGestureHud={onGestureHud}
+                      onSnapGuide={onSnapGuideCallback}
+                      getTimelineTime={timelineTimeFromClientX}
+                      onSeek={onSeek}
+                      onSelectClip={onSelectClip}
+                      onMoveClip={onMoveClip}
+                      onTrimClip={onTrimClip}
+                      onSpriteError={onSpriteError}
+                      onDuplicateClip={onDuplicateClip}
+                      onSplitClip={onSplitClip}
+                      onDeleteClip={onDeleteClip}
+                      onCursorRangeAction={onCursorRangeAction}
+                      onUpdateClipAudio={onUpdateClipAudio}
+                      onRippleDeleteRange={onRippleDeleteRange}
+                      onGroupClips={onGroupClips}
+                      onUngroupClips={onUngroupClips}
+                    />
                   )
                 })}
               </div>

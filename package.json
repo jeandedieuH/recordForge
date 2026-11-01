@@ -1,7 +1,7 @@
 {
   "name": "recordforge",
   "private": true,
-  "version": "2.3.2",
+  "version": "2.3.3",
   "description": "Local-first screen recorder and lightweight editor",
   "license": "GPL-3.0-or-later",
   "author": "Prestige Tech & RecordForge Contributors",
@@ -42,9 +42,9 @@
     "typescript": "^6.0.3",
     "@types/node": "^26.6.4"
   },
-  "packageManager": "bun@1.4.3",
+  "packageManager": "bun@1.4.4",
   "engines": {
-    "bun": ">=1.4.3",
+    "bun": ">=1.4.4",
     "node": ">=22.15.0"
   }
 }

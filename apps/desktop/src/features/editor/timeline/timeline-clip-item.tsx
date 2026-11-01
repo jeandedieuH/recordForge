@@ -1,4 +1,4 @@
-import { memo, useRef, useState } from "react"
+import { memo, useEffect, useRef, useState } from "react"
 import type {
   AudioClip,
   AudioVolumeKeyframe,
@@ -6,26 +6,7 @@ import type {
   TimelineClip,
   TimelineTrack,
 } from "@recordforge/contracts"
-import {
-  AudioLines,
-  Captions,
-  Copy,
-  FileImage,
-  Link2,
-  Link2Off,
-  Lock,
-  Monitor,
-  MousePointer2,
-  Music,
-  Scissors,
-  Shapes,
-  ShieldAlert,
-  Trash2,
-  Type,
-  Video,
-  Volume2,
-  type LucideIcon,
-} from "lucide-react"
+import { Copy, Link2, Link2Off, Lock, Scissors, Trash2 } from "lucide-react"
 import {
   ContextMenu,
   ContextMenuContent,
@@ -44,6 +25,7 @@ import {
   snapClipStart,
   snapTime,
   snapTrimEdge,
+  trackAllowsOverlap,
   type SnapTarget,
 } from "@recordforge/editor-core"
 import type { ThumbnailManifest, WaveformResources } from "../media/derivative-resources"
@@ -53,6 +35,13 @@ import { TimelineWaveform } from "./timeline-waveform"
 import { TimelineAudioEnvelope } from "./timeline-audio-envelope"
 import { formatTimelineTime } from "./timeline-ruler"
 import type { CursorRangeAction } from "./timeline-lanes"
+import { getClipIcon, laneStyle } from "./lanes/lane-theme"
+import type { RunPosition } from "./lanes/timeline-clip-runs"
+import { clampTrimEdge, moveOverlaps, type TrimLimit } from "./lanes/timeline-gesture-math"
+import { TimelineEdgeHandle } from "./lanes/timeline-edge-handle"
+import { AudioFadeHint } from "./lanes/audio-fade-hint"
+import type { EdgeAutoScroll } from "./lanes/use-edge-auto-scroll"
+import type { TimelineGestureInfo } from "./lanes/timeline-gesture-overlay"
 
 interface ClipGesture {
   pointerId: number
@@ -61,7 +50,13 @@ interface ClipGesture {
   initialTimelineMs: number
   initialClipStartMs: number
   initialClipEndMs: number
+  // Snapshot at gesture start — clampTrimEdge must run against pre-gesture
+  // geometry because drafts rewrite clip.startMs/durationMs.
+  clipSnapshot: TimelineClip
+  prevEndMs: number | null
+  nextStartMs: number | null
   moved: boolean
+  invalid: "overlap" | null
   // Snap targets captured at gesture start — includes the live playhead,
   // which is intentionally absent from the memoized prop list so playback
   // ticks do not rebuild it.
@@ -124,108 +119,20 @@ export interface TimelineClipItemProps {
   canUngroup?: boolean
   onGroupClips?: () => void
   onUngroupClips?: () => void
-}
-
-function getClipIcon(clip: TimelineClip, track: TimelineTrack): LucideIcon {
-  if (clip.kind === "screen") return Monitor
-  if (clip.kind === "camera") return Video
-  if (clip.kind === "cursor-effect") return MousePointer2
-  if (clip.kind === "caption") return Captions
-  if (clip.kind === "mask") return ShieldAlert
-  if (clip.kind === "annotation") return Shapes
-  if (clip.kind === "text") return Type
-  if (clip.kind === "image") return FileImage
-  if (clip.kind === "audio" && clip.role === "music") return Music
-  if (track.kind === "audio") return Volume2
-  return AudioLines
-}
-
-function getClipTheme(
-  clip: TimelineClip,
-  track: TimelineTrack,
-): {
-  cardClass: string
-  accentBorder: string
-  handleGlow: string
-} {
-  if (clip.kind === "annotation" || track.kind === "annotations") {
-    return {
-      cardClass:
-        "border-fuchsia-500/70 bg-gradient-to-b from-fuchsia-500/25 to-fuchsia-500/10 hover:from-fuchsia-500/35 hover:to-fuchsia-500/15 shadow-fuchsia-500/10",
-      accentBorder: "border-fuchsia-500",
-      handleGlow: "bg-fuchsia-500 text-black",
-    }
-  }
-  if (clip.kind === "text" || track.kind === "titles") {
-    return {
-      cardClass:
-        "border-amber-500/70 bg-gradient-to-b from-amber-500/25 to-amber-500/10 hover:from-amber-500/35 hover:to-amber-500/15 shadow-amber-500/10",
-      accentBorder: "border-amber-500",
-      handleGlow: "bg-amber-500 text-black",
-    }
-  }
-  if (clip.kind === "image" || track.kind === "graphics") {
-    return {
-      cardClass:
-        "border-cyan-500/70 bg-gradient-to-b from-cyan-500/25 to-cyan-500/10 hover:from-cyan-500/35 hover:to-cyan-500/15 shadow-cyan-500/10",
-      accentBorder: "border-cyan-500",
-      handleGlow: "bg-cyan-500 text-black",
-    }
-  }
-  if (track.kind === "screen") {
-    return {
-      cardClass:
-        "border-track-screen/70 bg-gradient-to-b from-track-screen/25 to-track-screen/10 hover:from-track-screen/35 hover:to-track-screen/15 shadow-track-screen/10",
-      accentBorder: "border-track-screen",
-      handleGlow: "bg-track-screen text-black",
-    }
-  }
-  if (track.kind === "camera") {
-    return {
-      cardClass:
-        "border-track-webcam/70 bg-gradient-to-b from-track-webcam/25 to-track-webcam/10 hover:from-track-webcam/35 hover:to-track-webcam/15 shadow-track-webcam/10",
-      accentBorder: "border-track-webcam",
-      handleGlow: "bg-track-webcam text-black",
-    }
-  }
-  if (track.kind === "cursor") {
-    return {
-      cardClass:
-        "border-primary/70 bg-gradient-to-b from-primary/25 to-primary/10 hover:from-primary/35 hover:to-primary/15 shadow-primary/10",
-      accentBorder: "border-primary",
-      handleGlow: "bg-primary text-white",
-    }
-  }
-  if (track.kind === "captions") {
-    return {
-      cardClass:
-        "border-track-captions/70 bg-gradient-to-b from-track-captions/25 to-track-captions/10 hover:from-track-captions/35 hover:to-track-captions/15 shadow-track-captions/10",
-      accentBorder: "border-track-captions",
-      handleGlow: "bg-track-captions text-black",
-    }
-  }
-  if (track.kind === "effects") {
-    return {
-      cardClass:
-        "border-warning/70 bg-gradient-to-b from-warning/25 to-warning/10 hover:from-warning/35 hover:to-warning/15 shadow-warning/10",
-      accentBorder: "border-warning",
-      handleGlow: "bg-warning text-black",
-    }
-  }
-  if (track.name.toLowerCase().includes("system")) {
-    return {
-      cardClass:
-        "border-track-system/70 bg-gradient-to-b from-track-system/25 to-track-system/10 hover:from-track-system/35 hover:to-track-system/15 shadow-track-system/10",
-      accentBorder: "border-track-system",
-      handleGlow: "bg-track-system text-black",
-    }
-  }
-  return {
-    cardClass:
-      "border-track-mic/70 bg-gradient-to-b from-track-mic/25 to-track-mic/10 hover:from-track-mic/35 hover:to-track-mic/15 shadow-track-mic/10",
-    accentBorder: "border-track-mic",
-    handleGlow: "bg-track-mic text-black",
-  }
+  // Seamless-strip layout: which slot this clip occupies inside its run, and
+  // the immediate neighbors' edges used to clamp trims.
+  runPosition: RunPosition
+  prevEndMs: number | null
+  nextStartMs: number | null
+  // False on run-labelled lanes (one sticky label per run).
+  showLabel: boolean
+  laneColorVar: string
+  sourceDurationMs?: number
+  // Group moves bypass the single-clip overlap check — the command layer
+  // resolves collisions for multi-clip transactions.
+  isMultiMove: boolean
+  edgeAutoScroll: EdgeAutoScroll
+  onGestureHud: (info: TimelineGestureInfo | null) => void
 }
 
 function getClipLabel(clip: TimelineClip, track: TimelineTrack): string {
@@ -244,6 +151,13 @@ function getClipLabel(clip: TimelineClip, track: TimelineTrack): string {
 
 function formatDurationSeconds(ms: number): string {
   return `${(ms / 1000).toFixed(1)}s`
+}
+
+const RUN_CORNERS: Record<RunPosition, string> = {
+  single: "rounded-sm",
+  first: "rounded-l-sm",
+  middle: "",
+  last: "rounded-r-sm",
 }
 
 export const TimelineClipItem = memo(function TimelineClipItem({
@@ -281,10 +195,23 @@ export const TimelineClipItem = memo(function TimelineClipItem({
   canUngroup = false,
   onGroupClips,
   onUngroupClips,
+  runPosition,
+  prevEndMs,
+  nextStartMs,
+  showLabel,
+  laneColorVar,
+  sourceDurationMs,
+  isMultiMove,
+  edgeAutoScroll,
+  onGestureHud,
 }: TimelineClipItemProps) {
   const gestureRef = useRef<ClipGesture | null>(null)
+  const lastPointerRef = useRef<{ clientX: number; altKey: boolean } | null>(null)
   const suppressClickRef = useRef(false)
-  const [gestureDelta, setGestureDelta] = useState<{ text: string; mode: string } | null>(null)
+  const [activeGesture, setActiveGesture] = useState<ClipGesture["mode"] | null>(null)
+  const [activeLimit, setActiveLimit] = useState<TrimLimit | null>(null)
+  const [isHovered, setIsHovered] = useState(false)
+  const [envelopeActive, setEnvelopeActive] = useState(false)
   const [contextMenuTimeMs, setContextMenuTimeMs] = useState<number | null>(null)
 
   // Recording streams resolve by stream index; imported audio assets carry no
@@ -297,23 +224,30 @@ export const TimelineClipItem = memo(function TimelineClipItem({
         : waveformResources.byAsset.get(clip.assetId)
       : undefined
   const waveformData = waveformResource?.status === "content" ? waveformResource.data : null
-  const waveformColorVar = track.name.toLowerCase().includes("system")
-    ? "--color-track-system"
-    : "--color-track-mic"
   const clipTargets = snapTargets.filter((target) => !target.id.startsWith(`${clip.id}:`))
-  const availableHeight = collapsed ? 24 : Math.max(34, height - 12)
-  const baseClipHeight = collapsed ? 24 : Math.max(34, Math.min(height - 14, 52))
+  // Sublanes split the lane's inner height (4px padding top + bottom) with
+  // 2px gaps, never smaller than 16px each.
   const clipHeight =
     sublaneCount > 1
-      ? Math.max(20, Math.floor((availableHeight - (sublaneCount - 1) * 3) / sublaneCount))
-      : baseClipHeight
-  const topOffset = sublaneCount > 1 ? sublaneIndex * (clipHeight + 3) : 0
+      ? Math.max(16, Math.floor((height - 8 - (sublaneCount - 1) * 2) / sublaneCount))
+      : Math.max(8, height - 8)
+  const clipTop = 4 + (sublaneCount > 1 ? sublaneIndex * (clipHeight + 2) : 0)
+  const width = Math.max(clip.durationMs * pixelsPerMs, 2)
   const cursorRange = clip.kind === "cursor-effect" ? clip : null
   const isLocked = track.locked || (cursorRange ? cursorRange.locked : false)
   const isGrouped = "groupId" in clip && Boolean(clip.groupId)
-
+  const isDisabledRange = cursorRange ? cursorRange.enabled === false : false
+  const label = getClipLabel(clip, track)
   const ClipIcon = getClipIcon(clip, track)
-  const theme = getClipTheme(clip, track)
+
+  const hitWidth = Math.round(Math.min(10, Math.max(4, width * 0.25)))
+  const showHandles = !isLocked && tool !== "split" && (width >= 8 || selected)
+  const showEnvelope =
+    clip.kind === "audio" &&
+    Boolean(onUpdateAudio) &&
+    !collapsed &&
+    width >= 24 &&
+    (selected || isHovered || envelopeActive)
 
   function beginGesture(event: React.PointerEvent<HTMLElement>, mode: ClipGesture["mode"]) {
     if (event.button !== 0 || isLocked) return
@@ -332,33 +266,55 @@ export const TimelineClipItem = memo(function TimelineClipItem({
       initialTimelineMs: getTimelineTime(event.clientX),
       initialClipStartMs: clip.startMs,
       initialClipEndMs: clip.startMs + clip.durationMs,
+      clipSnapshot: clip,
+      prevEndMs,
+      nextStartMs,
       moved: false,
+      invalid: null,
       snapTargets: [...clipTargets, playheadSnapTarget(getPlayheadSnapshot())],
     }
+    // activeGesture stays unset until the pointer actually drags — a plain
+    // click must not flash the drag ring/cursor.
   }
 
-  function handlePointerMove(event: React.PointerEvent<HTMLDivElement>) {
+  // phase "draft" renders + reports the HUD; "commit" re-runs the identical
+  // snap/clamp path so the committed value equals the last draft shown.
+  function applyGesture(clientX: number, altKey: boolean, phase: "draft" | "commit") {
     const gesture = gestureRef.current
-    if (!gesture || gesture.pointerId !== event.pointerId) return
-    const currentMs = getTimelineTime(event.clientX)
+    if (!gesture) return
+    const currentMs = getTimelineTime(clientX)
     const deltaMs = currentMs - gesture.initialTimelineMs
-    if (Math.abs(event.clientX - gesture.initialClientX) < 8 && !gesture.moved) return
-    gesture.moved = true
-    suppressClickRef.current = true
-    event.preventDefault()
-
-    const snap = { enabled: snapEnabled && !event.altKey, thresholdMs: snapThresholdMs }
+    const snap = { enabled: snapEnabled && !altKey, thresholdMs: snapThresholdMs }
+    const duration = gesture.initialClipEndMs - gesture.initialClipStartMs
 
     if (gesture.mode === "move") {
-      const duration = gesture.initialClipEndMs - gesture.initialClipStartMs
       const rawStartMs = Math.max(0, Math.round(gesture.initialClipStartMs + deltaMs))
       const snapped = snapClipStart(rawStartMs, duration, gesture.snapTargets, snap)
       onSnapGuide(snapped.snapped ? snapped.target : null)
-      setGestureDelta({
-        mode: "Move",
-        text: `${formatTimelineTime(snapped.timeMs)} (${deltaMs >= 0 ? "+" : ""}${(deltaMs / 1000).toFixed(2)}s)`,
+      const invalid =
+        !trackAllowsOverlap(track) &&
+        !isMultiMove &&
+        moveOverlaps(track, clip.id, snapped.timeMs, duration)
+          ? "overlap"
+          : null
+      gesture.invalid = invalid
+      if (phase === "draft") {
+        onGestureHud({
+          clipId: clip.id,
+          trackId: track.id,
+          mode: "move",
+          originalStartMs: gesture.initialClipStartMs,
+          originalEndMs: gesture.initialClipEndMs,
+          startMs: snapped.timeMs,
+          endMs: snapped.timeMs + duration,
+          limit: null,
+          invalid,
+        })
+      }
+      // An invalid drop cancels silently — the HUD already explains why.
+      onMoveClip(clip, track, snapped.timeMs, {
+        phase: phase === "commit" && invalid ? "cancel" : phase,
       })
-      onMoveClip(clip, track, snapped.timeMs, { phase: "draft" })
       return
     }
 
@@ -369,11 +325,49 @@ export const TimelineClipItem = memo(function TimelineClipItem({
         : Math.max(0, Math.round(gesture.initialClipEndMs + deltaMs))
     const snapped = snapTrimEdge(edge, rawEdgeTimeMs, gesture.snapTargets, snap)
     onSnapGuide(snapped.snapped ? snapped.target : null)
-    setGestureDelta({
-      mode: edge === "start" ? "Trim In" : "Trim Out",
-      text: `${formatTimelineTime(snapped.timeMs)} (${deltaMs >= 0 ? "+" : ""}${(deltaMs / 1000).toFixed(2)}s)`,
+    // Snap first, then clamp — a snap target past a limit must not win.
+    const clamped = clampTrimEdge({
+      edge,
+      edgeMs: snapped.timeMs,
+      clip: gesture.clipSnapshot,
+      frameMs,
+      prevEndMs: gesture.prevEndMs,
+      nextStartMs: gesture.nextStartMs,
+      sourceDurationMs,
     })
-    onTrimClip(clip, track, edge, snapped.timeMs, { phase: "draft" })
+    if (phase === "draft") {
+      setActiveLimit(clamped.limit)
+      onGestureHud({
+        clipId: clip.id,
+        trackId: track.id,
+        mode: gesture.mode,
+        originalStartMs: gesture.initialClipStartMs,
+        originalEndMs: gesture.initialClipEndMs,
+        startMs: edge === "start" ? clamped.edgeMs : gesture.initialClipStartMs,
+        endMs: edge === "end" ? clamped.edgeMs : gesture.initialClipEndMs,
+        limit: clamped.limit,
+        invalid: null,
+      })
+    }
+    onTrimClip(clip, track, edge, clamped.edgeMs, { phase })
+  }
+
+  function handlePointerMove(event: React.PointerEvent<HTMLDivElement>) {
+    const gesture = gestureRef.current
+    if (!gesture || gesture.pointerId !== event.pointerId) return
+    if (Math.abs(event.clientX - gesture.initialClientX) < 3 && !gesture.moved) return
+    gesture.moved = true
+    setActiveGesture(gesture.mode)
+    suppressClickRef.current = true
+    event.preventDefault()
+    lastPointerRef.current = { clientX: event.clientX, altKey: event.altKey }
+    applyGesture(event.clientX, event.altKey, "draft")
+    // While the pointer hugs the viewport edge the scroll drives the gesture —
+    // re-applying at the same clientX follows the time that scrolled under it.
+    edgeAutoScroll.track(event.clientX, () => {
+      const last = lastPointerRef.current
+      if (last) applyGesture(last.clientX, last.altKey, "draft")
+    })
   }
 
   function finishGesture(event: React.PointerEvent<HTMLDivElement>) {
@@ -382,13 +376,17 @@ export const TimelineClipItem = memo(function TimelineClipItem({
     const wasCancelled = event.type === "pointercancel"
     const didMove = gesture.moved
     gestureRef.current = null
-    setGestureDelta(null)
+    lastPointerRef.current = null
+    edgeAutoScroll.stop()
+    setActiveGesture(null)
+    setActiveLimit(null)
+    onGestureHud(null)
+    onSnapGuide(null)
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId)
     }
 
     if (wasCancelled || !didMove) {
-      onSnapGuide(null)
       if (gesture.mode === "move") {
         onMoveClip(clip, track, gesture.initialClipStartMs, { phase: "cancel" })
       } else {
@@ -399,28 +397,22 @@ export const TimelineClipItem = memo(function TimelineClipItem({
       return
     }
 
-    const currentMs = getTimelineTime(event.clientX)
-    const deltaMs = currentMs - gesture.initialTimelineMs
-    const snap = { enabled: snapEnabled && !event.altKey, thresholdMs: snapThresholdMs }
-
-    if (gesture.mode === "move") {
-      const duration = gesture.initialClipEndMs - gesture.initialClipStartMs
-      const rawStartMs = Math.max(0, Math.round(gesture.initialClipStartMs + deltaMs))
-      const snapped = snapClipStart(rawStartMs, duration, gesture.snapTargets, snap)
-      onSnapGuide(null)
-      onMoveClip(clip, track, snapped.timeMs, { phase: "commit" })
-      return
-    }
-
-    const edge = gesture.mode === "trim-start" ? "start" : "end"
-    const rawEdgeTimeMs =
-      edge === "start"
-        ? Math.max(0, Math.round(gesture.initialClipStartMs + deltaMs))
-        : Math.max(0, Math.round(gesture.initialClipEndMs + deltaMs))
-    const snapped = snapTrimEdge(edge, rawEdgeTimeMs, gesture.snapTargets, snap)
-    onSnapGuide(null)
-    onTrimClip(clip, track, edge, snapped.timeMs, { phase: "commit" })
+    applyGesture(event.clientX, event.altKey, "commit")
   }
+
+  // Unmount mid-gesture (e.g. the clip scrolled out of the virtual window on a
+  // lane the gesture overlay doesn't pin): stop the scroll loop and clear
+  // lanes-level feedback so nothing lingers.
+  const cleanupRef = useRef({ edgeAutoScroll, onGestureHud, onSnapGuide })
+  cleanupRef.current = { edgeAutoScroll, onGestureHud, onSnapGuide }
+  useEffect(
+    () => () => {
+      cleanupRef.current.edgeAutoScroll.stop()
+      cleanupRef.current.onGestureHud(null)
+      cleanupRef.current.onSnapGuide(null)
+    },
+    [],
+  )
 
   return (
     <ContextMenu
@@ -439,24 +431,37 @@ export const TimelineClipItem = memo(function TimelineClipItem({
           role="button"
           tabIndex={0}
           data-timeline-clip
-          aria-label={`${getClipLabel(clip, track)}${isGrouped ? " (grouped)" : ""}`}
+          aria-label={`${label}, starts ${formatTimelineTime(clip.startMs)}, ${formatDurationSeconds(clip.durationMs)}${isGrouped ? ", grouped" : ""}`}
+          aria-description="Alt+Arrow to trim, Ctrl+Arrow to nudge"
           aria-pressed={selected}
           className={cn(
-            "group/clip absolute flex min-w-8 items-center overflow-hidden rounded-lg border text-left shadow-xs transition-all duration-fast select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
-            tool === "split" ? "cursor-crosshair" : "cursor-grab active:cursor-grabbing",
-            theme.cardClass,
+            "group/clip absolute flex items-center select-none overflow-hidden bg-lane/20 outline-none transition-[background-color,box-shadow,opacity] duration-fast ease-forge",
+            RUN_CORNERS[runPosition],
             selected
-              ? "ring-2 ring-primary ring-offset-1 ring-offset-surface-dim shadow-e2 z-20"
-              : "z-10",
-            track.muted && "opacity-40",
+              ? "z-20 bg-lane/35 ring-2 ring-inset ring-foreground"
+              : "z-10 ring-1 ring-inset ring-lane/40 hover:bg-lane/28",
+            activeGesture && "z-30 ring-2 ring-foreground shadow-e2",
+            activeGesture === "move"
+              ? "cursor-grabbing"
+              : activeGesture
+                ? "cursor-ew-resize"
+                : tool === "split"
+                  ? "cursor-crosshair"
+                  : "cursor-grab",
+            "focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-foreground",
+            track.muted && "opacity-40 grayscale",
             isLocked && "cursor-not-allowed opacity-60",
+            isDisabledRange && "opacity-50",
           )}
           style={{
+            ...laneStyle(laneColorVar),
             left: `${clip.startMs * pixelsPerMs}px`,
-            width: `${Math.max(clip.durationMs * pixelsPerMs, 32)}px`,
+            width: `${width}px`,
             height: `${clipHeight}px`,
-            top: `${topOffset}px`,
+            top: `${clipTop}px`,
           }}
+          onPointerEnter={() => setIsHovered(true)}
+          onPointerLeave={() => setIsHovered(false)}
           onPointerDown={(event) => {
             if (tool === "split") {
               if (event.button !== 0 || isLocked) return
@@ -545,7 +550,17 @@ export const TimelineClipItem = memo(function TimelineClipItem({
                 edge === "start"
                   ? clip.startMs + direction * frameMs
                   : clip.startMs + clip.durationMs + direction * frameMs
-              onTrimClip(clip, track, edge, edgeTimeMs, { phase: "commit" })
+              // Keyboard trims obey the same source/neighbor limits as drags.
+              const clamped = clampTrimEdge({
+                edge,
+                edgeMs: edgeTimeMs,
+                clip,
+                frameMs,
+                prevEndMs,
+                nextStartMs,
+                sourceDurationMs,
+              })
+              onTrimClip(clip, track, edge, clamped.edgeMs, { phase: "commit" })
               return
             }
             if (event.ctrlKey || event.metaKey) {
@@ -582,90 +597,102 @@ export const TimelineClipItem = memo(function TimelineClipItem({
               visibleStartMs={visibleStartMs}
               visibleEndMs={visibleEndMs}
               height={clipHeight}
-              colorVar={waveformColorVar}
+              colorVar={laneColorVar}
+              gain={clip.kind === "audio" ? clip.volume : 1}
             />
           ) : null}
 
-          {/* Top Accent Strip */}
-          <div className={cn("absolute inset-x-0 top-0 h-0.5 opacity-80", theme.handleGlow)} />
+          {/* Top Accent Bar */}
+          <div className="pointer-events-none absolute inset-x-0 top-0 h-0.5 bg-lane/80" />
 
-          {/* Start Trim Handle (Tactile Bracket) */}
-          {!isLocked && tool !== "split" ? (
-            <div
-              className="group/handle-start absolute left-0 inset-y-0 z-30 flex w-3 cursor-col-resize items-center justify-start opacity-0 transition-all duration-fast group-hover/clip:opacity-100 hover:opacity-100"
+          {/* Cut seam between clips inside a seamless run */}
+          {(runPosition === "middle" || runPosition === "last") && width >= 6 ? (
+            <div className="pointer-events-none absolute inset-y-0 left-0 w-px bg-background/70" />
+          ) : null}
+
+          {/* Disabled cursor range: dashed overlay reads "off" at a glance */}
+          {isDisabledRange ? (
+            <div className="pointer-events-none absolute inset-0 rounded-[inherit] border border-dashed border-foreground/50" />
+          ) : null}
+
+          {/* Start Trim Handle */}
+          {showHandles ? (
+            <TimelineEdgeHandle
+              edge="start"
+              hitWidth={hitWidth}
+              visible={isHovered || selected || activeGesture === "trim-start"}
+              active={activeGesture === "trim-start"}
+              limited={activeGesture === "trim-start" && activeLimit !== null}
               onPointerDown={(e) => beginGesture(e, "trim-start")}
-              onClick={(e) => e.stopPropagation()}
-              title="Drag to trim start (In-point)"
-            >
-              <div className="flex h-full w-2 items-center justify-center rounded-l-md border-y border-l border-primary/90 bg-primary/40 backdrop-blur-xs transition-colors group-hover/handle-start:bg-primary/80 shadow-xs">
-                <div className="flex flex-col gap-0.5">
-                  <div className="h-0.5 w-1 rounded-full bg-white/90" />
-                  <div className="h-0.5 w-1 rounded-full bg-white/90" />
-                  <div className="h-0.5 w-1 rounded-full bg-white/90" />
-                </div>
-              </div>
-            </div>
-          ) : null}
-
-          {/* Interactive Audio Volume Envelope Curve Overlay */}
-          {clip.kind === "audio" && onUpdateAudio && !collapsed ? (
-            <TimelineAudioEnvelope
-              clip={clip}
-              pixelsPerMs={pixelsPerMs}
-              height={clipHeight}
-              isLocked={isLocked}
-              className="z-20"
-              onUpdateAudio={(update) => onUpdateAudio(clip, update)}
             />
           ) : null}
 
-          {/* Clip Header Details */}
-          <div className="relative z-10 flex min-w-0 flex-1 items-center gap-1.5 px-2 pointer-events-none select-none">
-            <ClipIcon className="size-3 shrink-0 opacity-80" aria-hidden />
-            <span className="truncate font-medium text-[11px] text-foreground drop-shadow-xs">
-              {getClipLabel(clip, track)}
-            </span>
-            <span className="shrink-0 font-mono text-[9px] font-semibold text-foreground/75 drop-shadow-xs">
-              {formatDurationSeconds(clip.durationMs)}
-            </span>
-            {clip.speed !== 1 ? (
-              <span className="shrink-0 rounded bg-black/40 px-1 font-mono text-[9px] font-bold text-primary">
-                {clip.speed}×
-              </span>
-            ) : null}
-            {isLocked ? (
-              <Lock className="size-2.5 shrink-0 text-warning opacity-80" aria-hidden />
-            ) : null}
-            {isGrouped ? (
-              <Link2 className="size-2.5 shrink-0 text-primary opacity-90" aria-hidden />
-            ) : null}
-          </div>
+          {/* Audio volume envelope — interactive only near the cursor; the
+              passive fade hint keeps fades legible otherwise. */}
+          {clip.kind === "audio" ? (
+            showEnvelope && onUpdateAudio ? (
+              <TimelineAudioEnvelope
+                clip={clip}
+                pixelsPerMs={pixelsPerMs}
+                height={clipHeight}
+                isLocked={isLocked}
+                className="z-20"
+                onUpdateAudio={(update) => onUpdateAudio(clip, update)}
+                onInteractingChange={setEnvelopeActive}
+              />
+            ) : (
+              <AudioFadeHint clip={clip} pixelsPerMs={pixelsPerMs} height={clipHeight} />
+            )
+          ) : null}
 
-          {/* End Trim Handle (Tactile Bracket) */}
-          {!isLocked && tool !== "split" ? (
-            <div
-              className="group/handle-end absolute right-0 inset-y-0 z-30 flex w-3 cursor-col-resize items-center justify-end opacity-0 transition-all duration-fast group-hover/clip:opacity-100 hover:opacity-100"
-              onPointerDown={(e) => beginGesture(e, "trim-end")}
-              onClick={(e) => e.stopPropagation()}
-              title="Drag to trim end (Out-point)"
-            >
-              <div className="flex h-full w-2 items-center justify-center rounded-r-md border-y border-r border-primary/90 bg-primary/40 backdrop-blur-xs transition-colors group-hover/handle-end:bg-primary/80 shadow-xs">
-                <div className="flex flex-col gap-0.5">
-                  <div className="h-0.5 w-1 rounded-full bg-white/90" />
-                  <div className="h-0.5 w-1 rounded-full bg-white/90" />
-                  <div className="h-0.5 w-1 rounded-full bg-white/90" />
-                </div>
-              </div>
+          {/* Per-clip label (clip-labelled lanes), level of detail by width */}
+          {showLabel && width >= 20 ? (
+            <div className="relative z-10 flex min-w-0 flex-1 items-center gap-1.5 px-2 pointer-events-none select-none">
+              <ClipIcon className="size-3 shrink-0 text-foreground/80" aria-hidden />
+              {width >= 40 ? (
+                <>
+                  <span className="truncate font-medium text-[11px] text-foreground drop-shadow-xs">
+                    {label}
+                  </span>
+                  {width >= 96 ? (
+                    <span className="shrink-0 font-mono text-[9px] font-semibold text-foreground/75 drop-shadow-xs">
+                      {formatDurationSeconds(clip.durationMs)}
+                    </span>
+                  ) : null}
+                  {clip.speed !== 1 && width >= 96 ? (
+                    <span className="shrink-0 rounded bg-background/60 px-1 font-mono text-[9px] font-bold text-lane">
+                      {clip.speed}×
+                    </span>
+                  ) : null}
+                  {isLocked ? (
+                    <Lock className="size-2.5 shrink-0 text-warning opacity-80" aria-hidden />
+                  ) : null}
+                  {isGrouped ? (
+                    <Link2 className="size-2.5 shrink-0 text-lane opacity-90" aria-hidden />
+                  ) : null}
+                </>
+              ) : null}
             </div>
           ) : null}
 
-          {/* Live Drag/Trim Floating HUD Pill */}
-          {gestureDelta ? (
-            <div className="absolute -top-7.5 left-1/2 -translate-x-1/2 z-50 flex items-center gap-1.5 rounded-full border border-primary/90 bg-surface/95 px-2 py-0.5 font-mono text-[10px] font-semibold text-foreground shadow-e3 backdrop-blur-md whitespace-nowrap animate-in fade-in zoom-in-95">
-              <span className="text-primary font-bold">{gestureDelta.mode}</span>
-              <span className="text-subtle-foreground">·</span>
-              <span className="tabular-nums">{gestureDelta.text}</span>
+          {/* Run-labelled lanes keep the strip clean; a selected clip still
+              surfaces its duration so trim feedback isn't lost. */}
+          {!showLabel && selected && width >= 56 ? (
+            <div className="pointer-events-none absolute right-1 top-1 z-10 rounded-sm bg-background/60 px-1 font-mono text-[9px] text-foreground backdrop-blur-sm">
+              {formatDurationSeconds(clip.durationMs)}
             </div>
+          ) : null}
+
+          {/* End Trim Handle */}
+          {showHandles ? (
+            <TimelineEdgeHandle
+              edge="end"
+              hitWidth={hitWidth}
+              visible={isHovered || selected || activeGesture === "trim-end"}
+              active={activeGesture === "trim-end"}
+              limited={activeGesture === "trim-end" && activeLimit !== null}
+              onPointerDown={(e) => beginGesture(e, "trim-end")}
+            />
           ) : null}
         </div>
       </ContextMenuTrigger>

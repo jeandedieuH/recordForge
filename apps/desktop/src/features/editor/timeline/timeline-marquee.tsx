@@ -22,7 +22,7 @@ export const TimelineMarquee = memo(function TimelineMarquee({
 
   return (
     <div
-      className="pointer-events-none absolute z-20 rounded-md border border-primary/80 bg-primary/15 shadow-e2"
+      className="pointer-events-none absolute z-20 rounded-sm border border-foreground/45 bg-foreground/5 shadow-e2"
       style={{
         left: `${left}px`,
         width: `${width}px`,
@@ -34,7 +34,7 @@ export const TimelineMarquee = memo(function TimelineMarquee({
     >
       {/* Floating selection bounds tag */}
       {durationMs > 100 ? (
-        <div className="absolute -top-6 left-1/2 -translate-x-1/2 rounded bg-primary px-1.5 py-0.5 font-mono text-[9px] font-bold text-white shadow-xs whitespace-nowrap">
+        <div className="absolute -top-6 left-1/2 -translate-x-1/2 rounded-sm bg-foreground px-1.5 py-0.5 font-mono text-[9px] font-bold text-background shadow-xs whitespace-nowrap">
           {formatTime(durationMs)}
         </div>
       ) : null}

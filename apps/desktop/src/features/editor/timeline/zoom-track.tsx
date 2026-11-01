@@ -1,4 +1,4 @@
-import { memo, useCallback, useMemo, useRef, useState } from "react"
+import { memo, useRef, useState } from "react"
 import type {
   ManualZoomSegment,
   TimelineState,
@@ -6,7 +6,6 @@ import type {
   ZoomPreset,
 } from "@recordforge/contracts"
 import {
-  buildSnapTargets,
   playheadSnapTarget,
   snapClipStart,
   snapTrimEdge,
@@ -22,6 +21,9 @@ import {
   cn,
 } from "@recordforge/ui"
 import { Eye, EyeOff, Lock, Plus, Scissors, Sparkles, Trash2, ZoomIn } from "lucide-react"
+import { TimelineEdgeHandle } from "./lanes/timeline-edge-handle"
+import type { EdgeAutoScroll } from "./lanes/use-edge-auto-scroll"
+import type { TimelineGestureInfo } from "./lanes/timeline-gesture-overlay"
 
 interface ZoomSegmentAction {
   kind:
@@ -45,7 +47,9 @@ export interface ZoomTrackRowProps {
   selectedZoomId: string | null
   snapEnabled: boolean
   snapThresholdMs: number
-  cursorClickTimesMs: number[]
+  // Shared snap targets + guides from the lanes level — the row no longer
+  // builds or renders its own.
+  snapTargets: SnapTarget[]
   getTimelineTime: (clientX: number) => number
   onSelectZoom: (segmentId: string) => void
   onAddZoomAtTime?: (timeMs: number, options?: { preset?: ZoomPreset; scale?: number }) => void
@@ -62,6 +66,9 @@ export interface ZoomTrackRowProps {
     endMs: number,
     options?: { phase?: "draft" | "commit" | "cancel" },
   ) => void
+  onSnapGuide: (target: SnapTarget | null) => void
+  onGestureHud: (info: TimelineGestureInfo | null) => void
+  edgeAutoScroll: EdgeAutoScroll
   tool?: "select" | "split" | "range"
 }
 
@@ -90,33 +97,23 @@ export const ZoomTrackRow = memo(function ZoomTrackRow({
   selectedZoomId,
   snapEnabled,
   snapThresholdMs,
-  cursorClickTimesMs,
+  snapTargets,
   getTimelineTime,
   onSelectZoom,
   onAddZoomAtTime,
   onZoomSegmentAction,
   onMoveZoomSegment,
   onResizeZoomSegment,
+  onSnapGuide,
+  onGestureHud,
+  edgeAutoScroll,
 }: ZoomTrackRowProps) {
-  const [snapGuide, setSnapGuide] = useState<SnapTarget | null>(null)
   const [hoverGhost, setHoverGhost] = useState<{ timeMs: number } | null>(null)
-  const onSnapGuide = useCallback((target: SnapTarget | null) => setSnapGuide(target), [])
 
-  // Snap targets exclude the live playhead so playback ticks don't rebuild
-  // the list; gestures append it at pointer-down (see playheadSnapTarget).
-  const snapTargets = useMemo(
-    () => buildSnapTargets(timeline, { cursorClickTimesMs }),
-    [timeline, cursorClickTimesMs],
-  )
-
-  const visibleSegments = useMemo(
-    () =>
-      (timeline.zoomSegments ?? []).filter(
-        (segment) =>
-          segment.startMs <= visibleEndMs + 2_000 &&
-          segment.startMs + segment.durationMs >= visibleStartMs - 2_000,
-      ),
-    [timeline.zoomSegments, visibleStartMs, visibleEndMs],
+  const visibleSegments = (timeline.zoomSegments ?? []).filter(
+    (segment) =>
+      segment.startMs <= visibleEndMs + 2_000 &&
+      segment.startMs + segment.durationMs >= visibleStartMs - 2_000,
   )
 
   function handleDoubleClick(event: React.MouseEvent<HTMLDivElement>) {
@@ -142,10 +139,12 @@ export const ZoomTrackRow = memo(function ZoomTrackRow({
     setHoverGhost(null)
   }
 
+  const ghostWidth = Math.max(40, 2000 * pixelsPerMs)
+
   return (
     <div
       className={cn(
-        "group/zoom-row absolute inset-x-0 flex items-center border-b border-border/80 transition-colors",
+        "group/zoom-row absolute inset-x-0 border-b border-border/50 transition-colors",
         track.muted && "bg-surface-dim/20 opacity-40",
         !track.locked && "cursor-crosshair",
       )}
@@ -154,28 +153,24 @@ export const ZoomTrackRow = memo(function ZoomTrackRow({
       onPointerMove={handlePointerMove}
       onPointerLeave={handlePointerLeave}
     >
-      {snapGuide ? (
-        <div
-          className="pointer-events-none absolute inset-y-0 z-20 w-px bg-primary shadow-xs"
-          style={{ left: `${snapGuide.timeMs * pixelsPerMs}px` }}
-          aria-hidden
-        />
-      ) : null}
-
-      {/* Hover Ghost Indicator for Quick Add */}
+      {/* Hover Ghost Indicator for Quick Add — icon only unless there's room
+          for the hint text. */}
       {hoverGhost && !track.locked ? (
         <div
-          className="pointer-events-none absolute z-0 flex items-center justify-center rounded-lg border border-dashed border-primary/50 bg-primary/10 opacity-70 transition-opacity"
+          className="pointer-events-none absolute z-0 flex items-center justify-center gap-1 rounded-sm border border-dashed border-lane/50 bg-lane/10 opacity-70 transition-opacity"
           style={{
             left: `${hoverGhost.timeMs * pixelsPerMs}px`,
-            width: `${Math.max(40, 2000 * pixelsPerMs)}px`,
-            height: `${Math.max(28, Math.min(height - 14, 38))}px`,
+            width: `${ghostWidth}px`,
+            top: "4px",
+            height: `${Math.max(8, height - 8)}px`,
           }}
         >
-          <div className="flex items-center gap-1 font-mono text-[9px] font-medium text-primary">
-            <Plus className="size-2.5" />
-            <span>Double-click to add zoom</span>
-          </div>
+          <Plus className="size-3 text-lane" />
+          {ghostWidth >= 120 ? (
+            <span className="font-mono text-[9px] font-medium text-lane">
+              Double-click to add zoom
+            </span>
+          ) : null}
         </div>
       ) : null}
 
@@ -197,6 +192,8 @@ export const ZoomTrackRow = memo(function ZoomTrackRow({
           onMoveZoomSegment={onMoveZoomSegment}
           onResizeZoomSegment={onResizeZoomSegment}
           onSnapGuide={onSnapGuide}
+          onGestureHud={onGestureHud}
+          edgeAutoScroll={edgeAutoScroll}
         />
       ))}
     </div>
@@ -229,9 +226,11 @@ interface ZoomSegmentItemProps {
     options?: { phase?: "draft" | "commit" | "cancel" },
   ) => void
   onSnapGuide: (target: SnapTarget | null) => void
+  onGestureHud: (info: TimelineGestureInfo | null) => void
+  edgeAutoScroll: EdgeAutoScroll
 }
 
-function ZoomSegmentItem({
+const ZoomSegmentItem = memo(function ZoomSegmentItem({
   segment,
   track,
   height,
@@ -247,17 +246,44 @@ function ZoomSegmentItem({
   onMoveZoomSegment,
   onResizeZoomSegment,
   onSnapGuide,
+  onGestureHud,
+  edgeAutoScroll,
 }: ZoomSegmentItemProps) {
   const gestureRef = useRef<SegmentGesture | null>(null)
+  const lastPointerRef = useRef<{ clientX: number; altKey: boolean } | null>(null)
   const suppressClickRef = useRef(false)
-  const [gestureDelta, setGestureDelta] = useState<{ mode: string; text: string } | null>(null)
+  const [activeGesture, setActiveGesture] = useState<SegmentGesture["mode"] | null>(null)
+  const [isHovered, setIsHovered] = useState(false)
 
   const left = segment.startMs * pixelsPerMs
   const width = Math.max(8, segment.durationMs * pixelsPerMs)
-  const barHeight = Math.max(30, Math.min(height - 14, 40))
+  const barHeight = Math.max(8, height - 8)
+  const isLocked = track.locked || segment.locked
+  const hitWidth = Math.round(Math.min(10, Math.max(4, width * 0.25)))
+  const showHandles = !isLocked && tool !== "split" && (width >= 8 || selected)
+
+  function hudFor(
+    mode: TimelineGestureInfo["mode"],
+    startMs: number,
+    endMs: number,
+  ): TimelineGestureInfo {
+    const gesture = gestureRef.current
+    return {
+      clipId: segment.id,
+      trackId: track.id,
+      mode,
+      label: mode === "trim-start" ? "Resize in" : mode === "trim-end" ? "Resize out" : undefined,
+      originalStartMs: gesture?.initialStartMs ?? segment.startMs,
+      originalEndMs: gesture?.initialEndMs ?? segment.startMs + segment.durationMs,
+      startMs,
+      endMs,
+      limit: null,
+      invalid: null,
+    }
+  }
 
   function beginGesture(event: React.PointerEvent<HTMLElement>, mode: SegmentGesture["mode"]) {
-    if (event.button !== 0 || track.locked || segment.locked) return
+    if (event.button !== 0 || isLocked) return
     event.stopPropagation()
     event.preventDefault()
     const target = event.currentTarget.closest("[data-timeline-zoom]")
@@ -273,30 +299,27 @@ function ZoomSegmentItem({
       moved: false,
       snapTargets: [...snapTargets, playheadSnapTarget(getPlayheadSnapshot())],
     }
+    // activeGesture stays unset until the pointer actually drags.
   }
 
-  function handlePointerMove(event: React.PointerEvent<HTMLDivElement>) {
+  // Same draft/commit split as clip gestures: draft reports the lanes HUD,
+  // commit re-runs the identical snap path.
+  function applyGesture(clientX: number, altKey: boolean, phase: "draft" | "commit") {
     const gesture = gestureRef.current
-    if (!gesture || gesture.pointerId !== event.pointerId) return
-    const currentMs = getTimelineTime(event.clientX)
+    if (!gesture) return
+    const currentMs = getTimelineTime(clientX)
     const deltaMs = currentMs - gesture.initialTimelineMs
-    if (Math.abs(event.clientX - gesture.initialClientX) < 3 && !gesture.moved) return
-    gesture.moved = true
-    suppressClickRef.current = true
-    event.preventDefault()
-
-    const snap = { enabled: snapEnabled && !event.altKey, thresholdMs: snapThresholdMs }
+    const snap = { enabled: snapEnabled && !altKey, thresholdMs: snapThresholdMs }
 
     if (gesture.mode === "move") {
       const duration = gesture.initialEndMs - gesture.initialStartMs
       const rawStartMs = Math.max(0, Math.round(gesture.initialStartMs + deltaMs))
       const snapped = snapClipStart(rawStartMs, duration, gesture.snapTargets, snap)
       onSnapGuide(snapped.snapped ? snapped.target : null)
-      setGestureDelta({
-        mode: "Move",
-        text: `${deltaMs >= 0 ? "+" : ""}${(deltaMs / 1000).toFixed(2)}s`,
-      })
-      onMoveZoomSegment(segment, snapped.timeMs, snapped.timeMs + duration, { phase: "draft" })
+      if (phase === "draft") {
+        onGestureHud(hudFor("move", snapped.timeMs, snapped.timeMs + duration))
+      }
+      onMoveZoomSegment(segment, snapped.timeMs, snapped.timeMs + duration, { phase })
       return
     }
 
@@ -311,12 +334,26 @@ function ZoomSegmentItem({
       edge === "start" ? Math.min(snapped.timeMs, gesture.initialEndMs - 1) : gesture.initialStartMs
     const nextEndMs =
       edge === "start" ? gesture.initialEndMs : Math.max(snapped.timeMs, gesture.initialStartMs + 1)
+    if (phase === "draft") {
+      onGestureHud(hudFor(edge === "start" ? "trim-start" : "trim-end", nextStartMs, nextEndMs))
+    }
+    onResizeZoomSegment(segment, nextStartMs, nextEndMs, { phase })
+  }
 
-    setGestureDelta({
-      mode: edge === "start" ? "Resize In" : "Resize Out",
-      text: `${deltaMs >= 0 ? "+" : ""}${(deltaMs / 1000).toFixed(2)}s`,
+  function handlePointerMove(event: React.PointerEvent<HTMLDivElement>) {
+    const gesture = gestureRef.current
+    if (!gesture || gesture.pointerId !== event.pointerId) return
+    if (Math.abs(event.clientX - gesture.initialClientX) < 3 && !gesture.moved) return
+    gesture.moved = true
+    setActiveGesture(gesture.mode)
+    suppressClickRef.current = true
+    event.preventDefault()
+    lastPointerRef.current = { clientX: event.clientX, altKey: event.altKey }
+    applyGesture(event.clientX, event.altKey, "draft")
+    edgeAutoScroll.track(event.clientX, () => {
+      const last = lastPointerRef.current
+      if (last) applyGesture(last.clientX, last.altKey, "draft")
     })
-    onResizeZoomSegment(segment, nextStartMs, nextEndMs, { phase: "draft" })
   }
 
   function finishGesture(event: React.PointerEvent<HTMLDivElement>) {
@@ -325,42 +362,21 @@ function ZoomSegmentItem({
     const wasCancelled = event.type === "pointercancel"
     const didMove = gesture.moved
     gestureRef.current = null
-    setGestureDelta(null)
+    lastPointerRef.current = null
+    edgeAutoScroll.stop()
+    setActiveGesture(null)
+    onGestureHud(null)
+    onSnapGuide(null)
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId)
     }
 
     if (wasCancelled || !didMove) {
-      onSnapGuide(null)
       onMoveZoomSegment(segment, gesture.initialStartMs, gesture.initialEndMs, { phase: "cancel" })
       return
     }
 
-    const currentMs = getTimelineTime(event.clientX)
-    const deltaMs = currentMs - gesture.initialTimelineMs
-    const snap = { enabled: snapEnabled && !event.altKey, thresholdMs: snapThresholdMs }
-
-    if (gesture.mode === "move") {
-      const duration = gesture.initialEndMs - gesture.initialStartMs
-      const rawStartMs = Math.max(0, Math.round(gesture.initialStartMs + deltaMs))
-      const snapped = snapClipStart(rawStartMs, duration, gesture.snapTargets, snap)
-      onSnapGuide(null)
-      onMoveZoomSegment(segment, snapped.timeMs, snapped.timeMs + duration, { phase: "commit" })
-      return
-    }
-
-    const edge = gesture.mode === "resize-start" ? "start" : "end"
-    const rawEdgeTimeMs =
-      edge === "start"
-        ? Math.max(0, Math.round(gesture.initialStartMs + deltaMs))
-        : Math.max(0, Math.round(gesture.initialEndMs + deltaMs))
-    const snapped = snapTrimEdge(edge, rawEdgeTimeMs, gesture.snapTargets, snap)
-    onSnapGuide(null)
-    const nextStartMs =
-      edge === "start" ? Math.min(snapped.timeMs, gesture.initialEndMs - 1) : gesture.initialStartMs
-    const nextEndMs =
-      edge === "start" ? gesture.initialEndMs : Math.max(snapped.timeMs, gesture.initialStartMs + 1)
-    onResizeZoomSegment(segment, nextStartMs, nextEndMs, { phase: "commit" })
+    applyGesture(event.clientX, event.altKey, "commit")
   }
 
   const transInWidth = Math.min(width / 2, (segment.transitionInMs ?? 400) * pixelsPerMs)
@@ -382,19 +398,30 @@ function ZoomSegmentItem({
           aria-label={`${segment.enabled ? "Zoom" : "Disabled zoom"} segment ${segment.scale.toFixed(1)}x`}
           aria-pressed={selected}
           className={cn(
-            "group/zoom absolute flex items-center overflow-hidden rounded-lg border border-primary/70 bg-linear-to-b from-primary/30 to-primary/15 px-2 text-left text-[11px] transition-all duration-fast select-none hover:from-primary/40 hover:to-primary/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
-            tool === "split" ? "cursor-crosshair" : "cursor-grab active:cursor-grabbing",
+            "group/zoom absolute flex items-center select-none overflow-hidden rounded-sm bg-lane/20 outline-none transition-[background-color,box-shadow,opacity] duration-fast ease-forge",
             selected
-              ? "ring-2 ring-primary ring-offset-1 ring-offset-surface-dim shadow-e2 z-20"
-              : "z-10",
-            !segment.enabled && "border-muted-foreground/50 bg-muted/20 opacity-60",
-            (track.locked || segment.locked) && "cursor-not-allowed opacity-60",
+              ? "z-20 bg-lane/35 ring-2 ring-inset ring-foreground"
+              : "z-10 ring-1 ring-inset ring-lane/40 hover:bg-lane/28",
+            activeGesture && "z-30 ring-2 ring-foreground shadow-e2",
+            activeGesture === "move"
+              ? "cursor-grabbing"
+              : activeGesture
+                ? "cursor-ew-resize"
+                : tool === "split"
+                  ? "cursor-crosshair"
+                  : "cursor-grab",
+            "focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-foreground",
+            !segment.enabled && "opacity-50",
+            isLocked && "cursor-not-allowed opacity-60",
           )}
           style={{
             left: `${left}px`,
             width: `${width}px`,
+            top: "4px",
             height: `${barHeight}px`,
           }}
+          onPointerEnter={() => setIsHovered(true)}
+          onPointerLeave={() => setIsHovered(false)}
           onPointerDown={(event) => {
             if (tool === "split") {
               return
@@ -422,75 +449,77 @@ function ZoomSegmentItem({
           }}
           title={`${segment.label ? `${segment.label} · ` : ""}${segment.scale.toFixed(1)}× (${formatZoomTime(segment.startMs)} → ${formatZoomTime(segment.startMs + segment.durationMs)})`}
         >
-          {/* Start Resize Handle */}
-          {!segment.locked && !track.locked && tool !== "split" ? (
-            <div
-              className="absolute left-0 inset-y-0 z-30 flex w-3 cursor-ew-resize items-center justify-center opacity-0 transition-all duration-fast group-hover/zoom:opacity-100 hover:w-3.5 hover:bg-primary/30"
-              onPointerDown={(e) => beginGesture(e, "resize-start")}
-              onClick={(e) => e.stopPropagation()}
-              title="Resize transition in"
-            >
-              <div className="h-4 w-1 rounded-full bg-primary shadow-xs" />
-            </div>
-          ) : null}
+          {/* Top Accent Bar */}
+          <div className="pointer-events-none absolute inset-x-0 top-0 h-0.5 bg-lane/80" />
 
           {/* Visual Transition In Ramp */}
           <div
-            className="pointer-events-none absolute bottom-0 left-0 top-0 bg-linear-to-r from-primary/40 to-transparent"
+            className="pointer-events-none absolute bottom-0 left-0 top-0 bg-linear-to-r from-lane/40 to-transparent"
             style={{ width: `${transInWidth}px` }}
             aria-hidden
           />
 
           {/* Visual Transition Out Ramp */}
           <div
-            className="pointer-events-none absolute bottom-0 right-0 top-0 bg-linear-to-l from-primary/40 to-transparent"
+            className="pointer-events-none absolute bottom-0 right-0 top-0 bg-linear-to-l from-lane/40 to-transparent"
             style={{ width: `${transOutWidth}px` }}
             aria-hidden
           />
 
-          {/* Segment Details */}
-          <div className="relative z-10 flex min-w-0 flex-1 items-center gap-1.5 px-1">
-            <ZoomIn className="size-3 shrink-0 text-primary" aria-hidden />
-            <span className="truncate font-semibold text-[11px] text-foreground">
-              {segment.label ? `${segment.label} ` : ""}
-              {segment.scale.toFixed(1)}×
-            </span>
-            {segment.mode === "follow-cursor" ? (
-              <span className="rounded bg-primary/20 px-1 py-0.5 font-mono text-[9px] font-medium text-primary">
-                follow
-              </span>
-            ) : segment.mode === "smooth-pan" ? (
-              <span className="rounded bg-primary/20 px-1 py-0.5 font-mono text-[9px] font-medium text-primary">
-                pan
-              </span>
-            ) : segment.mode === "auto" ? (
-              <span className="flex items-center gap-0.5 text-[9px] font-medium text-primary/80">
-                <Sparkles className="size-2.5" /> auto
-              </span>
-            ) : null}
-            {segment.locked ? (
-              <Lock className="size-2.5 shrink-0 text-warning opacity-80" aria-hidden />
-            ) : null}
-          </div>
+          {/* Disabled segments get a dashed overlay like cursor ranges */}
+          {!segment.enabled ? (
+            <div className="pointer-events-none absolute inset-0 rounded-[inherit] border border-dashed border-foreground/50" />
+          ) : null}
 
-          {/* End Resize Handle */}
-          {!segment.locked && !track.locked && tool !== "split" ? (
-            <div
-              className="absolute right-0 inset-y-0 z-30 flex w-3 cursor-ew-resize items-center justify-center opacity-0 transition-all duration-fast group-hover/zoom:opacity-100 hover:w-3.5 hover:bg-primary/30"
-              onPointerDown={(e) => beginGesture(e, "resize-end")}
-              onClick={(e) => e.stopPropagation()}
-              title="Resize transition out"
-            >
-              <div className="h-4 w-1 rounded-full bg-primary shadow-xs" />
+          {/* Start Resize Handle */}
+          {showHandles ? (
+            <TimelineEdgeHandle
+              edge="start"
+              hitWidth={hitWidth}
+              visible={isHovered || selected || activeGesture === "resize-start"}
+              active={activeGesture === "resize-start"}
+              limited={false}
+              onPointerDown={(e) => beginGesture(e, "resize-start")}
+            />
+          ) : null}
+
+          {/* Segment Details — level of detail follows the bar's width */}
+          {width >= 30 ? (
+            <div className="relative z-10 flex min-w-0 flex-1 items-center gap-1.5 px-2 pointer-events-none">
+              <ZoomIn className="size-3 shrink-0 text-lane" aria-hidden />
+              <span className="truncate font-semibold text-[11px] text-foreground">
+                {segment.label ? `${segment.label} ` : ""}
+                {segment.scale.toFixed(1)}×
+              </span>
+              {width >= 90 && segment.mode === "follow-cursor" ? (
+                <span className="rounded-sm bg-lane/20 px-1 py-0.5 font-mono text-[9px] font-medium text-lane">
+                  follow
+                </span>
+              ) : width >= 90 && segment.mode === "smooth-pan" ? (
+                <span className="rounded-sm bg-lane/20 px-1 py-0.5 font-mono text-[9px] font-medium text-lane">
+                  pan
+                </span>
+              ) : width >= 90 && segment.mode === "auto" ? (
+                <span className="flex items-center gap-0.5 text-[9px] font-medium text-lane/80">
+                  <Sparkles className="size-2.5" /> auto
+                </span>
+              ) : null}
+              {segment.locked ? (
+                <Lock className="size-2.5 shrink-0 text-warning opacity-80" aria-hidden />
+              ) : null}
             </div>
           ) : null}
 
-          {/* Live Drag/Trim Feedback Tooltip */}
-          {gestureDelta ? (
-            <div className="absolute -top-7 left-1/2 -translate-x-1/2 z-50 rounded-md border border-border bg-surface px-1.5 py-0.5 font-mono text-[10px] font-semibold text-foreground shadow-e2 whitespace-nowrap">
-              <span className="text-primary mr-1">{gestureDelta.mode}:</span>
-              {gestureDelta.text}
-            </div>
+          {/* End Resize Handle */}
+          {showHandles ? (
+            <TimelineEdgeHandle
+              edge="end"
+              hitWidth={hitWidth}
+              visible={isHovered || selected || activeGesture === "resize-end"}
+              active={activeGesture === "resize-end"}
+              limited={false}
+              onPointerDown={(e) => beginGesture(e, "resize-end")}
+            />
           ) : null}
         </div>
       </ContextMenuTrigger>
@@ -552,7 +581,7 @@ function ZoomSegmentItem({
       </ContextMenuContent>
     </ContextMenu>
   )
-}
+})
 
 function formatZoomTime(ms: number): string {
   const seconds = Math.floor(ms / 1000)

@@ -18,8 +18,11 @@ interface TimelineWaveformProps {
   visibleStartMs: number
   visibleEndMs: number
   height: number
-  // Track accent token ("--color-track-mic", "--color-track-system", ...)
+  // Lane accent token ("--color-track-mic", "--color-track-system", ...)
   colorVar?: string
+  // Clip volume — scales the drawn amplitude so boosting/cutting reads
+  // visually in the silhouette.
+  gain?: number
 }
 
 /**
@@ -37,6 +40,7 @@ export const TimelineWaveform = memo(function TimelineWaveform({
   visibleEndMs,
   height,
   colorVar = "--color-track-mic",
+  gain = 1,
 }: TimelineWaveformProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
 
@@ -68,7 +72,7 @@ export const TimelineWaveform = memo(function TimelineWaveform({
     const gradient = ctx.createLinearGradient(0, 0, 0, height)
     // Brighter at the extremes, dimmer at the axis — reads as energy.
     gradient.addColorStop(0, rgba(accent, 0.95))
-    gradient.addColorStop(0.5, rgba(accent, 0.55))
+    gradient.addColorStop(0.5, rgba(accent, 0.6))
     gradient.addColorStop(1, rgba(accent, 0.95))
     ctx.fillStyle = gradient
 
@@ -76,31 +80,37 @@ export const TimelineWaveform = memo(function TimelineWaveform({
     const halfH = height * 0.5 * 0.94
     const windowMs = waveformWindowMs(data)
     const count = data.peaks.length
+    const supportsRoundRect = typeof ctx.roundRect === "function"
 
-    // One rect per CSS column, accumulated into a single path fill.
+    // Modern bars: a 2px bar + 1px gap per 3px bucket. Each bucket still
+    // aggregates its whole peak window so transients survive zoom-out.
     ctx.beginPath()
-    for (let x = 0; x < cssW; x++) {
+    for (let x = 0; x < cssW; x += 3) {
       const t0 = clipWindow.startMs + x / pixelsPerMs
-      const t1 = clipWindow.startMs + (x + 1) / pixelsPerMs
+      const t1 = clipWindow.startMs + (x + 3) / pixelsPerMs
       const fromIndex = clipSourceTimeMs(clip, t0) / windowMs
       const toIndex = clipSourceTimeMs(clip, t1) / windowMs
       if (fromIndex >= count || toIndex < 0) continue
 
       const envelope = sampleWaveformEnvelope(data, fromIndex, toIndex)
-      const top = displayAmplitude(envelope.top, normalization)
-      const bottom = displayAmplitude(envelope.bottom, normalization)
+      const top = Math.min(1, displayAmplitude(envelope.top, normalization) * gain)
+      const bottom = Math.min(1, displayAmplitude(envelope.bottom, normalization) * gain)
       const y0 = centerY - top * halfH
       const y1 = centerY + bottom * halfH
       // A hairline floor keeps silence visible instead of disappearing.
       const barHeight = Math.max(1.25, y1 - y0)
-      ctx.rect(x, y0, 1, barHeight)
+      if (supportsRoundRect) {
+        ctx.roundRect(x, y0, 2, barHeight, 1)
+      } else {
+        ctx.rect(x, y0, 2, barHeight)
+      }
     }
     ctx.fill()
 
     // Center axis hairline in the track accent.
-    ctx.fillStyle = rgba(accent, 0.35)
+    ctx.fillStyle = rgba(accent, 0.25)
     ctx.fillRect(0, centerY - 0.5, cssW, 1)
-  }, [clip, clipWindow, colorVar, data, height, normalization, pixelsPerMs])
+  }, [clip, clipWindow, colorVar, data, gain, height, normalization, pixelsPerMs])
 
   if (!clipWindow) return null
 

@@ -219,7 +219,7 @@ function TimelineLoadingState() {
         {/* TimelineLanes Skeleton */}
         <div className="flex min-h-0 flex-1 select-none overflow-hidden">
           {/* Left Column: Track Headers */}
-          <div className="w-56 shrink-0 overflow-hidden border-r border-border bg-surface shadow-e1 z-20 flex flex-col">
+          <div className="w-48 shrink-0 overflow-hidden border-r border-border bg-surface shadow-e1 z-20 flex flex-col">
             <div className="flex h-13 flex-col justify-center border-b border-border/80 bg-surface-dim/95 px-3">
               <Skeleton className="h-3 w-24 rounded" />
               <Skeleton className="mt-1.5 h-2 w-16 rounded" />
@@ -2440,6 +2440,8 @@ export function TimelineView({
           }
           onToggleTrackCollapsed={(track) => toggleTrackCollapsed(track.id)}
           onCycleTrackHeight={cycleTrackHeight}
+          onSetTrackHeight={(track, height) => setTrackHeight(track.id, height)}
+          sourceDurationMs={metadata?.durationMs}
           onRenameTrack={(track, name) => execute(createUpdateTrackCommand(track.id, { name }))}
           onMoveTrack={(trackId, newIndex) => {
             execute(createMoveTrackCommand(trackId, newIndex))

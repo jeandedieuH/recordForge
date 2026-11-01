@@ -14,6 +14,10 @@ export interface TimelineAudioEnvelopeProps {
     fadeOutMs?: number
     volumeKeyframes?: AudioVolumeKeyframe[]
   }) => void
+  // The parent keeps the envelope mounted while a drag is in flight — the
+  // window-level listeners would otherwise be lost when the pointer leaves
+  // the clip bounds.
+  onInteractingChange?: (active: boolean) => void
   className?: string
 }
 
@@ -58,6 +62,7 @@ export const TimelineAudioEnvelope = memo(function TimelineAudioEnvelope({
   height,
   isLocked = false,
   onUpdateAudio,
+  onInteractingChange,
   className,
 }: TimelineAudioEnvelopeProps) {
   const containerRef = useRef<SVGSVGElement | null>(null)
@@ -244,6 +249,7 @@ export const TimelineAudioEnvelope = memo(function TimelineAudioEnvelope({
       clickTimeMs,
       moved: false,
     })
+    onInteractingChange?.(true)
     showHud(`Volume: ${Math.round(clip.volume * 100)}% (${volumeToDb(clip.volume)})`)
   }
 
@@ -256,6 +262,7 @@ export const TimelineAudioEnvelope = memo(function TimelineAudioEnvelope({
       startX: e.clientX,
       startFadeInMs: clip.fadeInMs ?? 0,
     })
+    onInteractingChange?.(true)
     showHud(`Fade In: ${((clip.fadeInMs ?? 0) / 1000).toFixed(2)}s`)
   }
 
@@ -268,6 +275,7 @@ export const TimelineAudioEnvelope = memo(function TimelineAudioEnvelope({
       startX: e.clientX,
       startFadeOutMs: clip.fadeOutMs ?? 0,
     })
+    onInteractingChange?.(true)
     showHud(`Fade Out: ${((clip.fadeOutMs ?? 0) / 1000).toFixed(2)}s`)
   }
 
@@ -284,6 +292,7 @@ export const TimelineAudioEnvelope = memo(function TimelineAudioEnvelope({
       startVolume: kf.volume,
       moved: false,
     })
+    onInteractingChange?.(true)
     showHud(
       `Keyframe: ${formatTimelineTime(kf.timeMs)} · ${Math.round(kf.volume * 100)}% (${volumeToDb(kf.volume)})`,
     )
@@ -408,6 +417,7 @@ export const TimelineAudioEnvelope = memo(function TimelineAudioEnvelope({
       }
 
       setActiveDrag(null)
+      onInteractingChange?.(false)
     }
 
     window.addEventListener("pointermove", onPointerMove, { capture: true })
@@ -426,11 +436,16 @@ export const TimelineAudioEnvelope = memo(function TimelineAudioEnvelope({
     clip.fadeOutMs,
     clip.volumeKeyframes,
     onUpdateAudio,
+    onInteractingChange,
     pixelsPerMs,
     showHud,
     usableHeight,
     yToVolume,
   ])
+
+  // Unmount mid-drag (clip deleted or un-pinned): release the parent's
+  // "keep me mounted" flag so it doesn't pin the envelope forever.
+  useEffect(() => () => onInteractingChange?.(false), [onInteractingChange])
 
   return (
     <div
@@ -439,11 +454,14 @@ export const TimelineAudioEnvelope = memo(function TimelineAudioEnvelope({
         className,
       )}
     >
-      <svg ref={containerRef} className="size-full overflow-visible pointer-events-none">
+      <svg
+        ref={containerRef}
+        className="size-full overflow-visible pointer-events-none text-foreground"
+      >
         <defs>
           <linearGradient id={`env-grad-${clip.id}`} x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="rgba(245, 158, 11, 0.28)" />
-            <stop offset="100%" stopColor="rgba(245, 158, 11, 0.02)" />
+            <stop offset="0%" stopColor="currentColor" stopOpacity={0.18} />
+            <stop offset="100%" stopColor="currentColor" stopOpacity={0.02} />
           </linearGradient>
         </defs>
 
@@ -458,9 +476,8 @@ export const TimelineAudioEnvelope = memo(function TimelineAudioEnvelope({
         <path
           d={svgPathData}
           fill="none"
-          stroke="rgba(245, 158, 11, 0.85)"
           strokeWidth={1.75}
-          className="pointer-events-none transition-colors group-hover/envelope:stroke-amber-400 group-hover/envelope:filter-[drop-shadow(0_0_4px_rgba(245,158,11,0.6))]"
+          className="pointer-events-none stroke-foreground/85 transition-colors group-hover/envelope:stroke-foreground"
         />
 
         {/* Generous Hit Testing Path for Volume Line & Click-to-add-keyframe */}
@@ -492,15 +509,17 @@ export const TimelineAudioEnvelope = memo(function TimelineAudioEnvelope({
               onPointerDown={handleFadeInPointerDown}
             />
             {/* Visual Handle */}
-            <circle
-              cx={fadeInX}
-              cy={fadeInY}
-              r={clip.fadeInMs > 0 ? 4 : 3}
+            <rect
+              x={fadeInX - 3.5}
+              y={fadeInY - 3.5}
+              width={7}
+              height={7}
+              rx={1.5}
               data-envelope-interactive="true"
               className={cn(
-                "fill-amber-400 stroke-surface stroke-[1.5px] cursor-ew-resize transition-all shadow-xs",
+                "fill-lane stroke-background stroke-[1.5px] cursor-ew-resize transition-opacity shadow-xs",
                 clip.fadeInMs > 0
-                  ? "opacity-100 ring-1 ring-amber-500/50"
+                  ? "opacity-100"
                   : "opacity-40 group-hover/envelope:opacity-90 hover:opacity-100",
               )}
               onPointerDown={handleFadeInPointerDown}
@@ -522,15 +541,17 @@ export const TimelineAudioEnvelope = memo(function TimelineAudioEnvelope({
               onPointerDown={handleFadeOutPointerDown}
             />
             {/* Visual Handle */}
-            <circle
-              cx={fadeOutX}
-              cy={fadeOutY}
-              r={clip.fadeOutMs > 0 ? 4 : 3}
+            <rect
+              x={fadeOutX - 3.5}
+              y={fadeOutY - 3.5}
+              width={7}
+              height={7}
+              rx={1.5}
               data-envelope-interactive="true"
               className={cn(
-                "fill-amber-400 stroke-surface stroke-[1.5px] cursor-ew-resize transition-all shadow-xs",
+                "fill-lane stroke-background stroke-[1.5px] cursor-ew-resize transition-opacity shadow-xs",
                 clip.fadeOutMs > 0
-                  ? "opacity-100 ring-1 ring-amber-500/50"
+                  ? "opacity-100"
                   : "opacity-40 group-hover/envelope:opacity-90 hover:opacity-100",
               )}
               onPointerDown={handleFadeOutPointerDown}
@@ -560,13 +581,15 @@ export const TimelineAudioEnvelope = memo(function TimelineAudioEnvelope({
                   onPointerDown={(e) => handleKeyframePointerDown(e, kf)}
                   onDoubleClick={(e) => handleKeyframeDoubleClick(e, kf.id)}
                 />
-                {/* Visual Node */}
+                {/* Visual Node — grows on hover via transform (SVG r can't be
+                    transitioned by a class). */}
                 <circle
                   cx={cx}
                   cy={cy}
-                  r={4.5}
+                  r={4}
                   data-envelope-interactive="true"
-                  className="fill-white stroke-amber-500 stroke-[2px] cursor-move hover:r-6 hover:fill-amber-300 transition-all shadow-e1"
+                  style={{ transformBox: "fill-box", transformOrigin: "center" }}
+                  className="fill-foreground stroke-lane stroke-[1.5px] cursor-move transition-transform duration-fast hover:scale-150 shadow-e1"
                   onPointerDown={(e) => handleKeyframePointerDown(e, kf)}
                   onDoubleClick={(e) => handleKeyframeDoubleClick(e, kf.id)}
                 />
@@ -577,8 +600,8 @@ export const TimelineAudioEnvelope = memo(function TimelineAudioEnvelope({
 
       {/* Live Floating Tooltip HUD during envelope interaction */}
       {hudMessage ? (
-        <div className="pointer-events-none absolute -top-8 left-1/2 -translate-x-1/2 z-50 flex items-center gap-1.5 rounded-full border border-amber-500/90 bg-surface/95 px-2.5 py-0.5 font-mono text-[10px] font-bold text-foreground shadow-e3 backdrop-blur-md whitespace-nowrap animate-in fade-in zoom-in-95">
-          <span className="text-amber-400">●</span>
+        <div className="pointer-events-none absolute top-1 left-1/2 -translate-x-1/2 z-50 flex items-center gap-1.5 rounded-full border border-border-strong bg-elevated/95 px-2 py-0.5 font-mono text-[10px] text-foreground shadow-e2 backdrop-blur-md whitespace-nowrap animate-in fade-in zoom-in-95">
+          <span className="size-1.5 rounded-full bg-lane" />
           <span>{hudMessage}</span>
         </div>
       ) : null}
