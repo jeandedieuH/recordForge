@@ -2,15 +2,18 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type { TimelineState } from "@recordforge/contracts"
 import {
   buildPreviewSegments,
+  classifyPreviewFrame,
   createPlaybackClock,
   nextPreviewSegment,
   previewSegmentAt,
+  previewSegmentSourceMs,
   type PlaybackClock,
   type PreviewQualityMode,
   type PreviewSegment,
 } from "@recordforge/editor-core"
 import { useTimelineStore } from "../../../stores/timeline-store"
 import { getPlayheadSnapshot, subscribeToPlayhead } from "./use-playback-state"
+import { planCutTransition, planSegmentFrameTick } from "./playback/cut-transition"
 
 type ScreenSlot = 0 | 1
 type SlotRefs = [React.RefObject<HTMLVideoElement | null>, React.RefObject<HTMLVideoElement | null>]
@@ -31,6 +34,11 @@ interface UsePlaybackClockOptions {
  * so Smart Cut's dense splices no longer cause a seek (and an audio dropout)
  * every couple of seconds. The hook stays imperative so the timeline view does
  * not re-render every video frame.
+ *
+ * Frame mapping is segment-relative: a presented frame is only ever applied to
+ * the segment the playhead is already inside. Frames from the retiring slot, or
+ * from the deleted range a segment jumps over, can therefore never move the
+ * playhead backwards — they either cross the cut or trigger a corrective seek.
  */
 export interface UsePlaybackClockResult {
   isReady: boolean
@@ -76,6 +84,8 @@ export function usePlaybackClock({
   const screenSlots = useMemo<SlotRefs>(() => [slot0Ref, slot1Ref], [])
   const activeSlotRef = useRef<ScreenSlot>(0)
   const slotSegmentsRef = useRef<[number, number]>([-1, -1])
+  /** A cut holding its last frame until the standby can take over. */
+  const pendingCutRef = useRef<{ index: number; sinceMs: number } | null>(null)
 
   // The playhead is read imperatively (subscription below) instead of via
   // usePlayheadMs: this hook's owner renders the whole timeline view, so a
@@ -84,7 +94,6 @@ export function usePlaybackClock({
   const drivenPlayheadRef = useRef(getPlayheadSnapshot())
   const isPlayingRef = useRef(isPlaying)
   const playbackRateRef = useRef(playbackRate)
-  const clipIdRef = useRef<string | null>(null)
   const onSeekRef = useRef(onSeek)
   const onPauseRef = useRef(onPause)
   const vfcRef = useRef<number | null>(null)
@@ -104,13 +113,23 @@ export function usePlaybackClock({
   )
   const frameMs = clock?.frameMs ?? 1000 / 30
 
+  const setSeeking = useCallback((value: boolean) => {
+    if (isSeekingRef.current === value) return
+    isSeekingRef.current = value
+    setIsSeeking(value)
+  }, [])
+
   const segmentReady = useCallback(
     (element: HTMLVideoElement | null, segment: PreviewSegment): boolean => {
-      if (!element || element.readyState < 2) return false
+      if (!element || element.seeking || element.readyState < 2) return false
       return Math.abs(element.currentTime * 1000 - segment.sourceInMs) <= frameMs
     },
     [frameMs],
   )
+
+  const effectiveRate = useCallback((segment: PreviewSegment): number => {
+    return Math.max(0.25, Math.min(4, playbackRateRef.current * segment.speed))
+  }, [])
 
   const seekElement = useCallback((element: HTMLVideoElement | null, sourceMs: number) => {
     if (!element) return
@@ -169,9 +188,11 @@ export function usePlaybackClock({
       // next render, while the retiring slot stays silenced.
       standby.muted = wasMuted
       standby.style.visibility = "visible"
+      standby.playbackRate = effectiveRate(segment)
       activeSlotRef.current = standbySlot
       setActiveSlot(standbySlot)
       slotSegmentsRef.current[standbySlot] = index
+      setSeeking(false)
       if (isPlayingRef.current) {
         standby.play().catch(() => {
           onPauseRef.current?.()
@@ -179,23 +200,21 @@ export function usePlaybackClock({
       }
       return true
     },
-    [activeElement, segmentReady, standbyElement],
+    [activeElement, effectiveRate, segmentReady, setSeeking, standbyElement],
   )
 
   const handleSeeking = useCallback(
     (event: React.SyntheticEvent<HTMLVideoElement>) => {
       if (event.currentTarget !== activeElement()) return
-      isSeekingRef.current = true
-      setIsSeeking(true)
+      setSeeking(true)
     },
-    [activeElement],
+    [activeElement, setSeeking],
   )
 
   const handleSeeked = useCallback(
     (event: React.SyntheticEvent<HTMLVideoElement>) => {
       if (event.currentTarget !== activeElement()) return
-      isSeekingRef.current = false
-      setIsSeeking(false)
+      setSeeking(false)
       const video = event.currentTarget
       if (isPlayingRef.current && video.paused) {
         video.play().catch(() => {
@@ -203,19 +222,16 @@ export function usePlaybackClock({
         })
       }
     },
-    [activeElement],
+    [activeElement, setSeeking],
   )
 
   const handleTransient = useCallback(
     (event: React.SyntheticEvent<HTMLVideoElement>) => {
       if (event.currentTarget !== activeElement()) return
       const video = event.currentTarget
-      if (!video.seeking) {
-        isSeekingRef.current = false
-        setIsSeeking(false)
-      }
+      if (!video.seeking) setSeeking(false)
     },
-    [activeElement],
+    [activeElement, setSeeking],
   )
 
   const videoProps = useMemo(
@@ -240,7 +256,7 @@ export function usePlaybackClock({
     video.addEventListener("canplay", handleTransient as unknown as EventListener)
     video.addEventListener("timeupdate", handleTransient as unknown as EventListener)
 
-    if (!video.seeking && isSeekingRef.current) {
+    if (!video.seeking && isSeekingRef.current && !pendingCutRef.current) {
       isSeekingRef.current = false
       setIsSeeking(false)
     }
@@ -254,6 +270,137 @@ export function usePlaybackClock({
     }
   }, [activeElement, activeSlot, handleSeeking, handleSeeked, handleTransient, mediaUrl])
 
+  /** Move the preview playhead, keeping the driven ref in step. */
+  const driveTo = useCallback((timelineMs: number) => {
+    if (timelineMs === drivenPlayheadRef.current) return
+    drivenPlayheadRef.current = timelineMs
+    onSeekRef.current(timelineMs)
+  }, [])
+
+  /**
+   * Hold the active slot on its last segment frame while a cut waits for the
+   * standby. Releasing audio here keeps the preview from drifting during the
+   * hold (see `isVideoSeeking` in the audio preview).
+   */
+  const holdActiveSlot = useCallback(() => {
+    const video = activeElement()
+    if (video && !video.paused) video.pause()
+    setSeeking(true)
+  }, [activeElement, setSeeking])
+
+  /**
+   * Put the active slot on a segment without changing element ownership. This
+   * is both the cut fallback (standby not ready) and the resync path (a frame
+   * from outside the active segment). Returns false when the element is busy;
+   * the caller must retry instead of claiming the slot holds the segment.
+   */
+  const seekActiveToSegment = useCallback(
+    (segment: PreviewSegment, index: number, sourceMs: number, playheadMs: number): boolean => {
+      const video = activeElement()
+      if (!video) return false
+      const seconds = Math.max(0, sourceMs) / 1000
+      const onTarget = Math.abs(video.currentTime - seconds) * 1000 <= frameMs
+      if (!onTarget) {
+        if (video.seeking) return false
+        setSeeking(true)
+        video.currentTime = seconds
+      }
+      slotSegmentsRef.current[activeSlotRef.current] = index
+      video.playbackRate = effectiveRate(segment)
+      if (isPlayingRef.current && video.paused) {
+        video.play().catch(() => {
+          onPauseRef.current?.()
+        })
+      }
+      driveTo(playheadMs)
+      return true
+    },
+    [activeElement, driveTo, effectiveRate, frameMs, setSeeking],
+  )
+
+  /**
+   * Cross the cut at the end of `segment` (index `index`). Returns true when
+   * the transition is resolved; false while the preview holds the cut frame.
+   */
+  const crossCut = useCallback(
+    (index: number, segment: PreviewSegment): boolean => {
+      const nextIndex = index + 1 < segments.length ? index + 1 : -1
+      const nextSegment = nextIndex >= 0 ? segments[nextIndex]! : null
+      const standbySlot = (activeSlotRef.current === 0 ? 1 : 0) as ScreenSlot
+      const standby = standbyElement()
+      const active = activeElement()
+      const pending = pendingCutRef.current
+      const heldMs =
+        pending && pending.index === nextIndex ? performance.now() - pending.sinceMs : null
+
+      const plan = planCutTransition({
+        hasNext: nextSegment !== null,
+        contiguous: nextSegment !== null && nextSegment.startMs <= segment.endMs + 1,
+        standbyHoldsNext: nextIndex >= 0 && slotSegmentsRef.current[standbySlot] === nextIndex,
+        standbyReady: nextSegment !== null && segmentReady(standby, nextSegment),
+        activeSeekable: active !== null && !active.seeking,
+        heldMs,
+      })
+
+      switch (plan.kind) {
+        case "end": {
+          pendingCutRef.current = null
+          active?.pause()
+          slotSegmentsRef.current[activeSlotRef.current] = index
+          driveTo(segment.endMs)
+          preRollStandby(segment.endMs)
+          onPauseRef.current?.()
+          return true
+        }
+        case "gap": {
+          // The next segment starts after a gap: jump the playhead over it and
+          // let the next sync place the media.
+          pendingCutRef.current = null
+          driveTo(nextSegment!.startMs)
+          return true
+        }
+        case "swap": {
+          if (!swapToStandby(nextSegment!, nextIndex)) return false
+          pendingCutRef.current = null
+          driveTo(nextSegment!.startMs)
+          preRollStandby(nextSegment!.startMs)
+          return true
+        }
+        case "seek": {
+          pendingCutRef.current = null
+          return seekActiveToSegment(
+            nextSegment!,
+            nextIndex,
+            nextSegment!.sourceInMs,
+            nextSegment!.startMs,
+          )
+        }
+        default: {
+          // Hold the boundary frame and retry: the standby is still seeking, or
+          // the active element is busy and must not be given a second seek.
+          pendingCutRef.current =
+            pending && pending.index === nextIndex
+              ? pending
+              : { index: nextIndex, sinceMs: performance.now() }
+          if (plan.pauseActive) holdActiveSlot()
+          preRollStandby(drivenPlayheadRef.current)
+          return false
+        }
+      }
+    },
+    [
+      activeElement,
+      driveTo,
+      holdActiveSlot,
+      preRollStandby,
+      segmentReady,
+      seekActiveToSegment,
+      segments,
+      standbyElement,
+      swapToStandby,
+    ],
+  )
+
   const syncVideo = useCallback(() => {
     let video = activeElement()
     if (!video || !clock) {
@@ -264,11 +411,18 @@ export function usePlaybackClock({
     if (index < 0) {
       video.pause()
       video.style.visibility = "hidden"
-      clipIdRef.current = null
-      if (isSeekingRef.current) {
+      if (isSeekingRef.current && !pendingCutRef.current) {
         isSeekingRef.current = false
         setIsSeeking(false)
       }
+      preRollStandby(playheadRef.current)
+      return
+    }
+
+    if (pendingCutRef.current) {
+      // A cut is waiting for its standby. Keep holding the boundary frame and
+      // keep the standby primed instead of seeking the playing element.
+      if (!video.paused) video.pause()
       preRollStandby(playheadRef.current)
       return
     }
@@ -277,15 +431,13 @@ export function usePlaybackClock({
     const slot = activeSlotRef.current
     if (slotSegmentsRef.current[slot] !== index) {
       if (!swapToStandby(segment, index)) {
-        slotSegmentsRef.current[slot] = index
-        const sourceMs = Math.max(
-          segment.sourceInMs,
-          Math.min(
-            segment.sourceOutMs,
-            segment.sourceInMs + (playheadRef.current - segment.startMs) * segment.speed,
-          ),
+        const resynced = seekActiveToSegment(
+          segment,
+          index,
+          previewSegmentSourceMs(segment, playheadRef.current),
+          playheadRef.current,
         )
-        seekElement(video, sourceMs)
+        if (!resynced) return
       }
       // A swap changes which element is active: every write below must target
       // the slot that is now on screen.
@@ -293,20 +445,11 @@ export function usePlaybackClock({
     }
 
     video.style.visibility = "visible"
-    const playbackRateNow = Math.max(0.25, Math.min(4, playbackRateRef.current * segment.speed))
-    video.playbackRate = playbackRateNow
-    clipIdRef.current = segment.clipIds[0] ?? null
+    video.playbackRate = effectiveRate(segment)
 
-    const sourceMs = Math.max(
-      segment.sourceInMs,
-      Math.min(
-        segment.sourceOutMs,
-        segment.sourceInMs + (playheadRef.current - segment.startMs) * segment.speed,
-      ),
-    )
+    const sourceMs = previewSegmentSourceMs(segment, playheadRef.current)
     const sourceSeconds = sourceMs / 1000
-    const previousDrivenMs = drivenPlayheadRef.current
-    const playheadJumpMs = Math.abs(playheadRef.current - previousDrivenMs)
+    const playheadJumpMs = Math.abs(playheadRef.current - drivenPlayheadRef.current)
 
     const shouldSeekVideo =
       !isPlayingRef.current ||
@@ -317,8 +460,7 @@ export function usePlaybackClock({
       const driftSeconds = Math.abs(video.currentTime - sourceSeconds)
       if (driftSeconds > (clock.frameMs * 0.5) / 1000) {
         if (!isSeekingRef.current && !video.seeking) {
-          isSeekingRef.current = true
-          setIsSeeking(true)
+          setSeeking(true)
           video.currentTime = sourceSeconds
         }
       }
@@ -327,21 +469,31 @@ export function usePlaybackClock({
       setIsSeeking(false)
     }
 
-    drivenPlayheadRef.current = playheadRef.current
     setIsReady(true)
     preRollStandby(playheadRef.current)
-  }, [activeElement, clock, preRollStandby, segments, seekElement, swapToStandby])
+  }, [
+    activeElement,
+    clock,
+    effectiveRate,
+    preRollStandby,
+    segments,
+    seekActiveToSegment,
+    setSeeking,
+    swapToStandby,
+  ])
 
   // Reset the slots when the media source or segment list changes
   // (proxy/original switch, timeline edit).
   useEffect(() => {
     slotSegmentsRef.current = [-1, -1]
+    pendingCutRef.current = null
     activeSlotRef.current = 0
     setActiveSlot(0)
   }, [mediaUrl, segments])
 
   // Sync the media element when playback toggles or the source changes.
   useEffect(() => {
+    if (!isPlaying) pendingCutRef.current = null
     syncVideo()
     const video = activeElement()
     if (!video) return
@@ -364,7 +516,9 @@ export function usePlaybackClock({
       const ms = getPlayheadSnapshot()
       playheadRef.current = ms
       if (Math.abs(drivenPlayheadRef.current - ms) > (clock?.frameMs ?? 33) * 2) {
+        // A user seek (or an edit) supersedes any cut that is still waiting.
         drivenPlayheadRef.current = ms
+        pendingCutRef.current = null
       }
       syncVideo()
       const video = activeElement()
@@ -378,109 +532,82 @@ export function usePlaybackClock({
 
   const handleFrame = useCallback(
     (sourceMs: number) => {
-      if (!clock || !timeline) return
+      if (!clock || !timeline || segments.length === 0) return
       const video = activeElement()
-      if (video && !video.seeking) {
-        if (isSeekingRef.current) {
-          isSeekingRef.current = false
-          setIsSeeking(false)
-        }
-      }
-      if (video?.seeking) return
+      if (!video) return
 
-      const mapped = clock.mapSourceToTimeline(sourceMs, {
-        preferClipId: clipIdRef.current ?? undefined,
+      // A pending cut owns the transition; the retry loop resumes the preview.
+      if (pendingCutRef.current) return
+      if (video.seeking) return
+      if (isSeekingRef.current) {
+        isSeekingRef.current = false
+        setIsSeeking(false)
+      }
+
+      const index = previewSegmentAt(segments, drivenPlayheadRef.current)
+      if (index < 0) return // the playhead is in a gap: the gap clock owns it
+
+      const segment = segments[index]!
+      const toleranceMs = clock.frameMs
+      const tick = planSegmentFrameTick({
+        segment,
+        playheadMs: drivenPlayheadRef.current,
+        sourceMs,
+        toleranceMs,
       })
 
-      if (mapped) {
-        const rounded = clock.roundToFrame(mapped.timelineMs)
-        clock.reportDrift(drivenPlayheadRef.current, rounded)
-        if (rounded !== drivenPlayheadRef.current) {
-          onSeekRef.current(rounded)
-          drivenPlayheadRef.current = rounded
-        }
-        clipIdRef.current = mapped.clipId
-
-        const index = previewSegmentAt(segments, drivenPlayheadRef.current)
-        const segment = index >= 0 ? segments[index]! : null
-        if (segment) {
-          const isNearSegmentEnd =
-            sourceMs >= segment.sourceOutMs - clock.frameMs ||
-            drivenPlayheadRef.current >= segment.endMs - clock.frameMs
-          if (isNearSegmentEnd) {
-            const nextIndex = nextPreviewSegment(segments, drivenPlayheadRef.current)
-            const nextSegment = nextIndex >= 0 ? segments[nextIndex]! : null
-            if (!nextSegment) {
-              onPauseRef.current?.()
-              onSeekRef.current(segment.endMs)
-              drivenPlayheadRef.current = segment.endMs
-              return
-            }
-            if (nextSegment.startMs <= segment.endMs + 1) {
-              if (swapToStandby(nextSegment, nextIndex)) {
-                drivenPlayheadRef.current = nextSegment.startMs
-                // The frame clock now reads the new slot: anchor its clip so
-                // the first mapped frame cannot drive the playhead backwards.
-                clipIdRef.current = nextSegment.clipIds[0] ?? null
-                // The old active slot is now the standby: refill it with the
-                // segment after the one we just switched to.
-                preRollStandby(nextSegment.startMs)
-                onSeekRef.current(nextSegment.startMs)
-                return
-              }
-              // Standby not ready: fall back to today's seek.
-              const active = activeElement()
-              const nextSourceSeconds = nextSegment.sourceInMs / 1000
-              if (
-                active &&
-                Math.abs(active.currentTime - nextSourceSeconds) > (clock.frameMs * 0.5) / 1000
-              ) {
-                if (!isSeekingRef.current && !active.seeking) {
-                  isSeekingRef.current = true
-                  setIsSeeking(true)
-                  active.currentTime = nextSourceSeconds
-                }
-              }
-              slotSegmentsRef.current[activeSlotRef.current] = nextIndex
-              clipIdRef.current = nextSegment.clipIds[0] ?? null
-              drivenPlayheadRef.current = nextSegment.startMs
-              onSeekRef.current(nextSegment.startMs)
-              return
-            }
-            // A gap follows: let the gap clock advance to the next segment.
-            clipIdRef.current = null
-            drivenPlayheadRef.current = nextSegment.startMs
-            onSeekRef.current(nextSegment.startMs)
-            return
-          }
-        }
-      } else {
-        const index = previewSegmentAt(segments, drivenPlayheadRef.current)
-        const current = index >= 0 ? segments[index]! : null
-        if (current && sourceMs < current.sourceInMs) {
-          drivenPlayheadRef.current = current.startMs
-          onSeekRef.current(current.startMs)
-          clipIdRef.current = current.clipIds[0] ?? null
-          return
-        }
-        const nextIndex = nextPreviewSegment(
-          segments,
-          current ? current.startMs : drivenPlayheadRef.current,
-        )
-        const nextSegment = nextIndex >= 0 ? segments[nextIndex]! : null
-        if (!nextSegment) {
-          const endMs = current?.endMs ?? drivenPlayheadRef.current
-          onPauseRef.current?.()
-          onSeekRef.current(endMs)
-          drivenPlayheadRef.current = endMs
-          return
-        }
-        clipIdRef.current = null
-        drivenPlayheadRef.current = nextSegment.startMs
-        onSeekRef.current(nextSegment.startMs)
+      if (tick.kind === "past-end") {
+        crossCut(index, segment)
+        return
       }
+
+      if (tick.kind === "before-start") {
+        // The element is showing media from before this segment (a frame from
+        // the retiring slot, or a seek that has not landed yet).
+        const previous = index > 0 ? segments[index - 1]! : null
+        const justEntered = drivenPlayheadRef.current - segment.startMs <= toleranceMs * 2
+        const frameIsFromPrevious =
+          previous !== null &&
+          classifyPreviewFrame(previous, sourceMs, toleranceMs) !== "before-start"
+        if (previous && justEntered && frameIsFromPrevious) {
+          // The frame belongs to the segment we just left: cross that cut
+          // rather than rewinding the playhead.
+          crossCut(index - 1, previous)
+          return
+        }
+        seekActiveToSegment(
+          segment,
+          index,
+          previewSegmentSourceMs(segment, drivenPlayheadRef.current),
+          drivenPlayheadRef.current,
+        )
+        return
+      }
+
+      // Frame rounding must never push the playhead outside the segment it was
+      // mapped from: a millisecond below the start would read as the previous
+      // segment (and re-trigger its cut).
+      const rounded = Math.max(
+        segment.startMs,
+        Math.min(segment.endMs, clock.roundToFrame(tick.timelineMs)),
+      )
+      clock.reportDrift(drivenPlayheadRef.current, rounded)
+      if (rounded > drivenPlayheadRef.current) {
+        driveTo(rounded)
+      }
+      setIsReady(true)
+      preRollStandby(drivenPlayheadRef.current)
     },
-    [activeElement, clock, preRollStandby, segments, swapToStandby, timeline],
+    [
+      activeElement,
+      clock,
+      crossCut,
+      driveTo,
+      preRollStandby,
+      seekActiveToSegment,
+      segments,
+      timeline,
+    ],
   )
 
   useEffect(() => {
@@ -551,7 +678,8 @@ export function usePlaybackClock({
     }
   }, [activeElement, activeSlot, clock, handleFrame, isPlaying, mediaUrl])
 
-  // Animation-frame clock for gaps where the screen video has no active clip.
+  // Animation-frame clock for gaps, and the retry loop for a cut that is
+  // holding its last frame until the standby can take over.
   useEffect(() => {
     if (!isPlaying || !clock) return
 
@@ -560,12 +688,40 @@ export function usePlaybackClock({
       if (!isPlayingRef.current || !clock) return
       const elapsed = now - lastTime
       lastTime = now
-      const position = clock.mapTimelineToSource(drivenPlayheadRef.current, playbackRateRef.current)
-      if (!position) {
-        const next = clock.advanceFrame(drivenPlayheadRef.current, elapsed, playbackRateRef.current)
-        if (next !== drivenPlayheadRef.current) {
-          onSeekRef.current(next)
-          drivenPlayheadRef.current = next
+      const pending = pendingCutRef.current
+      if (pending) {
+        const previousIndex = pending.index - 1
+        const previous = previousIndex >= 0 ? segments[previousIndex] : null
+        if (!previous) {
+          pendingCutRef.current = null
+        } else {
+          crossCut(previousIndex, previous)
+        }
+      } else {
+        const position = clock.mapTimelineToSource(
+          drivenPlayheadRef.current,
+          playbackRateRef.current,
+        )
+        if (!position) {
+          const next = clock.advanceFrame(
+            drivenPlayheadRef.current,
+            elapsed,
+            playbackRateRef.current,
+          )
+          if (next !== drivenPlayheadRef.current) {
+            driveTo(next)
+          }
+        } else {
+          // Watchdog: the frame clock only advances while the active element is
+          // presenting frames. If playback was meant to run and the element is
+          // sitting idle (a rejected play(), an occluded window), restart it
+          // instead of leaving the playhead parked mid-segment.
+          const video = activeElement()
+          if (video && video.paused && !video.seeking && !isSeekingRef.current) {
+            video.play().catch(() => {
+              onPauseRef.current?.()
+            })
+          }
         }
       }
       gapRafRef.current = requestAnimationFrame(step)
@@ -578,7 +734,7 @@ export function usePlaybackClock({
       }
       gapRafRef.current = null
     }
-  }, [clock, isPlaying])
+  }, [activeElement, clock, crossCut, driveTo, isPlaying, segments])
 
   return { isReady, isSeeking, activeSlot, screenSlots, videoProps }
 }

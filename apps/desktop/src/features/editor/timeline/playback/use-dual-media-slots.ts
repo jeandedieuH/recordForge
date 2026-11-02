@@ -4,10 +4,12 @@ import {
   computePreviewMediaSync,
   nextPreviewSegment,
   previewSegmentAt,
+  previewSegmentSourceMs,
   type PreviewSegment,
 } from "@recordforge/editor-core"
 
 export type MediaSlot = 0 | 1
+export { previewSegmentSourceMs }
 
 export interface DualSlotPlanInput {
   segments: PreviewSegment[]
@@ -69,12 +71,6 @@ export function planDualSlotTick(input: DualSlotPlanInput): DualSlotPlan {
     targetSlot: standbyTakesOver ? standbySlot : input.activeSlot,
     pauseAll: false,
   }
-}
-
-/** Source milliseconds a segment maps the playhead to. */
-export function previewSegmentSourceMs(segment: PreviewSegment, playheadMs: number): number {
-  const sourceMs = segment.sourceInMs + (playheadMs - segment.startMs) * segment.speed
-  return Math.max(segment.sourceInMs, Math.min(segment.sourceOutMs, sourceMs))
 }
 
 function segmentSignature(segment: PreviewSegment): string {

@@ -2,8 +2,11 @@ import { describe, expect, it } from "vitest"
 import type { TimelineClip } from "@recordforge/domain"
 import {
   buildPreviewSegments,
+  classifyPreviewFrame,
   nextPreviewSegment,
   previewSegmentAt,
+  previewSegmentSourceMs,
+  previewSegmentTimelineMs,
   type PreviewSegment,
 } from "./preview-segments"
 
@@ -136,5 +139,43 @@ describe("preview segment lookup", () => {
     expect(nextPreviewSegment(segments, 1_500)).toBe(1)
     expect(nextPreviewSegment(segments, 2_500)).toBe(-1)
     expect(nextPreviewSegment(segments, 5_000)).toBe(-1)
+  })
+})
+
+describe("preview segment frame math", () => {
+  const segment: PreviewSegment = {
+    startMs: 2_000,
+    endMs: 4_000,
+    sourceInMs: 10_000,
+    sourceOutMs: 12_000,
+    speed: 1,
+    sourceKey: "screen",
+    clipIds: ["a"],
+  }
+
+  it("maps the playhead to source time and clamps at both edges", () => {
+    expect(previewSegmentSourceMs(segment, 2_500)).toBe(10_500)
+    expect(previewSegmentSourceMs(segment, 1_000)).toBe(10_000)
+    expect(previewSegmentSourceMs(segment, 9_000)).toBe(12_000)
+  })
+
+  it("maps source time back to the timeline and clamps at both edges", () => {
+    expect(previewSegmentTimelineMs(segment, 10_500)).toBe(2_500)
+    expect(previewSegmentTimelineMs(segment, 0)).toBe(2_000)
+    expect(previewSegmentTimelineMs(segment, 99_000)).toBe(4_000)
+  })
+
+  it("honors speed in both directions", () => {
+    const fast: PreviewSegment = { ...segment, speed: 2, sourceOutMs: 14_000 }
+    expect(previewSegmentSourceMs(fast, 2_500)).toBe(11_000)
+    expect(previewSegmentTimelineMs(fast, 11_000)).toBe(2_500)
+  })
+
+  it("classifies frames around the segment with one-frame tolerance", () => {
+    expect(classifyPreviewFrame(segment, 9_000, 16)).toBe("before-start")
+    expect(classifyPreviewFrame(segment, 10_005, 16)).toBe("inside")
+    expect(classifyPreviewFrame(segment, 11_000, 16)).toBe("inside")
+    expect(classifyPreviewFrame(segment, 11_995, 16)).toBe("past-end")
+    expect(classifyPreviewFrame(segment, 12_400, 16)).toBe("past-end")
   })
 })

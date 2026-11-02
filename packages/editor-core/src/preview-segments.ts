@@ -65,6 +65,46 @@ export function buildPreviewSegments(
   return segments
 }
 
+/**
+ * Source milliseconds a segment maps `timelineMs` to, clamped to its source
+ * range. This is the only correct source position for a preview element while
+ * the playhead is inside the segment.
+ */
+export function previewSegmentSourceMs(segment: PreviewSegment, timelineMs: number): number {
+  const sourceMs = segment.sourceInMs + (timelineMs - segment.startMs) * segment.speed
+  return Math.max(segment.sourceInMs, Math.min(segment.sourceOutMs, sourceMs))
+}
+
+/**
+ * Timeline milliseconds a segment maps `sourceMs` to, clamped to its output
+ * window. Unlike a whole-timeline source lookup this cannot jump to another
+ * clip that happens to contain the same source time.
+ */
+export function previewSegmentTimelineMs(segment: PreviewSegment, sourceMs: number): number {
+  const speed = segment.speed > 0 ? segment.speed : 1
+  const timelineMs = segment.startMs + (sourceMs - segment.sourceInMs) / speed
+  return Math.max(segment.startMs, Math.min(segment.endMs, timelineMs))
+}
+
+/** Where a media frame sits relative to a preview segment. */
+export type PreviewFramePosition = "before-start" | "inside" | "past-end"
+
+/**
+ * Classify a presented frame against a segment. Frames within `toleranceMs` of
+ * the segment's edges count as inside so sub-frame rounding never forces a
+ * corrective seek.
+ */
+export function classifyPreviewFrame(
+  segment: PreviewSegment,
+  sourceMs: number,
+  toleranceMs = 0,
+): PreviewFramePosition {
+  const tolerance = Math.max(0, toleranceMs)
+  if (sourceMs < segment.sourceInMs - tolerance) return "before-start"
+  if (sourceMs >= segment.sourceOutMs - tolerance) return "past-end"
+  return "inside"
+}
+
 /** Index of the segment covering `timelineMs`, or -1 in a gap. */
 export function previewSegmentAt(segments: PreviewSegment[], timelineMs: number): number {
   let low = 0
