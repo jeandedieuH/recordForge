@@ -178,6 +178,24 @@ pub struct CursorTopology {
     pub dpi_y: f64,
 }
 
+/// A captured cursor shape plus whether the underlying bitmap is actually
+/// visible. An all-transparent system cursor means the application paints its
+/// own pointer (common in CAD tools), so the overlay must not draw a second one.
+#[derive(Debug, Clone)]
+struct CapturedCursorShape {
+    info: CursorShapeInfo,
+    visible: bool,
+}
+
+impl CapturedCursorShape {
+    fn visible(info: CursorShapeInfo) -> Self {
+        Self {
+            info,
+            visible: true,
+        }
+    }
+}
+
 /// Cursor shape metadata. The `shape_id` is a stable-ish hash derived from the
 /// current system cursor icon; `hotspot` is the click point within the icon.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1241,13 +1259,19 @@ impl CursorTrackerV2 {
                 }
 
                 let t_ms = elapsed_ms(timeline_origin, time_offset_ms);
-                let (raw_x, raw_y, visible) = capture_cursor_position();
+                let (raw_x, raw_y, mut visible) = capture_cursor_position();
 
                 let (shape_id, shape_changed) = if mode == CursorCaptureMode::NoShapes {
                     ("default".into(), false)
                 } else {
                     match capture_cursor_shape(&mut shape_registry, &metadata.shapes) {
-                        Some(shape) => {
+                        Some(captured) => {
+                            let shape = captured.info;
+                            // A blank OS cursor means the app paints its own
+                            // pointer, so the recording must not draw a custom one.
+                            if !captured.visible {
+                                visible = false;
+                            }
                             let changed = shape.shape_id != previous_shape_id;
                             if changed {
                                 if !shape_registry.contains_key(&shape.shape_id) {
@@ -1610,17 +1634,25 @@ fn capture_button_state() -> CursorButtonState {
     CursorButtonState::default()
 }
 
+// Custom cursors are expensive to inspect (GDI DIB + `DrawIconEx`), so their
+// shape and visibility are cached per handle for the capture thread.
+#[cfg(target_os = "windows")]
+thread_local! {
+    static CUSTOM_CURSOR_CACHE: std::cell::RefCell<
+        std::collections::HashMap<usize, CapturedCursorShape>,
+    > = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
 /// Capture the current cursor shape and hotspot.
 ///
-/// On Windows this uses `GetCursorInfo` plus `GetIconInfo`. The shape ID is a
-/// deterministic string built from the icon dimensions and hotspot. A full
-/// bitmap hash is deferred to later phases; this is enough to detect shape
-/// transitions and provide the correct hotspot in the evaluator.
+/// On Windows this uses `GetCursorInfo` plus `GetIconInfo`, and inspects the
+/// cursor bitmap so custom (unnamed) cursors are classified by their actual
+/// artwork rather than size alone.
 #[cfg(target_os = "windows")]
 fn capture_cursor_shape(
     cache: &mut std::collections::HashMap<String, CursorShapeInfo>,
     _known: &[CursorShapeInfo],
-) -> Option<CursorShapeInfo> {
+) -> Option<CapturedCursorShape> {
     use windows::Win32::Graphics::Gdi::{GetObjectW, BITMAP};
     use windows::Win32::UI::WindowsAndMessaging::{
         GetCursorInfo, GetIconInfo, CURSORINFO, ICONINFO,
@@ -1636,14 +1668,17 @@ fn capture_cursor_shape(
     let handle = hcursor.0 as usize;
 
     // Standard system cursors are long-lived shared handles, so their geometry
-    // is cached by handle. Custom cursors are re-queried every sample because
-    // Windows recycles handles.
+    // is cached by handle.
     let system_kind = system_cursor_kind_for_handle(handle);
-    let cache_key = format!("win-handle-{handle:x}");
     if system_kind.is_some() {
+        let cache_key = format!("win-handle-{handle:x}");
         if let Some(cached) = cache.get(&cache_key) {
-            return Some(cached.clone());
+            return Some(CapturedCursorShape::visible(cached.clone()));
         }
+    } else if let Some(cached) =
+        CUSTOM_CURSOR_CACHE.with(|cache| cache.borrow().get(&handle).cloned())
+    {
+        return Some(cached);
     }
 
     let mut icon_info = ICONINFO::default();
@@ -1691,33 +1726,152 @@ fn capture_cursor_shape(
     let hotspot_x = icon_info.xHotspot as i32;
     let hotspot_y = icon_info.yHotspot as i32;
 
-    let kind = match system_kind {
-        Some(kind) => kind.to_string(),
-        None => classify_cursor_kind_by_geometry(width, height, hotspot_x, hotspot_y),
+    // Geometry alone cannot tell a pickbox/crosshair from a wait cursor, and an
+    // all-transparent (blank) cursor means the application paints its own
+    // pointer — in both cases the bitmap is the only reliable signal.
+    let (kind, visible) = match system_kind {
+        Some(kind) => (kind.to_string(), true),
+        None => {
+            let features = cursor_icon_features(hcursor, width, height);
+            let visible = features
+                .as_ref()
+                .is_none_or(|features| features.ink_ratio > 0.0);
+            let kind = features
+                .as_ref()
+                .and_then(classify_cursor_kind_from_features)
+                .unwrap_or_else(|| {
+                    classify_cursor_kind_by_geometry(width, height, hotspot_x, hotspot_y)
+                });
+            (kind, visible)
+        }
     };
 
     // Use the real dimensions and hotspot in the shape ID so distinct cursor
     // silhouettes are tracked separately.
-    let shape = CursorShapeInfo {
-        shape_id: format!("{width}x{height}-{hotspot_x}-{hotspot_y}-{handle}"),
-        hotspot_x,
-        hotspot_y,
-        width,
-        height,
-        kind,
+    let shape = CapturedCursorShape {
+        info: CursorShapeInfo {
+            shape_id: format!("{width}x{height}-{hotspot_x}-{hotspot_y}-{handle}"),
+            hotspot_x,
+            hotspot_y,
+            width,
+            height,
+            kind,
+        },
+        visible,
     };
+
     if system_kind.is_some() {
-        cache.insert(cache_key, shape.clone());
+        cache.insert(format!("win-handle-{handle:x}"), shape.info.clone());
+    } else {
+        CUSTOM_CURSOR_CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            // Apps that create a cursor per frame would otherwise grow this
+            // without bound; 256 distinct handles is far beyond normal use.
+            if cache.len() >= 256 {
+                cache.clear();
+            }
+            cache.insert(handle, shape.clone());
+        });
     }
     Some(shape)
+}
+
+/// Composite a Windows cursor into a 32-bit top-down DIB and derive its ink
+/// features. Handles colour, monochrome and masked cursors through `DrawIconEx`.
+#[cfg(target_os = "windows")]
+fn cursor_icon_features(
+    hcursor: windows::Win32::UI::WindowsAndMessaging::HCURSOR,
+    width: u32,
+    height: u32,
+) -> Option<CursorShapeFeatures> {
+    use windows::Win32::Graphics::Gdi::{
+        CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, SelectObject, BITMAPINFO,
+        BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HGDIOBJ,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{DrawIconEx, DI_NORMAL, HICON};
+
+    // Cursor bitmaps are small; refuse anything implausible to bound the buffer.
+    if width == 0 || height == 0 || width > 256 || height > 256 {
+        return None;
+    }
+    let (width_i32, height_i32) = (width as i32, height as i32);
+    let bitmap_info = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: width_i32,
+            // Negative height requests a top-down DIB.
+            biHeight: -height_i32,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let memory_dc = unsafe { CreateCompatibleDC(None) };
+    if memory_dc.is_invalid() {
+        return None;
+    }
+    let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
+    let dib = unsafe {
+        CreateDIBSection(
+            Some(memory_dc),
+            &bitmap_info,
+            DIB_RGB_COLORS,
+            &mut bits,
+            None,
+            0,
+        )
+    };
+    let Ok(dib) = dib else {
+        unsafe {
+            let _ = DeleteDC(memory_dc);
+        }
+        return None;
+    };
+    let previous = unsafe { SelectObject(memory_dc, HGDIOBJ(dib.0)) };
+
+    let drawn = unsafe {
+        DrawIconEx(
+            memory_dc,
+            0,
+            0,
+            HICON(hcursor.0),
+            width_i32,
+            height_i32,
+            0,
+            None,
+            DI_NORMAL,
+        )
+    };
+
+    let features = if drawn.is_ok() && !bits.is_null() {
+        let len = (width as usize)
+            .saturating_mul(height as usize)
+            .saturating_mul(4);
+        // SAFETY: `CreateDIBSection` returned a buffer of `width * height * 4`
+        // bytes and it stays alive until `DeleteObject` below.
+        let pixels = unsafe { std::slice::from_raw_parts(bits as *const u8, len) };
+        cursor_shape_features(pixels, width, height, width as usize * 4)
+    } else {
+        None
+    };
+
+    unsafe {
+        let _ = SelectObject(memory_dc, previous);
+        let _ = DeleteObject(HGDIOBJ(dib.0));
+        let _ = DeleteDC(memory_dc);
+    }
+    features
 }
 
 #[cfg(target_os = "macos")]
 fn capture_cursor_shape(
     _registry: &mut std::collections::HashMap<String, CursorShapeInfo>,
     _known: &[CursorShapeInfo],
-) -> Option<CursorShapeInfo> {
-    macos_capture_cursor_shape()
+) -> Option<CapturedCursorShape> {
+    macos_capture_cursor_shape().map(CapturedCursorShape::visible)
 }
 
 #[cfg(target_os = "macos")]
@@ -1785,14 +1939,6 @@ fn macos_capture_cursor_shape() -> Option<CursorShapeInfo> {
             contextual_menu: usize,
             drag_link: usize,
             drag_copy: usize,
-            column_resize: usize,
-            row_resize: usize,
-            zoom_in: usize,
-            zoom_out: usize,
-            help: usize,
-            move_cursor: usize,
-            cell: usize,
-            busy_clickable: usize,
         }
 
         static POINTERS: OnceLock<MacosCursorPointers> = OnceLock::new();
@@ -1836,17 +1982,11 @@ fn macos_capture_cursor_shape() -> Option<CursorShapeInfo> {
                 contextual_menu: get_ptr_if_responds(c"contextualMenuCursor"),
                 drag_link: get_ptr_if_responds(c"dragLinkCursor"),
                 drag_copy: get_ptr_if_responds(c"dragCopyCursor"),
-                // macOS 15 public selectors, plus private system cursors that
-                // have no public API. All are guarded: an unknown selector
-                // yields 0, which never matches a live cursor address.
-                column_resize: get_ptr_if_responds(c"columnResizeCursor"),
-                row_resize: get_ptr_if_responds(c"rowResizeCursor"),
-                zoom_in: get_ptr_if_responds(c"zoomInCursor"),
-                zoom_out: get_ptr_if_responds(c"zoomOutCursor"),
-                help: get_ptr_if_responds(c"_helpCursor"),
-                move_cursor: get_ptr_if_responds(c"_moveCursor"),
-                cell: get_ptr_if_responds(c"_cellCursor"),
-                busy_clickable: get_ptr_if_responds(c"busyButClickableCursor"),
+                // Only documented NSCursor class methods are probed here.
+                // Undocumented/private selectors (e.g. `_helpCursor`,
+                // `busyButClickableCursor`) can exist yet raise an
+                // NSException when invoked — Rust cannot catch foreign
+                // exceptions, so one bad probe aborts the whole process.
             }
         });
 
@@ -1883,22 +2023,6 @@ fn macos_capture_cursor_shape() -> Option<CursorShapeInfo> {
             "copy"
         } else if cursor_addr == pointers.contextual_menu {
             "context-menu"
-        } else if cursor_addr == pointers.column_resize {
-            "col-resize"
-        } else if cursor_addr == pointers.row_resize {
-            "row-resize"
-        } else if cursor_addr == pointers.zoom_in {
-            "zoom-in"
-        } else if cursor_addr == pointers.zoom_out {
-            "zoom-out"
-        } else if cursor_addr == pointers.help {
-            "help"
-        } else if cursor_addr == pointers.move_cursor {
-            "move"
-        } else if cursor_addr == pointers.cell {
-            "cell"
-        } else if cursor_addr == pointers.busy_clickable {
-            "progress"
         } else if cursor_addr == pointers.operation_not_allowed
             || cursor_addr == pointers.disappearing_item
         {
@@ -1960,12 +2084,12 @@ fn macos_capture_cursor_shape() -> Option<CursorShapeInfo> {
 fn capture_cursor_shape(
     _registry: &mut std::collections::HashMap<String, CursorShapeInfo>,
     _known: &[CursorShapeInfo],
-) -> Option<CursorShapeInfo> {
+) -> Option<CapturedCursorShape> {
     linux_capture_cursor_shape()
 }
 
 #[cfg(target_os = "linux")]
-fn linux_capture_cursor_shape() -> Option<CursorShapeInfo> {
+fn linux_capture_cursor_shape() -> Option<CapturedCursorShape> {
     // 1. Check active PipeWire stream metadata first (Wayland portal desktop sharing)
     if let Some(snapshot) = get_pipewire_cursor_metadata() {
         if snapshot.active
@@ -1999,19 +2123,29 @@ fn linux_capture_cursor_shape() -> Option<CursorShapeInfo> {
                 format!("pipewire-{kind}-{width}x{height}-{hx}-{hy}")
             };
 
-            return Some(CursorShapeInfo {
-                shape_id,
-                hotspot_x: hx,
-                hotspot_y: hy,
-                width,
-                height,
-                kind,
+            // A fully transparent bitmap means the compositor/app paints its own
+            // pointer, so the overlay must not add a second one.
+            let visible = snapshot
+                .shape_features
+                .as_ref()
+                .is_none_or(|features| features.ink_ratio > 0.0);
+
+            return Some(CapturedCursorShape {
+                info: CursorShapeInfo {
+                    shape_id,
+                    hotspot_x: hx,
+                    hotspot_y: hy,
+                    width,
+                    height,
+                    kind,
+                },
+                visible,
             });
         }
     }
 
     // 2. Fall back to X11 XFixes query
-    linux_capture_x11_cursor_shape()
+    linux_capture_x11_cursor_shape().map(CapturedCursorShape::visible)
 }
 
 /// Shared dlopen handles for the X11+XFixes queries used by both the cursor
@@ -2180,7 +2314,7 @@ fn linux_capture_x11_cursor_shape() -> Option<CursorShapeInfo> {
 fn capture_cursor_shape(
     _registry: &mut std::collections::HashMap<String, CursorShapeInfo>,
     _known: &[CursorShapeInfo],
-) -> Option<CursorShapeInfo> {
+) -> Option<CapturedCursorShape> {
     None
 }
 
@@ -2268,15 +2402,12 @@ fn classify_cursor_kind_by_geometry(
         return "resize-vertical".into();
     }
 
-    // Centered hotspot. A square, centred custom cursor is genuinely ambiguous
-    // (move / crosshair / wait / resize / unavailable), so prefer the neutral
-    // pointer instead of guessing a crosshair; small squares are typically the
-    // wait/hourglass glyph.
+    // Centred hotspot: in practice this is a CAD/precision crosshair or a
+    // pickbox (AutoCAD, Revit, …). Standard wait/resize/move cursors arrive via
+    // the OS cursor table or the cursor's name, so a centred custom cursor is
+    // far more likely to be a crosshair than an hourglass.
     if distance_from_center < 4.0 {
-        if size <= 20 {
-            return "wait".into();
-        }
-        return "arrow".into();
+        return "crosshair".into();
     }
 
     // Hotspot in the upper-left quadrant usually indicates an arrow or hand.
@@ -2455,7 +2586,7 @@ pub(crate) fn cursor_shape_features(
 /// The rules are deliberately conservative: a wrong glyph is worse than the
 /// default pointer, especially on Wayland where every cursor takes this path.
 /// Edge/corner/centre values are relative to the ink bounding box.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn classify_cursor_kind_from_features(features: &CursorShapeFeatures) -> Option<String> {
     if features.ink_ratio <= 0.0 {
         return None;
@@ -2470,6 +2601,13 @@ fn classify_cursor_kind_from_features(features: &CursorShapeFeatures) -> Option<
     let diagonal_1 = (nw + se) * 0.5;
     let diagonal_2 = (ne + sw) * 0.5;
     let all_corners = (nw + ne + sw + se) * 0.25;
+
+    // A solid square/rect is a pickbox or selection box (CAD tools), not a
+    // spinner; check it before the generic "dense glyph" rule.
+    let solid_rect = features.center > 0.9 && features.edge.iter().all(|edge| *edge > 0.9);
+    if solid_rect {
+        return Some("crosshair".into());
+    }
 
     // Filled glyphs (busy disc, hourglass body) cover most of the frame.
     if features.ink_ratio > 0.45 {
@@ -3000,10 +3138,13 @@ mod tests {
             classify_cursor_kind_by_geometry(20, 32, 10, 16),
             "resize-vertical"
         );
-        // A square, centred custom cursor is ambiguous; the neutral pointer is
-        // preferred over guessing a crosshair.
-        assert_eq!(classify_cursor_kind_by_geometry(32, 32, 16, 16), "arrow");
-        assert_eq!(classify_cursor_kind_by_geometry(18, 18, 9, 9), "wait");
+        // Centred custom cursors are treated as precision crosshairs/pickboxes
+        // (CAD apps); standard wait cursors are identified by handle/name.
+        assert_eq!(
+            classify_cursor_kind_by_geometry(32, 32, 16, 16),
+            "crosshair"
+        );
+        assert_eq!(classify_cursor_kind_by_geometry(18, 18, 9, 9), "crosshair");
         assert_eq!(classify_cursor_kind_by_geometry(32, 32, 10, 2), "hand");
         assert_eq!(classify_cursor_kind_by_geometry(32, 32, 1, 1), "arrow");
         assert_eq!(
@@ -3099,6 +3240,23 @@ mod tests {
         let pixels = ink_bitmap(24, 24, |x, y| y <= x + 2 && x <= 12 && y <= 18);
         let features = cursor_shape_features(&pixels, 24, 24, 24 * 4).expect("features");
         assert_eq!(classify_cursor_kind_from_features(&features), None);
+    }
+
+    #[test]
+    fn bitmap_features_identify_a_solid_pickbox() {
+        // A filled square fills its bounds on every edge and the centre.
+        let solid = CursorShapeFeatures {
+            ink_ratio: 0.8,
+            bbox: [0.1, 0.1, 0.8, 0.8],
+            centroid: [0.5, 0.5],
+            edge: [1.0, 1.0, 1.0, 1.0],
+            corner: [1.0, 1.0, 1.0, 1.0],
+            center: 1.0,
+        };
+        assert_eq!(
+            classify_cursor_kind_from_features(&solid).as_deref(),
+            Some("crosshair")
+        );
     }
 
     #[test]
@@ -3328,5 +3486,54 @@ mod tests {
             3 * EVENT_RECORD_SIZE as u64,
             "checkpoint growth must be proportional to new events only"
         );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_cursor_bitmap_yields_ink_features() {
+        use windows::Win32::UI::WindowsAndMessaging::{LoadCursorW, IDC_ARROW};
+
+        let arrow = unsafe { LoadCursorW(None, IDC_ARROW) }.expect("arrow cursor");
+        let features = cursor_icon_features(arrow, 32, 32).expect("arrow bitmap features");
+        assert!(
+            features.ink_ratio > 0.0,
+            "arrow cursor must contain ink pixels"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_blank_cursor_is_detected() {
+        use windows::Win32::UI::WindowsAndMessaging::{CreateCursor, DestroyCursor};
+
+        // A fully transparent monochrome cursor (AND mask all ones, XOR all
+        // zeroes) models the blank cursor AutoCAD sets while it paints its own
+        // crosshair.
+        let width = 16usize;
+        let height = 16usize;
+        let row_bytes = width / 8;
+        let and_mask = vec![0xFFu8; row_bytes * height];
+        let xor_mask = vec![0u8; row_bytes * height];
+        let cursor = unsafe {
+            CreateCursor(
+                None,
+                0,
+                0,
+                width as i32,
+                height as i32,
+                and_mask.as_ptr().cast(),
+                xor_mask.as_ptr().cast(),
+            )
+        }
+        .expect("blank cursor");
+
+        let features =
+            cursor_icon_features(cursor, width as u32, height as u32).expect("blank features");
+        assert_eq!(features.ink_ratio, 0.0);
+        assert_eq!(classify_cursor_kind_from_features(&features), None);
+
+        unsafe {
+            let _ = DestroyCursor(cursor);
+        }
     }
 }

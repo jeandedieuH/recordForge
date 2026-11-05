@@ -66,12 +66,28 @@ pub fn resolve_cursor_shape_id(shape_id: &str, shapes: &[CursorShapeInfo]) -> St
 
     // V2 shape hashes: find the metadata for this hash and map from its kind.
     if let Some(shape) = shapes.iter().find(|s| s.shape_id == shape_id) {
-        if let Some(asset_id) = map.get(&shape.kind) {
+        if let Some(asset_id) = map.get(normalized_shape_kind(shape)) {
             return asset_id.clone();
         }
     }
 
     shape_id.to_string()
+}
+
+/// Normalize a recorded shape kind for older telemetry.
+///
+/// Recordings made before bitmap inspection classified any small, centred
+/// cursor as `wait`. In practice those are CAD pickboxes / precision
+/// crosshairs (AutoCAD, Revit, …); the real wait cursor is 32×32 and arrives
+/// through the OS cursor table.
+fn normalized_shape_kind(shape: &CursorShapeInfo) -> &str {
+    let centered = (shape.hotspot_x * 2 - shape.width as i32).abs() <= 2
+        && (shape.hotspot_y * 2 - shape.height as i32).abs() <= 2;
+    if shape.kind == "wait" && shape.width <= 20 && centered {
+        "crosshair"
+    } else {
+        &shape.kind
+    }
 }
 
 /// Resolve an asset id, falling back to the recorded-system arrow cursor.

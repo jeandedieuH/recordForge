@@ -2966,6 +2966,37 @@ mod tests {
     }
 
     #[test]
+    fn legacy_small_centred_wait_resolves_to_crosshair() {
+        use crate::assets::resolve_cursor_shape_id;
+
+        let legacy = vec![CursorShapeInfo {
+            shape_id: "15x15-7-7-1".into(),
+            hotspot_x: 7,
+            hotspot_y: 7,
+            width: 15,
+            height: 15,
+            kind: "wait".into(),
+        }];
+        assert_eq!(
+            resolve_cursor_shape_id("15x15-7-7-1", &legacy),
+            "shape-crosshair"
+        );
+
+        let standard = vec![CursorShapeInfo {
+            shape_id: "32x32-16-16-1".into(),
+            hotspot_x: 16,
+            hotspot_y: 16,
+            width: 32,
+            height: 32,
+            kind: "wait".into(),
+        }];
+        assert_eq!(
+            resolve_cursor_shape_id("32x32-16-16-1", &standard),
+            "shape-wait"
+        );
+    }
+
+    #[test]
     fn resolves_named_cursor_kinds() {
         use crate::assets::{resolve_cursor_asset_or_default, resolve_cursor_shape_id};
 

@@ -415,6 +415,36 @@ describe("cursor-core", () => {
     expect(unreachable).toEqual([])
   })
 
+  it("treats legacy small centred wait cursors as crosshairs", () => {
+    const legacy = resolveCursorAsset("15x15-7-7-1", "recorded-system", {
+      shapes: [
+        {
+          shapeId: "15x15-7-7-1",
+          hotspotX: 7,
+          hotspotY: 7,
+          width: 15,
+          height: 15,
+          kind: "wait",
+        },
+      ],
+    })
+    expect(legacy.id).toBe("shape-crosshair")
+
+    const standard = resolveCursorAsset("32x32-16-16-1", "recorded-system", {
+      shapes: [
+        {
+          shapeId: "32x32-16-16-1",
+          hotspotX: 16,
+          hotspotY: 16,
+          width: 32,
+          height: 32,
+          kind: "wait",
+        },
+      ],
+    })
+    expect(standard.id).toBe("shape-wait")
+  })
+
   it("computes the DPI cursor size factor identically to the Rust engine", () => {
     const baseTelemetry = normalizeCursorTelemetry({
       recordingId: "size-test",

@@ -698,8 +698,24 @@ interface ResolveCursorAssetOptions {
   shapes?: CursorShapeInfo[]
 }
 
+/**
+ * Normalize a recorded shape kind for older telemetry.
+ *
+ * Recordings made before bitmap inspection classified any small, centred
+ * cursor as `wait`. In practice those are CAD pickboxes / precision
+ * crosshairs (AutoCAD, Revit, …); the real wait cursor is 32×32 and arrives
+ * through the OS cursor table. Treat the legacy label as a crosshair.
+ */
+function recordedShapeKind(shape: CursorShapeInfo): string {
+  const centered =
+    Math.abs(shape.hotspotX * 2 - shape.width) <= 2 &&
+    Math.abs(shape.hotspotY * 2 - shape.height) <= 2
+  if (shape.kind === "wait" && shape.width <= 20 && centered) return "crosshair"
+  return shape.kind
+}
+
 function buildRecordedShapeAsset(shape: CursorShapeInfo): ResolvedCursorAsset | null {
-  const baseId = SHAPE_ID_TO_ASSET[shape.kind] ?? "recorded-system"
+  const baseId = SHAPE_ID_TO_ASSET[recordedShapeKind(shape)] ?? "recorded-system"
   const base = CURSOR_ASSET_MANIFEST[baseId]
   if (!base) return null
 
