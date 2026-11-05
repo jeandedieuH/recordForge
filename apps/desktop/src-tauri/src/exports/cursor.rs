@@ -561,27 +561,20 @@ impl CursorRenderer {
     }
 
     /// Resolve the effective asset id for a cursor frame, honoring the user's
-    /// shape mode preference (preset, recorded, or optimized mapping).
+    /// shape mode preference. Recorded shape ids are mapped through the shared
+    /// shape table, which also resolves V2 hash ids via `telemetry_shapes`.
     fn resolve_cursor_shape_id(&self, frame_shape_id: &str) -> String {
         if frame_shape_id.is_empty() || self.settings.shape_mode == "preset" {
             return self.settings.preset.clone();
         }
 
-        if self.settings.shape_mode == "recorded" {
-            if cursor_engine::assets::resolve_cursor_asset(frame_shape_id).is_some() {
-                return frame_shape_id.to_string();
-            }
-            return self.settings.preset.clone();
-        }
-
-        // Optimized mode: map recorded system shape ids to our canonical assets,
-        // then fall back to the preset when no mapping exists.
         let mapped =
             cursor_engine::assets::resolve_cursor_shape_id(frame_shape_id, &self.telemetry_shapes);
         if cursor_engine::assets::resolve_cursor_asset(&mapped).is_some() {
             return mapped;
         }
 
+        warn_unmapped_cursor_kind(frame_shape_id, &self.telemetry_shapes);
         self.settings.preset.clone()
     }
 
@@ -1247,6 +1240,30 @@ impl From<&crate::capture::cursor_v2::CursorTelemetryFileV2> for CursorTelemetry
                     shape_changed: event.shape_changed,
                 })
                 .collect(),
+        }
+    }
+}
+
+/// Log once per unmapped cursor kind so new OS cursors surface in diagnostics
+/// instead of silently rendering as the default arrow.
+fn warn_unmapped_cursor_kind(shape_id: &str, shapes: &[cursor_engine::CursorShapeInfo]) {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+
+    static SEEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+    let kind = shapes
+        .iter()
+        .find(|shape| shape.shape_id == shape_id)
+        .map(|shape| shape.kind.clone())
+        .unwrap_or_else(|| shape_id.to_string());
+    let seen = SEEN.get_or_init(|| Mutex::new(HashSet::new()));
+    if let Ok(mut seen) = seen.lock() {
+        if seen.insert(kind.clone()) {
+            tracing::warn!(
+                cursor_kind = %kind,
+                "unmapped cursor shape; falling back to the default pointer"
+            );
         }
     }
 }

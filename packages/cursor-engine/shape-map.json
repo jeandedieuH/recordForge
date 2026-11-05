@@ -44,6 +44,7 @@
   "ew-resize": "shape-resize-horizontal",
   "size_hor": "shape-resize-horizontal",
   "sb_h_double_arrow": "shape-resize-horizontal",
+  "h_double_arrow": "shape-resize-horizontal",
   "e-resize": "shape-resize-e",
   "w-resize": "shape-resize-w",
   "right_side": "shape-resize-e",
@@ -55,6 +56,7 @@
   "ns-resize": "shape-resize-vertical",
   "size_ver": "shape-resize-vertical",
   "sb_v_double_arrow": "shape-resize-vertical",
+  "v_double_arrow": "shape-resize-vertical",
   "n-resize": "shape-resize-n",
   "s-resize": "shape-resize-s",
   "top_side": "shape-resize-n",
@@ -87,5 +89,13 @@
   "left_ptr_watch": "shape-progress",
   "cell": "shape-cell",
   "plus": "shape-cell",
-  "center_ptr": "shape-cell"
+  "center_ptr": "shape-up-arrow",
+  "up-arrow": "shape-up-arrow",
+  "uparrow": "shape-up-arrow",
+  "based_arrow_up": "shape-up-arrow",
+  "pen": "shape-pen",
+  "pencil": "shape-pen",
+  "nwpen": "shape-pen",
+  "pin": "shape-pin",
+  "person": "shape-person"
 }

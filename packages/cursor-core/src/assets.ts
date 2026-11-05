@@ -22,9 +22,9 @@ export interface CursorAsset {
 }
 
 // The editor only supports the Recorded/System style, which resolves to the
-// actual captured cursor shape when V2 telemetry is available. A small set of
-// generic shape silhouettes (arrow, hand, ibeam, etc.) are kept so recorded
-// cursors without embedded shape bitmaps still render correctly.
+// captured cursor *kind* (arrow, hand, ibeam, …) when V2 telemetry is
+// available. Telemetry carries the kind, bitmap size and hotspot but not the
+// cursor artwork, so recorded shapes render as these generic silhouettes.
 export type CursorAssetId =
   | "recorded-system"
   | "shape-arrow"
@@ -55,6 +55,10 @@ export type CursorAssetId =
   | "shape-vertical-text"
   | "shape-context-menu"
   | "shape-alias"
+  | "shape-up-arrow"
+  | "shape-pen"
+  | "shape-pin"
+  | "shape-person"
 
 const SVG_TOKENS = {
   fill: "{fill}",
@@ -469,6 +473,62 @@ const PRESET_SVGS: Record<CursorAssetId, Omit<CursorAsset, "id" | "label">> = {
       <path d="M 15.4 14.5 L 18.5 14.5 L 18.5 17.6 M 14.3 18.7 L 18.3 14.7" fill="none" stroke="{stroke}" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
     </g>`,
   },
+  // Alternate-select / up arrow (Windows IDC_UPARROW, X11 `center_ptr`): a slim
+  // upward pointer whose active point sits at the tip.
+  "shape-up-arrow": {
+    viewBox: "0 0 24 24",
+    width: DEFAULT_CURSOR_SIZE,
+    height: DEFAULT_CURSOR_SIZE,
+    hotspotX: 12.5,
+    hotspotY: 3.1,
+    isCenterHotspot: false,
+    svg: `<g transform="translate(0.5, 0.5)">
+      <path d="M 12 2.6 L 18.2 9.6 L 13.9 9.6 L 13.9 20.6 L 10.1 20.6 L 10.1 9.6 L 5.8 9.6 Z" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linejoin="round" stroke-linecap="round" />
+    </g>`,
+  },
+  // Stylus / handwriting pen (Windows NWPen, X11 `pencil`). The nib is the
+  // active point, so the hotspot sits at the top-left tip.
+  "shape-pen": {
+    viewBox: "0 0 24 24",
+    width: DEFAULT_CURSOR_SIZE,
+    height: DEFAULT_CURSOR_SIZE,
+    hotspotX: 3.5,
+    hotspotY: 3.5,
+    isCenterHotspot: false,
+    svg: `<g transform="translate(0.5, 0.5)">
+      <path d="M 3.4 3.4 L 5.0 8.6 L 15.9 19.5 L 19.5 15.9 L 8.6 5.0 Z" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linejoin="round" stroke-linecap="round" />
+      <path d="M 3.4 3.4 L 6.6 4.3 L 4.3 6.6 Z" fill="{stroke}" fill-opacity="0.9" />
+      <line x1="14.2" y1="17.8" x2="17.8" y2="14.2" stroke="{stroke}" stroke-width="1.2" stroke-linecap="round" stroke-opacity="0.75" />
+    </g>`,
+  },
+  // Location-select pushpin (Windows IDC_PIN): rounded head with a tapered
+  // point; the point is the active pixel.
+  "shape-pin": {
+    viewBox: "0 0 24 24",
+    width: DEFAULT_CURSOR_SIZE,
+    height: DEFAULT_CURSOR_SIZE,
+    hotspotX: 12.5,
+    hotspotY: 21.5,
+    isCenterHotspot: false,
+    svg: `<g transform="translate(0.5, 0.5)">
+      <path d="M 12 3.2 C 8.9 3.2 6.4 5.7 6.4 8.8 C 6.4 10.9 7.5 12.7 9.2 13.7 L 9.2 16.2 L 14.8 16.2 L 14.8 13.7 C 16.5 12.7 17.6 10.9 17.6 8.8 C 17.6 5.7 15.1 3.2 12 3.2 Z" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linejoin="round" />
+      <path d="M 11.0 16.2 L 12.0 21.2 L 13.0 16.2 Z" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linejoin="round" />
+      <circle cx="12" cy="8.8" r="2.2" fill="{stroke}" fill-opacity="0.9" />
+    </g>`,
+  },
+  // Person select (Windows IDC_PERSON): head-and-shoulders silhouette.
+  "shape-person": {
+    viewBox: "0 0 24 24",
+    width: DEFAULT_CURSOR_SIZE,
+    height: DEFAULT_CURSOR_SIZE,
+    hotspotX: 12.5,
+    hotspotY: 12.5,
+    isCenterHotspot: false,
+    svg: `<g transform="translate(0.5, 0.5)">
+      <circle cx="12" cy="7.2" r="3.4" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" />
+      <path d="M 5.2 20.4 C 5.2 16.4 8.2 14.2 12 14.2 C 15.8 14.2 18.8 16.4 18.8 20.4 Z" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linejoin="round" />
+    </g>`,
+  },
 }
 
 export const CURSOR_ASSET_MANIFEST: Record<CursorAssetId, CursorAsset> = Object.fromEntries(
@@ -515,6 +575,10 @@ function labelForAssetId(id: CursorAssetId): string {
     "shape-vertical-text": "Vertical Text",
     "shape-context-menu": "Context Menu",
     "shape-alias": "Alias / Link",
+    "shape-up-arrow": "Up Arrow",
+    "shape-pen": "Pen",
+    "shape-pin": "Pin",
+    "shape-person": "Person",
   }
   return labels[id] ?? id
 }
@@ -569,6 +633,7 @@ export const SHAPE_ID_TO_ASSET: Record<string, CursorAssetId> = {
   "ew-resize": "shape-resize-horizontal",
   size_hor: "shape-resize-horizontal",
   sb_h_double_arrow: "shape-resize-horizontal",
+  h_double_arrow: "shape-resize-horizontal",
   "e-resize": "shape-resize-e",
   "w-resize": "shape-resize-w",
   right_side: "shape-resize-e",
@@ -580,6 +645,7 @@ export const SHAPE_ID_TO_ASSET: Record<string, CursorAssetId> = {
   "ns-resize": "shape-resize-vertical",
   size_ver: "shape-resize-vertical",
   sb_v_double_arrow: "shape-resize-vertical",
+  v_double_arrow: "shape-resize-vertical",
   "n-resize": "shape-resize-n",
   "s-resize": "shape-resize-s",
   top_side: "shape-resize-n",
@@ -612,7 +678,15 @@ export const SHAPE_ID_TO_ASSET: Record<string, CursorAssetId> = {
   left_ptr_watch: "shape-progress",
   cell: "shape-cell",
   plus: "shape-cell",
-  center_ptr: "shape-cell",
+  center_ptr: "shape-up-arrow",
+  "up-arrow": "shape-up-arrow",
+  uparrow: "shape-up-arrow",
+  based_arrow_up: "shape-up-arrow",
+  pen: "shape-pen",
+  pencil: "shape-pen",
+  nwpen: "shape-pen",
+  pin: "shape-pin",
+  person: "shape-person",
 }
 
 export interface ResolvedCursorAsset extends CursorAsset {
@@ -629,42 +703,11 @@ function buildRecordedShapeAsset(shape: CursorShapeInfo): ResolvedCursorAsset | 
   const base = CURSOR_ASSET_MANIFEST[baseId]
   if (!base) return null
 
-  // The recorded cursor may have different dimensions and a different hotspot
-  // than our generic 24x24 base asset. Wrap the base SVG in a translate so the
-  // active point (base.hotspotX/Y) aligns with the recorded hotspot scaled to
-  // the 24x24 view box.
-  const shapeWidth = shape.width > 0 ? shape.width : 24
-  const shapeHeight = shape.height > 0 ? shape.height : 24
-  const targetHotspotX = (shape.hotspotX * 24) / shapeWidth
-  const targetHotspotY = (shape.hotspotY * 24) / shapeHeight
-  const offsetX = targetHotspotX - base.hotspotX
-  const offsetY = targetHotspotY - base.hotspotY
-
-  // Normalize cursor dimensions to presentation base size (DEFAULT_CURSOR_SIZE = 64)
-  // while preserving any custom non-square aspect ratio from the recorded shape.
-  const aspect = shapeWidth / shapeHeight
-  const width = Math.round(DEFAULT_CURSOR_SIZE * Math.max(1, aspect))
-  const height = Math.round(DEFAULT_CURSOR_SIZE / Math.min(1, aspect))
-
-  return {
-    ...base,
-    id: `${base.id}:${shape.shapeId}`,
-    label: `Recorded ${shape.kind}`,
-    viewBox: "0 0 24 24",
-    width,
-    height,
-    // Store the hotspot in 24x24 view box units so the overlay can convert it
-    // to CSS pixels using width/24 * cursorScale. This keeps the drawn active
-    // point (arrow tip, finger tip, etc.) exactly at the source coordinate.
-    hotspotX: targetHotspotX,
-    hotspotY: targetHotspotY,
-    isCenterHotspot: false,
-    effectiveId: shape.shapeId,
-    svg:
-      offsetX === 0 && offsetY === 0
-        ? base.svg
-        : `<g transform="translate(${offsetX.toFixed(2)} ${offsetY.toFixed(2)})">${base.svg}</g>`,
-  }
+  // Preview and export must draw the same asset at the same hotspot. The
+  // silhouettes are generic, so their authored hotspot is the active point;
+  // translating them to the recorded pixel hotspot (and stretching them to a
+  // non-square recorded bitmap) would make the two renderers diverge.
+  return { ...base, effectiveId: shape.shapeId }
 }
 
 /** Resolve a cursor asset from a telemetry shape id or a chosen preset. */
@@ -707,17 +750,8 @@ export function resolveCursorAsset(
     return { effectiveId: preset, ...fallback }
   }
 
-  // For a curated preset style, the only telemetry shape ids we honor are the
-  // preset ids themselves. We do not switch to a recorded hand/ibeam/etc. while
-  // the user has explicitly chosen an arrow style.
-  if (shapeMode === "recorded") {
-    const directAsset = manifest[shapeId as CursorAssetId]
-    if (directAsset) return { effectiveId: shapeId, ...directAsset }
-    return { effectiveId: preset, ...fallback }
-  }
-
-  // Optimized mode: only map to the curated preset assets. Recorded shape kinds
-  // are reserved for the Recorded/System preset.
+  // Only map to the curated preset assets. Recorded shape kinds are reserved
+  // for the Recorded/System preset above.
   const directAsset = manifest[shapeId as CursorAssetId]
   if (directAsset) return { effectiveId: shapeId, ...directAsset }
 

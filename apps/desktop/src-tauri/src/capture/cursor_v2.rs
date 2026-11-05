@@ -1456,6 +1456,28 @@ pub struct SpaMetaCursor {
     pub offset: u32,
 }
 
+/// Coarse ink-distribution features of a captured cursor bitmap.
+///
+/// Wayland delivers cursor bitmaps without a name, so these features are the
+/// only signal available for shape classification. `bbox` and `centroid` are
+/// fractions of the bitmap; `edge`, `corner` and `center` are relative to the
+/// ink bounding box so the classifier is insensitive to padding/inset artwork.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct CursorShapeFeatures {
+    /// Ink pixels divided by the bitmap area.
+    pub ink_ratio: f32,
+    /// Ink bounding box as `[x, y, width, height]` fractions of the bitmap.
+    pub bbox: [f32; 4],
+    /// Ink centroid as `[x, y]` fractions of the bitmap.
+    pub centroid: [f32; 2],
+    /// Ink coverage of the bbox's top, bottom, left and right edges.
+    pub edge: [f32; 4],
+    /// Ink fill of the bbox's NW, NE, SW and SE quadrants.
+    pub corner: [f32; 4],
+    /// Ink fill of the bbox's central quarter.
+    pub center: f32,
+}
+
 /// Shared snapshot of cursor state delivered by a PipeWire screen capture stream.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PipeWireCursorSnapshot {
@@ -1468,6 +1490,8 @@ pub struct PipeWireCursorSnapshot {
     pub height: u32,
     pub shape_name: Option<String>,
     pub bitmap_hash: u64,
+    /// Pixel-derived shape features; `None` when the bitmap is unavailable.
+    pub shape_features: Option<CursorShapeFeatures>,
     pub cursor_mode: Option<crate::capture::linux_portal::PortalCursorMode>,
     pub updated_at_ms: u64,
 }
@@ -1514,6 +1538,7 @@ pub fn parse_pipewire_spa_meta_cursor(raw: &[u8]) -> Option<PipeWireCursorSnapsh
     }
 
     let mut bitmap_hash = 0u64;
+    let mut shape_features = None;
     let offset = meta.offset as usize;
     let pixel_bytes = (meta.width as usize)
         .saturating_mul(meta.height as usize)
@@ -1525,6 +1550,12 @@ pub fn parse_pipewire_spa_meta_cursor(raw: &[u8]) -> Option<PipeWireCursorSnapsh
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         pixels.hash(&mut hasher);
         bitmap_hash = hasher.finish();
+        shape_features = cursor_shape_features(
+            pixels,
+            meta.width,
+            meta.height,
+            (meta.width as usize).saturating_mul(4),
+        );
     }
 
     Some(PipeWireCursorSnapshot {
@@ -1537,6 +1568,7 @@ pub fn parse_pipewire_spa_meta_cursor(raw: &[u8]) -> Option<PipeWireCursorSnapsh
         height: meta.height,
         shape_name: None,
         bitmap_hash,
+        shape_features,
         cursor_mode: Some(crate::capture::linux_portal::PortalCursorMode::Metadata),
         updated_at_ms: 0,
     })
@@ -1586,7 +1618,7 @@ fn capture_button_state() -> CursorButtonState {
 /// transitions and provide the correct hotspot in the evaluator.
 #[cfg(target_os = "windows")]
 fn capture_cursor_shape(
-    _registry: &mut std::collections::HashMap<String, CursorShapeInfo>,
+    cache: &mut std::collections::HashMap<String, CursorShapeInfo>,
     _known: &[CursorShapeInfo],
 ) -> Option<CursorShapeInfo> {
     use windows::Win32::Graphics::Gdi::{GetObjectW, BITMAP};
@@ -1601,6 +1633,19 @@ fn capture_cursor_shape(
     unsafe { GetCursorInfo(&mut info) }.ok()?;
 
     let hcursor = info.hCursor;
+    let handle = hcursor.0 as usize;
+
+    // Standard system cursors are long-lived shared handles, so their geometry
+    // is cached by handle. Custom cursors are re-queried every sample because
+    // Windows recycles handles.
+    let system_kind = system_cursor_kind_for_handle(handle);
+    let cache_key = format!("win-handle-{handle:x}");
+    if system_kind.is_some() {
+        if let Some(cached) = cache.get(&cache_key) {
+            return Some(cached.clone());
+        }
+    }
+
     let mut icon_info = ICONINFO::default();
     // SAFETY: `GetIconInfo` fills the provided struct and returns a bool.
     unsafe { GetIconInfo(hcursor.into(), &mut icon_info) }.ok()?;
@@ -1646,26 +1691,25 @@ fn capture_cursor_shape(
     let hotspot_x = icon_info.xHotspot as i32;
     let hotspot_y = icon_info.yHotspot as i32;
 
-    // Try to identify the system cursor by its cached handle first; fall back
-    // to geometry-based heuristics for custom cursors.
-    let kind = classify_cursor_kind(hcursor, width, height, hotspot_x, hotspot_y);
+    let kind = match system_kind {
+        Some(kind) => kind.to_string(),
+        None => classify_cursor_kind_by_geometry(width, height, hotspot_x, hotspot_y),
+    };
 
-    // Use the real dimensions and hotspot for the shape ID so distinct cursor
-    // silhouettes are tracked separately. Cast the handle to a usize for a
-    // stable in-process identifier.
-    let shape_id = format!(
-        "{}x{}-{}-{}-{}",
-        width, height, hotspot_x, hotspot_y, hcursor.0 as usize
-    );
-
-    Some(CursorShapeInfo {
-        shape_id,
+    // Use the real dimensions and hotspot in the shape ID so distinct cursor
+    // silhouettes are tracked separately.
+    let shape = CursorShapeInfo {
+        shape_id: format!("{width}x{height}-{hotspot_x}-{hotspot_y}-{handle}"),
         hotspot_x,
         hotspot_y,
         width,
         height,
         kind,
-    })
+    };
+    if system_kind.is_some() {
+        cache.insert(cache_key, shape.clone());
+    }
+    Some(shape)
 }
 
 #[cfg(target_os = "macos")]
@@ -1741,6 +1785,14 @@ fn macos_capture_cursor_shape() -> Option<CursorShapeInfo> {
             contextual_menu: usize,
             drag_link: usize,
             drag_copy: usize,
+            column_resize: usize,
+            row_resize: usize,
+            zoom_in: usize,
+            zoom_out: usize,
+            help: usize,
+            move_cursor: usize,
+            cell: usize,
+            busy_clickable: usize,
         }
 
         static POINTERS: OnceLock<MacosCursorPointers> = OnceLock::new();
@@ -1784,6 +1836,17 @@ fn macos_capture_cursor_shape() -> Option<CursorShapeInfo> {
                 contextual_menu: get_ptr_if_responds(c"contextualMenuCursor"),
                 drag_link: get_ptr_if_responds(c"dragLinkCursor"),
                 drag_copy: get_ptr_if_responds(c"dragCopyCursor"),
+                // macOS 15 public selectors, plus private system cursors that
+                // have no public API. All are guarded: an unknown selector
+                // yields 0, which never matches a live cursor address.
+                column_resize: get_ptr_if_responds(c"columnResizeCursor"),
+                row_resize: get_ptr_if_responds(c"rowResizeCursor"),
+                zoom_in: get_ptr_if_responds(c"zoomInCursor"),
+                zoom_out: get_ptr_if_responds(c"zoomOutCursor"),
+                help: get_ptr_if_responds(c"_helpCursor"),
+                move_cursor: get_ptr_if_responds(c"_moveCursor"),
+                cell: get_ptr_if_responds(c"_cellCursor"),
+                busy_clickable: get_ptr_if_responds(c"busyButClickableCursor"),
             }
         });
 
@@ -1820,6 +1883,22 @@ fn macos_capture_cursor_shape() -> Option<CursorShapeInfo> {
             "copy"
         } else if cursor_addr == pointers.contextual_menu {
             "context-menu"
+        } else if cursor_addr == pointers.column_resize {
+            "col-resize"
+        } else if cursor_addr == pointers.row_resize {
+            "row-resize"
+        } else if cursor_addr == pointers.zoom_in {
+            "zoom-in"
+        } else if cursor_addr == pointers.zoom_out {
+            "zoom-out"
+        } else if cursor_addr == pointers.help {
+            "help"
+        } else if cursor_addr == pointers.move_cursor {
+            "move"
+        } else if cursor_addr == pointers.cell {
+            "cell"
+        } else if cursor_addr == pointers.busy_clickable {
+            "progress"
         } else if cursor_addr == pointers.operation_not_allowed
             || cursor_addr == pointers.disappearing_item
         {
@@ -1897,48 +1976,19 @@ fn linux_capture_cursor_shape() -> Option<CursorShapeInfo> {
             let hx = snapshot.hotspot_x;
             let hy = snapshot.hotspot_y;
 
-            let kind = if let Some(ref name) = snapshot.shape_name {
-                match name.to_ascii_lowercase().as_str() {
-                    "arrow" | "default" | "auto" | "left_ptr" | "top_left_arrow" | "right_ptr" => {
-                        "arrow".into()
-                    }
-                    "pointer" | "hand" | "hand1" | "hand2" | "pointing_hand" => "hand".into(),
-                    "text" | "ibeam" | "xterm" => "ibeam".into(),
-                    "vertical-text" => "vertical-text".into(),
-                    "crosshair" | "cross" | "diamond_cross" => "crosshair".into(),
-                    "wait" | "watch" => "wait".into(),
-                    "progress" | "left_ptr_watch" => "progress".into(),
-                    "help" | "question_arrow" => "help".into(),
-                    "move" | "all-scroll" | "fleur" | "size_all" | "dnd-move" => "move".into(),
-                    "col-resize" | "ew-resize" | "size_hor" | "h_double_arrow"
-                    | "sb_h_double_arrow" => "resize-horizontal".into(),
-                    "row-resize" | "ns-resize" | "size_ver" | "v_double_arrow"
-                    | "sb_v_double_arrow" => "resize-vertical".into(),
-                    "e-resize" | "right_side" | "sb_right_arrow" => "e-resize".into(),
-                    "w-resize" | "left_side" | "sb_left_arrow" => "w-resize".into(),
-                    "n-resize" | "top_side" | "sb_up_arrow" => "n-resize".into(),
-                    "s-resize" | "bottom_side" | "sb_down_arrow" => "s-resize".into(),
-                    "nwse-resize" | "size_fdiag" => "resize-diagonal-1".into(),
-                    "nesw-resize" | "size_bdiag" => "resize-diagonal-2".into(),
-                    "nw-resize" | "top_left_corner" => "nw-resize".into(),
-                    "se-resize" | "bottom_right_corner" => "se-resize".into(),
-                    "ne-resize" | "top_right_corner" => "ne-resize".into(),
-                    "sw-resize" | "bottom_left_corner" => "sw-resize".into(),
-                    "not-allowed" | "no-drop" | "circle" | "crossed_circle" | "dnd-none"
-                    | "dnd-no-drop" => "unavailable".into(),
-                    "context-menu" | "context_menu" | "dnd-ask" => "context-menu".into(),
-                    "alias" | "dnd-link" | "link" => "alias".into(),
-                    "grab" | "openhand" => "grab".into(),
-                    "grabbing" | "closedhand" => "grabbing".into(),
-                    "zoom-in" => "zoom-in".into(),
-                    "zoom-out" => "zoom-out".into(),
-                    "copy" | "dnd-copy" => "copy".into(),
-                    "cell" | "plus" | "center_ptr" => "cell".into(),
-                    _ => classify_cursor_kind_by_geometry(width, height, hx, hy),
-                }
-            } else {
-                classify_cursor_kind_by_geometry(width, height, hx, hy)
-            };
+            let kind = snapshot
+                .shape_name
+                .as_deref()
+                .and_then(normalize_named_cursor_kind)
+                // Wayland delivers no cursor name, so the captured bitmap's ink
+                // distribution is the only signal available.
+                .or_else(|| {
+                    snapshot
+                        .shape_features
+                        .as_ref()
+                        .and_then(classify_cursor_kind_from_features)
+                })
+                .unwrap_or_else(|| classify_cursor_kind_by_geometry(width, height, hx, hy));
 
             let shape_id = if snapshot.bitmap_hash != 0 {
                 format!(
@@ -2103,50 +2153,13 @@ fn linux_capture_x11_cursor_shape() -> Option<CursorShapeInfo> {
         let hotspot_y = img.yhot as i32;
         let serial = img.cursor_serial;
 
-        let kind = if !img.name.is_null() {
-            let name_str = CStr::from_ptr(img.name)
-                .to_string_lossy()
-                .to_ascii_lowercase();
-            match name_str.as_str() {
-                "arrow" | "default" | "auto" | "left_ptr" | "top_left_arrow" | "right_ptr" => {
-                    "arrow".into()
-                }
-                "pointer" | "hand" | "hand1" | "hand2" | "pointing_hand" => "hand".into(),
-                "text" | "ibeam" | "xterm" => "ibeam".into(),
-                "vertical-text" => "vertical-text".into(),
-                "crosshair" | "cross" | "diamond_cross" => "crosshair".into(),
-                "wait" | "watch" => "wait".into(),
-                "progress" | "left_ptr_watch" => "progress".into(),
-                "help" | "question_arrow" => "help".into(),
-                "move" | "all-scroll" | "fleur" | "size_all" | "dnd-move" => "move".into(),
-                "col-resize" | "ew-resize" | "size_hor" | "h_double_arrow"
-                | "sb_h_double_arrow" => "resize-horizontal".into(),
-                "row-resize" | "ns-resize" | "size_ver" | "v_double_arrow"
-                | "sb_v_double_arrow" => "resize-vertical".into(),
-                "e-resize" | "right_side" | "sb_right_arrow" => "e-resize".into(),
-                "w-resize" | "left_side" | "sb_left_arrow" => "w-resize".into(),
-                "n-resize" | "top_side" | "sb_up_arrow" => "n-resize".into(),
-                "s-resize" | "bottom_side" | "sb_down_arrow" => "s-resize".into(),
-                "nwse-resize" | "size_fdiag" => "resize-diagonal-1".into(),
-                "nesw-resize" | "size_bdiag" => "resize-diagonal-2".into(),
-                "nw-resize" | "top_left_corner" => "nw-resize".into(),
-                "se-resize" | "bottom_right_corner" => "se-resize".into(),
-                "ne-resize" | "top_right_corner" => "ne-resize".into(),
-                "sw-resize" | "bottom_left_corner" => "sw-resize".into(),
-                "not-allowed" | "no-drop" | "circle" | "crossed_circle" | "dnd-none"
-                | "dnd-no-drop" => "unavailable".into(),
-                "context-menu" | "context_menu" | "dnd-ask" => "context-menu".into(),
-                "alias" | "dnd-link" | "link" => "alias".into(),
-                "grab" | "openhand" => "grab".into(),
-                "grabbing" | "closedhand" => "grabbing".into(),
-                "zoom-in" => "zoom-in".into(),
-                "zoom-out" => "zoom-out".into(),
-                "copy" | "dnd-copy" => "copy".into(),
-                "cell" | "plus" | "center_ptr" => "cell".into(),
-                _ => classify_cursor_kind_by_geometry(width, height, hotspot_x, hotspot_y),
-            }
-        } else {
+        let kind = if img.name.is_null() {
             classify_cursor_kind_by_geometry(width, height, hotspot_x, hotspot_y)
+        } else {
+            let name_str = CStr::from_ptr(img.name).to_string_lossy();
+            normalize_named_cursor_kind(&name_str).unwrap_or_else(|| {
+                classify_cursor_kind_by_geometry(width, height, hotspot_x, hotspot_y)
+            })
         };
 
         (fns.free)(img_ptr as *mut c_void);
@@ -2171,24 +2184,15 @@ fn capture_cursor_shape(
     None
 }
 
-/// On Windows, compare the current cursor handle against the cached system
-/// cursor handles loaded with `LoadCursorW`. This is the most reliable way to
-/// identify standard system cursors without parsing bitmaps.
+/// On Windows, identify a standard system cursor by comparing the live handle
+/// against the cached handles loaded with `LoadCursorW`. This is the most
+/// reliable way to classify standard cursors without parsing bitmaps.
 #[cfg(target_os = "windows")]
-fn classify_cursor_kind(
-    hcursor: windows::Win32::UI::WindowsAndMessaging::HCURSOR,
-    width: u32,
-    height: u32,
-    hotspot_x: i32,
-    hotspot_y: i32,
-) -> String {
-    let current = hcursor.0 as usize;
-    for (system, kind) in system_cursor_kinds() {
-        if current == *system {
-            return (*kind).into();
-        }
-    }
-    classify_cursor_kind_by_geometry(width, height, hotspot_x, hotspot_y)
+fn system_cursor_kind_for_handle(handle: usize) -> Option<&'static str> {
+    system_cursor_kinds()
+        .iter()
+        .find(|(system, _)| *system == handle)
+        .map(|(_, kind)| *kind)
 }
 
 #[cfg(target_os = "windows")]
@@ -2196,11 +2200,14 @@ fn system_cursor_kinds() -> &'static [(usize, &'static str)] {
     use std::sync::OnceLock;
     use windows::Win32::UI::WindowsAndMessaging::{
         LoadCursorW, IDC_APPSTARTING, IDC_ARROW, IDC_CROSS, IDC_HAND, IDC_HELP, IDC_IBEAM, IDC_NO,
-        IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, IDC_UPARROW, IDC_WAIT,
+        IDC_PERSON, IDC_PIN, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE,
+        IDC_UPARROW, IDC_WAIT,
     };
 
     static CURSORS: OnceLock<Vec<(usize, &'static str)>> = OnceLock::new();
     CURSORS.get_or_init(|| {
+        // IDC_PIN/IDC_PERSON exist from Windows 8; the pen cursor (32631) has
+        // no WinUser.h identifier but is part of the standard cursor scheme.
         let ids: &[(windows::core::PCWSTR, &str)] = &[
             (IDC_ARROW, "arrow"),
             (IDC_HAND, "hand"),
@@ -2214,8 +2221,11 @@ fn system_cursor_kinds() -> &'static [(usize, &'static str)] {
             (IDC_SIZENESW, "resize-diagonal-2"),
             (IDC_SIZEWE, "resize-horizontal"),
             (IDC_SIZENS, "resize-vertical"),
-            (IDC_UPARROW, "arrow"),
+            (IDC_UPARROW, "up-arrow"),
             (IDC_NO, "unavailable"),
+            (IDC_PIN, "pin"),
+            (IDC_PERSON, "person"),
+            (windows::core::PCWSTR(32631u16 as _), "pen"),
         ];
         ids.iter()
             .filter_map(|(id, kind)| {
@@ -2258,12 +2268,15 @@ fn classify_cursor_kind_by_geometry(
         return "resize-vertical".into();
     }
 
-    // Centered hotspot
+    // Centered hotspot. A square, centred custom cursor is genuinely ambiguous
+    // (move / crosshair / wait / resize / unavailable), so prefer the neutral
+    // pointer instead of guessing a crosshair; small squares are typically the
+    // wait/hourglass glyph.
     if distance_from_center < 4.0 {
-        if size >= 26 {
-            return "crosshair".into();
+        if size <= 20 {
+            return "wait".into();
         }
-        return "wait".into();
+        return "arrow".into();
     }
 
     // Hotspot in the upper-left quadrant usually indicates an arrow or hand.
@@ -2288,6 +2301,227 @@ fn classify_cursor_kind_by_geometry(
     }
 
     "arrow".into()
+}
+
+/// Map a named cursor (Wayland `cursor-shape-v1`, XFixes, or an Xcursor theme
+/// name) to a telemetry kind. Names the shared shape map does not know return
+/// `None` so the caller can fall back to geometry/bitmap classification.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn normalize_named_cursor_kind(name: &str) -> Option<String> {
+    let lower = name.trim().to_ascii_lowercase();
+    if lower.is_empty() {
+        return None;
+    }
+    let mapped = cursor_engine::assets::resolve_cursor_shape_id(&lower, &[]);
+    if mapped == lower {
+        None
+    } else {
+        Some(lower)
+    }
+}
+
+/// Derive coarse ink-distribution features from a captured cursor bitmap.
+///
+/// The bitmap is expected to be 4 bytes per pixel (RGBA/BGRA/ARGB); a pixel is
+/// treated as ink when any channel is non-zero, which works for both
+/// premultiplied alpha and `x` formats.
+pub(crate) fn cursor_shape_features(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    stride: usize,
+) -> Option<CursorShapeFeatures> {
+    if width < 4 || height < 4 {
+        return None;
+    }
+    let width = width as usize;
+    let height = height as usize;
+    let row_bytes = width.checked_mul(4)?;
+    if stride < row_bytes {
+        return None;
+    }
+    if pixels.len() < stride.checked_mul(height)? {
+        return None;
+    }
+
+    let is_ink = |x: usize, y: usize| -> bool {
+        let offset = y * stride + x * 4;
+        let px = &pixels[offset..offset + 4];
+        px[0] | px[1] | px[2] | px[3] != 0
+    };
+
+    // Pass 1: total ink, bounding box and centroid.
+    let mut ink = 0u32;
+    let (mut min_x, mut max_x) = (width, 0usize);
+    let (mut min_y, mut max_y) = (height, 0usize);
+    let (mut sum_x, mut sum_y) = (0u64, 0u64);
+    for y in 0..height {
+        for x in 0..width {
+            if !is_ink(x, y) {
+                continue;
+            }
+            ink += 1;
+            min_x = min_x.min(x);
+            max_x = max_x.max(x);
+            min_y = min_y.min(y);
+            max_y = max_y.max(y);
+            sum_x += x as u64;
+            sum_y += y as u64;
+        }
+    }
+
+    if ink == 0 {
+        return Some(CursorShapeFeatures::default());
+    }
+
+    // Pass 2: edge, corner and centre coverage relative to the ink bbox.
+    let bbox_w = max_x - min_x + 1;
+    let bbox_h = max_y - min_y + 1;
+    let mid_x = min_x + bbox_w / 2;
+    let mid_y = min_y + bbox_h / 2;
+    let quarter_x0 = min_x + bbox_w / 4;
+    let quarter_x1 = max_x + 1 - bbox_w / 4;
+    let quarter_y0 = min_y + bbox_h / 4;
+    let quarter_y1 = max_y + 1 - bbox_h / 4;
+
+    let mut edge = [0u32; 4];
+    let mut corner = [0u32; 4];
+    let mut center = 0u32;
+    for y in min_y..=max_y {
+        for x in min_x..=max_x {
+            if !is_ink(x, y) {
+                continue;
+            }
+            if y == min_y {
+                edge[0] += 1;
+            }
+            if y == max_y {
+                edge[1] += 1;
+            }
+            if x == min_x {
+                edge[2] += 1;
+            }
+            if x == max_x {
+                edge[3] += 1;
+            }
+            match (x < mid_x, y < mid_y) {
+                (true, true) => corner[0] += 1,
+                (false, true) => corner[1] += 1,
+                (true, false) => corner[2] += 1,
+                (false, false) => corner[3] += 1,
+            }
+            if x >= quarter_x0 && x < quarter_x1 && y >= quarter_y0 && y < quarter_y1 {
+                center += 1;
+            }
+        }
+    }
+
+    let fraction = |count: u32, total: usize| count as f32 / total.max(1) as f32;
+    let corner_cells = ((bbox_w / 2).max(1) * (bbox_h / 2).max(1)) as f32;
+    let center_cells = ((quarter_x1 - quarter_x0).max(1) * (quarter_y1 - quarter_y0).max(1)) as f32;
+
+    Some(CursorShapeFeatures {
+        ink_ratio: ink as f32 / (width * height) as f32,
+        bbox: [
+            min_x as f32 / width as f32,
+            min_y as f32 / height as f32,
+            bbox_w as f32 / width as f32,
+            bbox_h as f32 / height as f32,
+        ],
+        centroid: [
+            sum_x as f32 / ink as f32 / width as f32,
+            sum_y as f32 / ink as f32 / height as f32,
+        ],
+        edge: [
+            fraction(edge[0], bbox_w),
+            fraction(edge[1], bbox_w),
+            fraction(edge[2], bbox_h),
+            fraction(edge[3], bbox_h),
+        ],
+        corner: [
+            corner[0] as f32 / corner_cells,
+            corner[1] as f32 / corner_cells,
+            corner[2] as f32 / corner_cells,
+            corner[3] as f32 / corner_cells,
+        ],
+        center: center as f32 / center_cells,
+    })
+}
+
+/// Classify a cursor from bitmap features. Returns `None` when the features are
+/// not decisive, so the caller can fall back to the hotspot/size heuristic (and
+/// ultimately to the neutral pointer).
+///
+/// The rules are deliberately conservative: a wrong glyph is worse than the
+/// default pointer, especially on Wayland where every cursor takes this path.
+/// Edge/corner/centre values are relative to the ink bounding box.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn classify_cursor_kind_from_features(features: &CursorShapeFeatures) -> Option<String> {
+    if features.ink_ratio <= 0.0 {
+        return None;
+    }
+
+    let bbox_w = features.bbox[2].max(1e-3);
+    let bbox_h = features.bbox[3].max(1e-3);
+    let aspect = bbox_w / bbox_h;
+    let horizontal = (features.edge[2] + features.edge[3]) * 0.5;
+    let vertical = (features.edge[0] + features.edge[1]) * 0.5;
+    let [nw, ne, sw, se] = features.corner;
+    let diagonal_1 = (nw + se) * 0.5;
+    let diagonal_2 = (ne + sw) * 0.5;
+    let all_corners = (nw + ne + sw + se) * 0.25;
+
+    // Filled glyphs (busy disc, hourglass body) cover most of the frame.
+    if features.ink_ratio > 0.45 {
+        return Some("wait".into());
+    }
+
+    // Everything below assumes artwork centred in its bitmap. Off-centre ink
+    // is a pointer, hand or pen, which the hotspot heuristic classifies better.
+    let centered =
+        (features.centroid[0] - 0.5).abs() < 0.15 && (features.centroid[1] - 0.5).abs() < 0.15;
+    if !centered {
+        return None;
+    }
+
+    // I-beam: narrow, with serifs spanning both ends of the ink bbox.
+    if aspect <= 0.6 && features.edge[0] > 0.65 && features.edge[1] > 0.65 {
+        return Some("ibeam".into());
+    }
+
+    // Single-axis resizers: arrowheads span the full left+right (or top+bottom)
+    // edges while the perpendicular edges are only partially covered by the
+    // stem. Requiring near-full coverage keeps hands and 4-way moves out.
+    if features.edge[2] > 0.8 && features.edge[3] > 0.8 && vertical < 0.8 {
+        return Some("resize-horizontal".into());
+    }
+    if features.edge[0] > 0.8 && features.edge[1] > 0.8 && horizontal < 0.8 {
+        return Some("resize-vertical".into());
+    }
+
+    // Four-way move: thick ink reaches every corner and every edge.
+    if all_corners > 0.45 && horizontal > 0.25 && vertical > 0.25 {
+        return Some("move".into());
+    }
+    if diagonal_1 > 0.45 && diagonal_2 < 0.2 {
+        return Some("resize-diagonal-1".into());
+    }
+    if diagonal_2 > 0.45 && diagonal_1 < 0.2 {
+        return Some("resize-diagonal-2".into());
+    }
+
+    // Thin arms crossing both axes, spanning the bitmap, with no corner ink.
+    if horizontal > 0.05
+        && vertical > 0.05
+        && features.ink_ratio < 0.2
+        && all_corners < 0.2
+        && bbox_w > 0.6
+        && bbox_h > 0.6
+    {
+        return Some("crosshair".into());
+    }
+
+    None
 }
 
 /// Probe the display topology at the given virtual-desktop point.
@@ -2766,10 +3000,9 @@ mod tests {
             classify_cursor_kind_by_geometry(20, 32, 10, 16),
             "resize-vertical"
         );
-        assert_eq!(
-            classify_cursor_kind_by_geometry(32, 32, 16, 16),
-            "crosshair"
-        );
+        // A square, centred custom cursor is ambiguous; the neutral pointer is
+        // preferred over guessing a crosshair.
+        assert_eq!(classify_cursor_kind_by_geometry(32, 32, 16, 16), "arrow");
         assert_eq!(classify_cursor_kind_by_geometry(18, 18, 9, 9), "wait");
         assert_eq!(classify_cursor_kind_by_geometry(32, 32, 10, 2), "hand");
         assert_eq!(classify_cursor_kind_by_geometry(32, 32, 1, 1), "arrow");
@@ -2777,6 +3010,121 @@ mod tests {
             classify_cursor_kind_by_geometry(32, 32, 30, 2),
             "resize-diagonal-2"
         );
+    }
+
+    #[test]
+    fn named_cursor_kinds_use_the_shared_shape_map() {
+        assert_eq!(
+            normalize_named_cursor_kind("Pointer").as_deref(),
+            Some("pointer")
+        );
+        assert_eq!(
+            normalize_named_cursor_kind(" col-resize ").as_deref(),
+            Some("col-resize")
+        );
+        assert_eq!(
+            normalize_named_cursor_kind("h_double_arrow").as_deref(),
+            Some("h_double_arrow")
+        );
+        assert_eq!(
+            normalize_named_cursor_kind("pencil").as_deref(),
+            Some("pencil")
+        );
+        assert_eq!(
+            normalize_named_cursor_kind("center_ptr").as_deref(),
+            Some("center_ptr")
+        );
+        assert_eq!(normalize_named_cursor_kind("some-app-cursor"), None);
+        assert_eq!(normalize_named_cursor_kind("   "), None);
+    }
+
+    fn ink_bitmap(width: usize, height: usize, ink: impl Fn(usize, usize) -> bool) -> Vec<u8> {
+        let mut pixels = vec![0u8; width * height * 4];
+        for y in 0..height {
+            for x in 0..width {
+                if ink(x, y) {
+                    let offset = (y * width + x) * 4;
+                    pixels[offset + 3] = 255;
+                }
+            }
+        }
+        pixels
+    }
+
+    #[test]
+    fn bitmap_features_identify_an_ibeam() {
+        // Serifs at the top/bottom plus a central stem.
+        let pixels = ink_bitmap(24, 24, |x, y| {
+            let serif = (y == 2 || y == 21) && (7..=17).contains(&x);
+            let stem = (11..=13).contains(&x) && (2..=21).contains(&y);
+            serif || stem
+        });
+        let features = cursor_shape_features(&pixels, 24, 24, 24 * 4).expect("features");
+        assert!(features.ink_ratio > 0.0);
+        assert!(features.bbox[2] < 0.6);
+        assert_eq!(
+            classify_cursor_kind_from_features(&features).as_deref(),
+            Some("ibeam")
+        );
+    }
+
+    #[test]
+    fn bitmap_features_identify_a_horizontal_resize() {
+        let pixels = ink_bitmap(24, 24, |x, y| {
+            let left_head = x <= 6 && (6..=17).contains(&y);
+            let right_head = x >= 17 && (6..=17).contains(&y);
+            let shaft = (11..=12).contains(&y);
+            left_head || right_head || shaft
+        });
+        let features = cursor_shape_features(&pixels, 24, 24, 24 * 4).expect("features");
+        assert_eq!(
+            classify_cursor_kind_from_features(&features).as_deref(),
+            Some("resize-horizontal")
+        );
+    }
+
+    #[test]
+    fn bitmap_features_identify_a_crosshair() {
+        let pixels = ink_bitmap(24, 24, |x, y| (x == 11 || x == 12) || (y == 11 || y == 12));
+        let features = cursor_shape_features(&pixels, 24, 24, 24 * 4).expect("features");
+        assert_eq!(
+            classify_cursor_kind_from_features(&features).as_deref(),
+            Some("crosshair")
+        );
+    }
+
+    #[test]
+    fn bitmap_features_leave_off_centre_pointers_undecided() {
+        // An arrow occupies the top-left of its bitmap with a diagonal body.
+        let pixels = ink_bitmap(24, 24, |x, y| y <= x + 2 && x <= 12 && y <= 18);
+        let features = cursor_shape_features(&pixels, 24, 24, 24 * 4).expect("features");
+        assert_eq!(classify_cursor_kind_from_features(&features), None);
+    }
+
+    #[test]
+    fn feature_classifier_is_conservative() {
+        let empty = CursorShapeFeatures::default();
+        assert_eq!(classify_cursor_kind_from_features(&empty), None);
+
+        let filled = CursorShapeFeatures {
+            ink_ratio: 0.6,
+            ..Default::default()
+        };
+        assert_eq!(
+            classify_cursor_kind_from_features(&filled).as_deref(),
+            Some("wait")
+        );
+
+        // A hand-like blob is centred and dense but has no dominant axis.
+        let hand = CursorShapeFeatures {
+            ink_ratio: 0.3,
+            bbox: [0.15, 0.1, 0.7, 0.8],
+            centroid: [0.5, 0.55],
+            edge: [0.35, 0.9, 0.5, 0.5],
+            corner: [0.25, 0.25, 0.55, 0.55],
+            center: 0.6,
+        };
+        assert_eq!(classify_cursor_kind_from_features(&hand), None);
     }
 
     #[test]

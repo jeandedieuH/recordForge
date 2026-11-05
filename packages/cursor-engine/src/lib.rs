@@ -2930,4 +2930,67 @@ mod tests {
         assert_eq!(packed[8], -1.0);
         assert!(shapeless.shape_ids().is_empty());
     }
+
+    #[test]
+    fn shape_map_targets_exist_in_asset_manifest() {
+        use std::collections::HashMap;
+        let manifest: HashMap<String, serde_json::Value> =
+            serde_json::from_str(include_str!("../assets.json")).unwrap();
+        let map: HashMap<String, String> =
+            serde_json::from_str(include_str!("../shape-map.json")).unwrap();
+        assert!(!manifest.is_empty());
+        for (kind, asset_id) in &map {
+            assert!(
+                manifest.contains_key(asset_id),
+                "cursor kind `{kind}` maps to missing asset `{asset_id}`"
+            );
+        }
+    }
+
+    #[test]
+    fn every_cursor_asset_is_reachable_from_a_kind() {
+        use std::collections::{HashMap, HashSet};
+        let manifest: HashMap<String, serde_json::Value> =
+            serde_json::from_str(include_str!("../assets.json")).unwrap();
+        let map: HashMap<String, String> =
+            serde_json::from_str(include_str!("../shape-map.json")).unwrap();
+        let targets: HashSet<&str> = map.values().map(String::as_str).collect();
+        let unreachable: Vec<&String> = manifest
+            .keys()
+            .filter(|id| id.as_str() != "recorded-system" && !targets.contains(id.as_str()))
+            .collect();
+        assert!(
+            unreachable.is_empty(),
+            "assets with no kind alias: {unreachable:?}"
+        );
+    }
+
+    #[test]
+    fn resolves_named_cursor_kinds() {
+        use crate::assets::{resolve_cursor_asset_or_default, resolve_cursor_shape_id};
+
+        assert_eq!(
+            resolve_cursor_shape_id("col-resize", &[]),
+            "shape-col-resize"
+        );
+        assert_eq!(
+            resolve_cursor_shape_id("row-resize", &[]),
+            "shape-row-resize"
+        );
+        assert_eq!(
+            resolve_cursor_shape_id("h_double_arrow", &[]),
+            "shape-resize-horizontal"
+        );
+        assert_eq!(
+            resolve_cursor_shape_id("v_double_arrow", &[]),
+            "shape-resize-vertical"
+        );
+        assert_eq!(resolve_cursor_shape_id("pencil", &[]), "shape-pen");
+        assert_eq!(resolve_cursor_shape_id("center_ptr", &[]), "shape-up-arrow");
+        assert_eq!(resolve_cursor_shape_id("person", &[]), "shape-person");
+        assert_eq!(
+            resolve_cursor_asset_or_default("shape-up-arrow").id,
+            "shape-up-arrow"
+        );
+    }
 }

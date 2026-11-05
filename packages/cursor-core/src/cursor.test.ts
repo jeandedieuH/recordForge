@@ -226,10 +226,14 @@ describe("cursor-core", () => {
         },
       ],
     })
-    expect(asset.id).toBe("shape-hand:hand-32")
+    // Preview and export share the canonical silhouette, hotspot and size; the
+    // recorded bitmap only supplies the kind (and therefore the asset).
+    expect(asset.id).toBe("shape-hand")
     expect(asset.effectiveId).toBe("hand-32")
     expect(asset.width).toBe(64)
     expect(asset.height).toBe(64)
+    expect(asset.hotspotX).toBeCloseTo(9)
+    expect(asset.hotspotY).toBeCloseTo(2.5)
   })
 
   it("produces zoom segment source and lock badges", () => {
@@ -382,6 +386,18 @@ describe("cursor-core", () => {
       ["copy", "shape-copy"],
       ["progress", "shape-progress"],
       ["cell", "shape-cell"],
+      ["center_ptr", "shape-up-arrow"],
+      ["up-arrow", "shape-up-arrow"],
+      ["based_arrow_up", "shape-up-arrow"],
+      ["pen", "shape-pen"],
+      ["pencil", "shape-pen"],
+      ["nwpen", "shape-pen"],
+      ["pin", "shape-pin"],
+      ["person", "shape-person"],
+      ["h_double_arrow", "shape-resize-horizontal"],
+      ["v_double_arrow", "shape-resize-vertical"],
+      ["col-resize", "shape-col-resize"],
+      ["row-resize", "shape-row-resize"],
     ]
 
     for (const [kind, expectedAssetId] of mappings) {
@@ -389,6 +405,14 @@ describe("cursor-core", () => {
       const resolved = resolveCursorAsset(kind, "recorded-system", { shapeMode: "optimized" })
       expect(resolved.id).toBe(expectedAssetId)
     }
+  })
+
+  it("targets every asset from at least one kind alias", () => {
+    const targets = new Set(Object.values(SHAPE_ID_TO_ASSET))
+    const unreachable = (Object.keys(CURSOR_ASSET_MANIFEST) as CursorAssetId[]).filter(
+      (id) => id !== "recorded-system" && !targets.has(id),
+    )
+    expect(unreachable).toEqual([])
   })
 
   it("computes the DPI cursor size factor identically to the Rust engine", () => {

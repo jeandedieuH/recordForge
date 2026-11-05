@@ -598,21 +598,39 @@ fn cursor_snapshot(cursor: &MetaCursor, started: Instant) -> Option<PipeWireCurs
             height: 0,
             shape_name: None,
             bitmap_hash: 0,
+            shape_features: None,
             cursor_mode: Some(PortalCursorMode::Metadata),
             updated_at_ms: started.elapsed().as_millis() as u64,
         });
     }
     let pos = cursor.position();
     let hotspot = cursor.hotspot();
-    let (w, h, hash) = match cursor.bitmap() {
+    let (w, h, hash, shape_features) = match cursor.bitmap() {
         Some(bitmap) => {
             let size = bitmap.size();
+            // `bitmap_data` returns `None` when the bitmap is invalid.
+            let data = bitmap.bitmap_data();
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             use std::hash::{Hash, Hasher};
-            (size.width, size.height, bitmap.stride(), bitmap.offset()).hash(&mut hasher);
-            (size.width, size.height, hasher.finish())
+            match data {
+                // Content hash: identical artwork keeps the same shape id even
+                // when the compositor reallocates the cursor buffer.
+                Some(pixels) => pixels.hash(&mut hasher),
+                None => {
+                    (size.width, size.height, bitmap.stride(), bitmap.offset()).hash(&mut hasher);
+                }
+            }
+            let features = data.and_then(|pixels| {
+                super::cursor_v2::cursor_shape_features(
+                    pixels,
+                    size.width,
+                    size.height,
+                    bitmap.stride().unsigned_abs() as usize,
+                )
+            });
+            (size.width, size.height, hasher.finish(), features)
         }
-        None => (0, 0, 0),
+        _ => (0, 0, 0, None),
     };
     Some(PipeWireCursorSnapshot {
         active: true,
@@ -625,6 +643,7 @@ fn cursor_snapshot(cursor: &MetaCursor, started: Instant) -> Option<PipeWireCurs
         height: h,
         shape_name: None,
         bitmap_hash: hash,
+        shape_features,
         cursor_mode: Some(PortalCursorMode::Metadata),
         updated_at_ms: started.elapsed().as_millis() as u64,
     })
