@@ -8,7 +8,7 @@
     "hotspotX": 3.5,
     "hotspotY": 3.5,
     "isCenterHotspot": false,
-    "svg": "<g transform=\"translate(0.5, 0.5)\">\n      <path d=\"M 3 3 L 3 18.5 L 7.8 14.8 L 11.2 21.8 L 14.5 20.3 L 11.1 13.5 L 17.5 13.5 Z\" fill=\"{fill}\" fill-opacity=\"{fillOpacity}\" stroke=\"{stroke}\" stroke-width=\"{strokeWidth}\" stroke-opacity=\"{strokeOpacity}\" stroke-linejoin=\"round\" stroke-linecap=\"round\" />\n    </g>"
+    "svg": "<g transform=\"translate(0.5, 0.5)\">\n      <path d=\"M 3 3.85 C 3 3.09 3.91 2.71 4.45 3.25 L 14.55 13.35 C 15.09 13.89 14.70 14.80 13.95 14.80 L 8.70 14.80 C 8.35 14.80 8.06 14.94 7.85 15.15 L 4.45 18.55 C 3.91 19.09 3 18.70 3 17.95 Z\" fill=\"{fill}\" fill-opacity=\"{fillOpacity}\" stroke=\"{stroke}\" stroke-width=\"{strokeWidth}\" stroke-opacity=\"{strokeOpacity}\" stroke-linejoin=\"round\" stroke-linecap=\"round\" />\n    </g>"
   },
   "shape-arrow": {
     "id": "shape-arrow",
@@ -19,7 +19,7 @@
     "hotspotX": 3.5,
     "hotspotY": 3.5,
     "isCenterHotspot": false,
-    "svg": "<g transform=\"translate(0.5, 0.5)\">\n      <path d=\"M 3 3 L 3 18.5 L 7.8 14.8 L 11.2 21.8 L 14.5 20.3 L 11.1 13.5 L 17.5 13.5 Z\" fill=\"{fill}\" fill-opacity=\"{fillOpacity}\" stroke=\"{stroke}\" stroke-width=\"{strokeWidth}\" stroke-opacity=\"{strokeOpacity}\" stroke-linejoin=\"round\" stroke-linecap=\"round\" />\n    </g>"
+    "svg": "<g transform=\"translate(0.5, 0.5)\">\n      <path d=\"M 3 3.85 C 3 3.09 3.91 2.71 4.45 3.25 L 14.55 13.35 C 15.09 13.89 14.70 14.80 13.95 14.80 L 8.70 14.80 C 8.35 14.80 8.06 14.94 7.85 15.15 L 4.45 18.55 C 3.91 19.09 3 18.70 3 17.95 Z\" fill=\"{fill}\" fill-opacity=\"{fillOpacity}\" stroke=\"{stroke}\" stroke-width=\"{strokeWidth}\" stroke-opacity=\"{strokeOpacity}\" stroke-linejoin=\"round\" stroke-linecap=\"round\" />\n    </g>"
   },
   "shape-hand": {
     "id": "shape-hand",

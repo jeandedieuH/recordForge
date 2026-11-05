@@ -72,8 +72,8 @@ export const DEFAULT_CURSOR_SIZE = 64
 // Preset SVGs are authored in a 24x24 view box. Their `hotspotX`/`hotspotY`
 // represent the active point within that view box.
 const PRESET_SVGS: Record<CursorAssetId, Omit<CursorAsset, "id" | "label">> = {
-  // Recorded/System fallback: a modern pointer arrow with an aerodynamic head,
-  // clean stem, and active point at the arrow tip (3.5, 3.5).
+  // Recorded/System fallback: a modern stemless pointer arrow with rounded corners,
+  // clean geometry, and active point at the arrow tip (3.5, 3.5).
   "recorded-system": {
     viewBox: "0 0 24 24",
     width: DEFAULT_CURSOR_SIZE,
@@ -82,7 +82,7 @@ const PRESET_SVGS: Record<CursorAssetId, Omit<CursorAsset, "id" | "label">> = {
     hotspotY: 3.5,
     isCenterHotspot: false,
     svg: `<g transform="translate(0.5, 0.5)">
-      <path d="M 3 3 L 3 18.5 L 7.8 14.8 L 11.2 21.8 L 14.5 20.3 L 11.1 13.5 L 17.5 13.5 Z" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linejoin="round" stroke-linecap="round" />
+      <path d="M 3 3.85 C 3 3.09 3.91 2.71 4.45 3.25 L 14.55 13.35 C 15.09 13.89 14.70 14.80 13.95 14.80 L 8.70 14.80 C 8.35 14.80 8.06 14.94 7.85 15.15 L 4.45 18.55 C 3.91 19.09 3 18.70 3 17.95 Z" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linejoin="round" stroke-linecap="round" />
     </g>`,
   },
   // Generic recorded-shape SVGs. The active point is marked by hotspotX/Y and
@@ -95,7 +95,7 @@ const PRESET_SVGS: Record<CursorAssetId, Omit<CursorAsset, "id" | "label">> = {
     hotspotY: 3.5,
     isCenterHotspot: false,
     svg: `<g transform="translate(0.5, 0.5)">
-      <path d="M 3 3 L 3 18.5 L 7.8 14.8 L 11.2 21.8 L 14.5 20.3 L 11.1 13.5 L 17.5 13.5 Z" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linejoin="round" stroke-linecap="round" />
+      <path d="M 3 3.85 C 3 3.09 3.91 2.71 4.45 3.25 L 14.55 13.35 C 15.09 13.89 14.70 14.80 13.95 14.80 L 8.70 14.80 C 8.35 14.80 8.06 14.94 7.85 15.15 L 4.45 18.55 C 3.91 19.09 3 18.70 3 17.95 Z" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linejoin="round" stroke-linecap="round" />
     </g>`,
   },
   "shape-hand": {
