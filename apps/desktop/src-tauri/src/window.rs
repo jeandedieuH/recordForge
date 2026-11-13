@@ -58,6 +58,15 @@ static QUIT_AFTER_MAIN_CLOSE: AtomicBool = AtomicBool::new(false);
 /// the webview close guard first, so the editor can flush unsaved work.
 static QUIT_REQUESTED: AtomicBool = AtomicBool::new(false);
 
+/// Fully transparent window *and* webview background for the auxiliary
+/// windows.
+///
+/// `transparent(true)` only makes the OS window transparent: the webview keeps
+/// its own default background (white) until the page's CSS applies, which shows
+/// up as a white flash the moment the countdown capsule or the capture frame
+/// appears. Windows honours this only when the alpha channel is 0.
+const TRANSPARENT_BG: tauri::utils::config::Color = tauri::utils::config::Color(0, 0, 0, 0);
+
 /// What a close request on the main window should do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MainCloseAction {
@@ -321,12 +330,15 @@ impl FloatingWindow {
             "floating",
             tauri::WebviewUrl::App("index.html".into()),
         )
-        .initialization_script("window.__RECORD_FORGE_WINDOW_KIND = 'floating';")
+        .initialization_script(
+            "window.__RECORD_FORGE_WINDOW_KIND = 'floating';(function(){var h=document.documentElement;if(h){h.dataset.floating='true';}})();",
+        )
         .title("RecordForge Transport Controls")
         .inner_size(FLOATING_WINDOW_WIDTH, FLOATING_WINDOW_HEIGHT)
         .decorations(false)
         .always_on_top(true)
         .transparent(true)
+        .background_color(TRANSPARENT_BG)
         .content_protected(true)
         .skip_taskbar(true)
         .resizable(false)
@@ -561,7 +573,7 @@ impl WebcamPreviewWindow {
         );
 
         let script = format!(
-            "window.__RECORD_FORGE_WINDOW_KIND = 'webcam-preview'; window.__RECORD_FORGE_WEBCAM_PARAMS = {{ deviceId: {:?}, deviceName: {:?}, previewUrl: {:?} }};",
+            "window.__RECORD_FORGE_WINDOW_KIND = 'webcam-preview'; window.__RECORD_FORGE_WEBCAM_PARAMS = {{ deviceId: {:?}, deviceName: {:?}, previewUrl: {:?} }}; (function(){{var h=document.documentElement;if(h){{h.dataset.webcamPreview='true';}}}})();",
             device_id, device_name, preview_url
         );
 
@@ -576,6 +588,7 @@ impl WebcamPreviewWindow {
         .decorations(false)
         .always_on_top(true)
         .transparent(true)
+        .background_color(TRANSPARENT_BG)
         .content_protected(true)
         .skip_taskbar(true)
         .resizable(false)
@@ -692,11 +705,12 @@ impl BoundaryWindow {
             "boundary",
             tauri::WebviewUrl::App("index.html".into()),
         )
-        .initialization_script("window.__RECORD_FORGE_WINDOW_KIND = 'boundary';")
+        .initialization_script("window.__RECORD_FORGE_WINDOW_KIND = 'boundary';(function(){var h=document.documentElement;if(h){h.dataset.boundary='true';}})();")
         .title("RecordForge Capture Boundary")
         .decorations(false)
         .always_on_top(true)
         .transparent(true)
+        .background_color(TRANSPARENT_BG)
         .content_protected(true)
         .skip_taskbar(true)
         .resizable(false)
@@ -770,13 +784,14 @@ impl RegionPickerWindow {
             "region-picker",
             tauri::WebviewUrl::App("index.html".into()),
         )
-        .initialization_script("window.__RECORD_FORGE_WINDOW_KIND = 'region-picker';")
+        .initialization_script("window.__RECORD_FORGE_WINDOW_KIND = 'region-picker';(function(){var h=document.documentElement;if(h){h.dataset.regionPicker='true';}})();")
         .title("RecordForge Select Region")
         .inner_size(logical_size.width, logical_size.height)
         .position(logical_position.x, logical_position.y)
         .decorations(false)
         .always_on_top(true)
         .transparent(true)
+        .background_color(TRANSPARENT_BG)
         .content_protected(true)
         .skip_taskbar(true)
         .resizable(false)
@@ -906,7 +921,7 @@ impl CountdownWindow {
         let (capture_x, capture_y, capture_w, capture_h) = logical_rect(app, bounds);
         let (x, y) = capsule_position(capture_x, capture_y, capture_w, capture_h);
         let script = format!(
-            "window.__RECORD_FORGE_WINDOW_KIND = 'countdown'; window.__RECORD_FORGE_COUNTDOWN_PARAMS = {{ sessionId: {:?}, seconds: {}, sourceName: {:?} }};",
+            "window.__RECORD_FORGE_WINDOW_KIND = 'countdown'; window.__RECORD_FORGE_COUNTDOWN_PARAMS = {{ sessionId: {:?}, seconds: {}, sourceName: {:?} }}; (function(){{var h=document.documentElement;if(h){{h.dataset.countdown='true';}}}})();",
             session_id, seconds, source_name
         );
 
@@ -922,6 +937,7 @@ impl CountdownWindow {
         .decorations(false)
         .always_on_top(true)
         .transparent(true)
+        .background_color(TRANSPARENT_BG)
         .content_protected(true)
         .skip_taskbar(true)
         .resizable(false)
@@ -1088,7 +1104,7 @@ impl TeleprompterWindow {
             Self::LABEL,
             tauri::WebviewUrl::App("index.html".into()),
         )
-        .initialization_script("window.__RECORD_FORGE_WINDOW_KIND = 'teleprompter';")
+        .initialization_script("window.__RECORD_FORGE_WINDOW_KIND = 'teleprompter';(function(){var h=document.documentElement;if(h){h.dataset.teleprompter='true';}})();")
         .title("RecordForge Teleprompter")
         .inner_size(TELEPROMPTER_WINDOW_WIDTH, TELEPROMPTER_WINDOW_HEIGHT)
         .min_inner_size(
@@ -1097,6 +1113,7 @@ impl TeleprompterWindow {
         )
         .decorations(false)
         .transparent(true)
+        .background_color(TRANSPARENT_BG)
         .shadow(false)
         .always_on_top(true)
         .content_protected(true)
