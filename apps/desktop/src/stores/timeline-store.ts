@@ -33,6 +33,7 @@ import {
   redoCommand,
   timelineToProject,
   formatYouTubeChapters,
+  foldTrackGainIntoTimeline,
   type AppError,
   type CommandEngine,
   type ExecuteOptions,
@@ -487,7 +488,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
 
       let project: recordForgeProject
       let missingAssets: string[] = []
-      let didMigrateCursorTrack = false
+      let didNormalizeTimeline = false
       const storedPreferences = recordingPreferencesRaw
         ? (() => {
             try {
@@ -558,12 +559,15 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
         }
       }
 
-      const timeline = projectToTimeline(project)
-      // Persist the cursor track migration in the next autosave instead of
-      // keeping it only as a runtime fallback for legacy project files.
-      if (timeline.tracks.length !== project.tracks.length) {
+      // One gain control per audio source: fold any legacy track fader into the
+      // clips so the timeline envelope and Audio panel report the same gain.
+      const normalized = foldTrackGainIntoTimeline(projectToTimeline(project))
+      const timeline = normalized.timeline
+      // Persist the cursor track / audio gain normalization in the next
+      // autosave instead of keeping it only as a runtime fallback.
+      if (timeline.tracks.length !== project.tracks.length || normalized.changed) {
         project = timelineToProject(timeline, project)
-        didMigrateCursorTrack = true
+        didNormalizeTimeline = true
       }
       const engine = createEngine(timeline)
       const duration = getTotalDuration(timeline)
@@ -614,7 +618,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
         savePromise: null,
         snapshotPending: false,
       })
-      if (didMigrateCursorTrack) {
+      if (didNormalizeTimeline) {
         // A migration changed the durable project shape; bump to revision 1 and
         // schedule an autosave so the upgraded shape is not lost on close.
         get().markProjectChanged(project)

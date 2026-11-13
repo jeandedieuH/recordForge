@@ -1,4 +1,4 @@
-import { useMemo, useRef } from "react"
+import { useEffect, useMemo, useRef } from "react"
 import type {
   AudioClip,
   MediaAudioTrackOutput,
@@ -7,7 +7,7 @@ import type {
 } from "@recordforge/contracts"
 import {
   buildPreviewSegments,
-  evaluateVolumeEnvelope,
+  evaluatePlayheadGain,
   type PreviewSegment,
 } from "@recordforge/editor-core"
 import { toAssetUrl } from "../../../lib/assets"
@@ -35,18 +35,22 @@ interface AudioTrackPreviewProps {
   isVideoSeeking?: boolean
 }
 
-function fadeMultiplier(clip: AudioClip, playheadMs: number): number {
-  const clipTimeMs = (playheadMs - clip.startMs) * clip.speed
-  const envelopeVolume = evaluateVolumeEnvelope(clip, clipTimeMs)
-  return clip.volume > 0 ? envelopeVolume / clip.volume : 0
-}
-
 function clipAt(clips: AudioClip[], playheadMs: number): AudioClip | null {
   return (
     clips.find(
       (clip) => playheadMs >= clip.startMs && playheadMs < clip.startMs + clip.durationMs,
     ) ?? null
   )
+}
+
+/**
+ * `HTMLMediaElement.volume` only accepts 0..1, so the preview caps at the
+ * element ceiling while export can boost. The gain comes from the same envelope
+ * the timeline draws and the render plan applies — never normalized by
+ * `clip.volume` (that used to cancel every envelope edit except a mute).
+ */
+function previewGain(clip: AudioClip, playheadMs: number, trackVolume: number): number {
+  return evaluatePlayheadGain(clip, playheadMs, trackVolume)
 }
 
 function buildPreviewTracks(
@@ -79,7 +83,7 @@ function buildPreviewTracks(
         id: track.id,
         clips,
         sourceByClip,
-        volume: Math.max(0, Math.min(1, track.volume)),
+        volume: Math.max(0, Math.min(2, track.volume)),
         muted: track.muted || isExcludedBySolo,
       },
     ]
@@ -144,9 +148,21 @@ function AudioTrackPreviewTrack({
       }
       const clip = clipAt(group.clips, playheadMs)
       element.muted = group.muted
-      element.volume = clip ? Math.min(1, group.volume * fadeMultiplier(clip, playheadMs)) : 0
+      element.volume = clip ? previewGain(clip, playheadMs, group.volume) : 0
     },
   })
+
+  // The sync effect only runs while the playhead advances; apply the gain here
+  // too so dragging the envelope (or the Audio panel) is audible while paused.
+  const activeClip = clipAt(group.clips, playheadMs)
+  const activeGain =
+    activeClip && !group.muted ? previewGain(activeClip, playheadMs, group.volume) : 0
+  useEffect(() => {
+    const element = activeSlot === 0 ? slot0.current : slot1.current
+    if (!element) return
+    element.muted = group.muted
+    element.volume = activeGain
+  }, [activeGain, activeSlot, group.muted])
 
   return (
     <>

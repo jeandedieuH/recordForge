@@ -1,5 +1,9 @@
 import type { AudioClip, TimelineTrack } from "@recordforge/contracts"
-import { createUpdateClipAudioCommand, createUpdateTrackCommand } from "@recordforge/editor-core"
+import {
+  clampAudioGain,
+  createUpdateClipAudioCommand,
+  createUpdateTrackCommand,
+} from "@recordforge/editor-core"
 import { Volume2 } from "lucide-react"
 import { NumberInputField, ScrollArea, Skeleton, Slider, Switch } from "@recordforge/ui"
 import { useTimelineStore } from "../../../stores/timeline-store"
@@ -89,18 +93,55 @@ export function AudioPanel({ waveformResources }: AudioPanelProps) {
 
 function TrackRow({ track }: { track: TimelineTrack }) {
   const execute = useTimelineStore((state) => state.execute)
+  const audioClips = track.clips.filter((clip): clip is AudioClip => clip.kind === "audio")
+  // One control per source: a single-clip track is the recorded source, so the
+  // row edits that clip's gain. After a split, the row is the track master and
+  // the clip list keeps per-clip gains.
+  const singleClip = audioClips.length === 1 ? audioClips[0] : null
+  const trackVolume = clampAudioGain(track.volume)
+  const effectiveVolume = singleClip
+    ? clampAudioGain(trackVolume * clampAudioGain(singleClip.volume))
+    : trackVolume
+  const canAdjustClip = trackVolume > 0.0001
+  const sliderMax = singleClip
+    ? Math.max(0.01, Math.min(2, canAdjustClip ? trackVolume * 2 : 2))
+    : 2
 
   function updateVolume(value: number) {
+    if (singleClip) {
+      if (!canAdjustClip) {
+        // A zeroed track master would otherwise strand a single-clip source
+        // with no reachable control: restore the master and set the clip.
+        if (value > 0) {
+          execute(createUpdateTrackCommand(track.id, { volume: 1 }))
+          execute(createUpdateClipAudioCommand(singleClip.id, { volume: clampAudioGain(value) }))
+        }
+        return
+      }
+      execute(
+        createUpdateClipAudioCommand(singleClip.id, {
+          volume: clampAudioGain(value / trackVolume),
+        }),
+      )
+      return
+    }
     execute(createUpdateTrackCommand(track.id, { volume: value }))
   }
 
   return (
     <div className="flex flex-col gap-2 rounded-lg border border-border bg-surface-dim p-2.5">
       <div className="flex items-center justify-between gap-2">
-        <span className="text-xs font-medium text-foreground">{track.name}</span>
+        <span className="flex min-w-0 items-baseline gap-1.5">
+          <span className="truncate text-xs font-medium text-foreground">{track.name}</span>
+          {!singleClip && audioClips.length > 1 ? (
+            <span className="shrink-0 text-[9px] uppercase tracking-wide text-subtle-foreground">
+              Master
+            </span>
+          ) : null}
+        </span>
         <div className="flex items-center gap-2">
           <span className="text-[10px] text-subtle-foreground">
-            {Math.round(track.volume * 100)}%
+            {Math.round(effectiveVolume * 100)}%
           </span>
           <Switch
             aria-label={`Mute ${track.name}`}
@@ -110,9 +151,9 @@ function TrackRow({ track }: { track: TimelineTrack }) {
         </div>
       </div>
       <Slider
-        value={[track.volume]}
+        value={[effectiveVolume]}
         min={0}
-        max={2}
+        max={sliderMax}
         step={0.01}
         aria-label={`${track.name} volume`}
         onValueChange={([value]) => updateVolume(value ?? 1)}
@@ -127,7 +168,9 @@ function AudioClipsList() {
   const timeline = useTimelineStore((state) => state.engine?.history.present)
   const clips =
     timeline?.tracks.flatMap((track) =>
-      track.clips.filter((clip): clip is AudioClip => clip.kind === "audio"),
+      track.clips
+        .filter((clip): clip is AudioClip => clip.kind === "audio")
+        .map((clip) => ({ clip, track })),
     ) ?? []
 
   if (clips.length === 0) {
@@ -143,56 +186,67 @@ function AudioClipsList() {
     // the Smart Cut section below out of the panel.
     <ScrollArea className="max-h-64 w-full border border-border p-2 rounded-2xl">
       <div className="flex flex-col gap-2 pr-1">
-        {clips.map((clip) => (
-          <div
-            key={clip.id}
-            className="flex flex-col gap-2 rounded-md border border-border bg-surface-dim p-2 text-[11px]"
-          >
-            <div className="flex items-center justify-between gap-2">
-              <span className="truncate font-medium text-foreground">
-                {formatAudioTime(clip.startMs)} → {formatAudioTime(clip.startMs + clip.durationMs)}
-              </span>
-              <span className="shrink-0 text-subtle-foreground">
-                {Math.round((clip.volume ?? 1) * 100)}%
-              </span>
-            </div>
-            <Slider
-              variant="emerald"
-              value={[clip.volume ?? 1]}
-              min={0}
-              max={2}
-              step={0.01}
-              aria-label="Clip volume"
-              onValueChange={([value]) =>
-                execute(createUpdateClipAudioCommand(clip.id, { volume: value ?? 1 }))
-              }
-            />
-            <div className="grid grid-cols-2 gap-2">
-              <NumberInputField
-                size="sm"
-                label="Fade in"
-                unit="ms"
+        {clips.map(({ clip, track }) => {
+          const trackVolume = clampAudioGain(track.volume)
+          const effectiveVolume = clampAudioGain(trackVolume * clampAudioGain(clip.volume ?? 1))
+          return (
+            <div
+              key={clip.id}
+              className="flex flex-col gap-2 rounded-md border border-border bg-surface-dim p-2 text-[11px]"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="truncate font-medium text-foreground">
+                  {formatAudioTime(clip.startMs)} →{" "}
+                  {formatAudioTime(clip.startMs + clip.durationMs)}
+                </span>
+                <span className="shrink-0 text-subtle-foreground">
+                  {Math.round(effectiveVolume * 100)}%
+                </span>
+              </div>
+              <Slider
+                variant="emerald"
+                value={[effectiveVolume]}
                 min={0}
-                step={50}
-                value={clip.fadeInMs}
-                onChange={(val) =>
-                  execute(createUpdateClipAudioCommand(clip.id, { fadeInMs: val }))
-                }
+                max={Math.max(0.01, Math.min(2, trackVolume * 2))}
+                step={0.01}
+                aria-label="Clip volume"
+                disabled={track.muted || trackVolume <= 0.0001}
+                onValueChange={([value]) => {
+                  if (trackVolume <= 0.0001) return
+                  execute(
+                    createUpdateClipAudioCommand(clip.id, {
+                      volume: clampAudioGain((value ?? 1) / trackVolume),
+                    }),
+                  )
+                }}
               />
-              <NumberInputField
-                size="sm"
-                label="Fade out"
-                unit="ms"
-                min={0}
-                step={50}
-                value={clip.fadeOutMs}
-                onChange={(val) =>
-                  execute(createUpdateClipAudioCommand(clip.id, { fadeOutMs: val }))
-                }
-              />
+              <div className="grid grid-cols-2 gap-2">
+                <NumberInputField
+                  size="sm"
+                  label="Fade in"
+                  unit="ms"
+                  min={0}
+                  step={50}
+                  value={clip.fadeInMs}
+                  onChange={(val) =>
+                    execute(createUpdateClipAudioCommand(clip.id, { fadeInMs: val }))
+                  }
+                />
+                <NumberInputField
+                  size="sm"
+                  label="Fade out"
+                  unit="ms"
+                  min={0}
+                  step={50}
+                  value={clip.fadeOutMs}
+                  onChange={(val) =>
+                    execute(createUpdateClipAudioCommand(clip.id, { fadeOutMs: val }))
+                  }
+                />
+              </div>
             </div>
-          </div>
-        ))}
+          )
+        })}
       </div>
     </ScrollArea>
   )

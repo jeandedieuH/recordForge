@@ -7,6 +7,11 @@ export interface TimelineAudioEnvelopeProps {
   clip: AudioClip
   pixelsPerMs: number
   height: number
+  /**
+   * Track fader applied on top of the clip gain. The envelope shows the gain
+   * the user actually hears so it matches the Audio panel and the export mix.
+   */
+  trackVolume?: number
   isLocked?: boolean
   onUpdateAudio: (update: {
     volume?: number
@@ -60,6 +65,7 @@ export const TimelineAudioEnvelope = memo(function TimelineAudioEnvelope({
   clip,
   pixelsPerMs,
   height,
+  trackVolume = 1,
   isLocked = false,
   onUpdateAudio,
   onInteractingChange,
@@ -69,6 +75,16 @@ export const TimelineAudioEnvelope = memo(function TimelineAudioEnvelope({
   const [activeDrag, setActiveDrag] = useState<DragMode | null>(null)
   const [hudMessage, setHudMessage] = useState<string | null>(null)
   const hudTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+
+  const trackGain = Math.max(0, Math.min(2, trackVolume))
+  // Clip gain including the track fader — the value drawn, heard, and exported.
+  const masterGain = Math.max(0, Math.min(2, trackGain * clip.volume))
+  // Keyframes are relative shape multipliers, matching the export filter
+  // (`kf.volume * clip.volume`); the drawn point is masterGain × kf.volume.
+  const keyframeGain = useCallback(
+    (volume: number) => Math.max(0, Math.min(2, masterGain * volume)),
+    [masterGain],
+  )
 
   const showHud = useCallback((message: string | null, autoHideMs?: number) => {
     if (hudTimeoutRef.current) {
@@ -114,50 +130,53 @@ export const TimelineAudioEnvelope = memo(function TimelineAudioEnvelope({
       id?: string
       isKf?: boolean
     }> = []
-    const sustainedY = volumeToY(clip.volume)
+    const sustainedY = volumeToY(masterGain)
 
     if (clip.volumeKeyframes && clip.volumeKeyframes.length > 0) {
       const sortedKfs = [...clip.volumeKeyframes].sort((a, b) => a.timeMs - b.timeMs)
 
       // Start point with fade-in if needed
-      const firstKf = sortedKfs[0]
-      const startVol = clip.fadeInMs > 0 ? 0 : firstKf.volume
+      const firstKf = sortedKfs[0]!
+      const firstGain = keyframeGain(firstKf.volume)
+      const startVol = clip.fadeInMs > 0 ? 0 : firstGain
       pts.push({ x: 0, y: volumeToY(startVol), timeMs: 0, volume: startVol })
 
       if (clip.fadeInMs > 0 && clip.fadeInMs < firstKf.timeMs) {
         pts.push({
           x: clip.fadeInMs * pixelsPerMs,
-          y: volumeToY(firstKf.volume),
+          y: volumeToY(firstGain),
           timeMs: clip.fadeInMs,
-          volume: firstKf.volume,
+          volume: firstGain,
         })
       }
 
       // Add all keyframes
       for (const kf of sortedKfs) {
+        const gain = keyframeGain(kf.volume)
         pts.push({
           x: kf.timeMs * pixelsPerMs,
-          y: volumeToY(kf.volume),
+          y: volumeToY(gain),
           timeMs: kf.timeMs,
-          volume: kf.volume,
+          volume: gain,
           id: kf.id,
           isKf: true,
         })
       }
 
       // End point with fade-out if needed
-      const lastKf = sortedKfs[sortedKfs.length - 1]
+      const lastKf = sortedKfs[sortedKfs.length - 1]!
+      const lastGain = keyframeGain(lastKf.volume)
       const fadeOutStartMs = Math.max(0, clip.durationMs - clip.fadeOutMs)
       if (clip.fadeOutMs > 0 && fadeOutStartMs > lastKf.timeMs) {
         pts.push({
           x: fadeOutStartMs * pixelsPerMs,
-          y: volumeToY(lastKf.volume),
+          y: volumeToY(lastGain),
           timeMs: fadeOutStartMs,
-          volume: lastKf.volume,
+          volume: lastGain,
         })
       }
 
-      const endVol = clip.fadeOutMs > 0 ? 0 : lastKf.volume
+      const endVol = clip.fadeOutMs > 0 ? 0 : lastGain
       pts.push({ x: clipWidth, y: volumeToY(endVol), timeMs: clip.durationMs, volume: endVol })
     } else {
       // Standard fade envelope
@@ -168,24 +187,24 @@ export const TimelineAudioEnvelope = memo(function TimelineAudioEnvelope({
         x: 0,
         y: clip.fadeInMs > 0 ? volumeToY(0) : sustainedY,
         timeMs: 0,
-        volume: clip.fadeInMs > 0 ? 0 : clip.volume,
+        volume: clip.fadeInMs > 0 ? 0 : masterGain,
       })
       if (clip.fadeInMs > 0) {
-        pts.push({ x: fadeInX, y: sustainedY, timeMs: clip.fadeInMs, volume: clip.volume })
+        pts.push({ x: fadeInX, y: sustainedY, timeMs: clip.fadeInMs, volume: masterGain })
       }
       if (clip.fadeOutMs > 0 && fadeOutStartX > fadeInX) {
         pts.push({
           x: fadeOutStartX,
           y: sustainedY,
           timeMs: clip.durationMs - clip.fadeOutMs,
-          volume: clip.volume,
+          volume: masterGain,
         })
       }
       pts.push({
         x: clipWidth,
         y: clip.fadeOutMs > 0 ? volumeToY(0) : sustainedY,
         timeMs: clip.durationMs,
-        volume: clip.fadeOutMs > 0 ? 0 : clip.volume,
+        volume: clip.fadeOutMs > 0 ? 0 : masterGain,
       })
     }
 
@@ -194,9 +213,10 @@ export const TimelineAudioEnvelope = memo(function TimelineAudioEnvelope({
     clip.durationMs,
     clip.fadeInMs,
     clip.fadeOutMs,
-    clip.volume,
     clip.volumeKeyframes,
     clipWidth,
+    keyframeGain,
+    masterGain,
     pixelsPerMs,
     volumeToY,
   ])
@@ -221,15 +241,15 @@ export const TimelineAudioEnvelope = memo(function TimelineAudioEnvelope({
   const fadeInX = (clip.fadeInMs ?? 0) * pixelsPerMs
   const fadeInY = volumeToY(
     clip.volumeKeyframes && clip.volumeKeyframes.length > 0
-      ? (clip.volumeKeyframes[0]?.volume ?? clip.volume)
-      : clip.volume,
+      ? keyframeGain(clip.volumeKeyframes[0]?.volume ?? 1)
+      : masterGain,
   )
 
   const fadeOutX = Math.max(0, (clip.durationMs - (clip.fadeOutMs ?? 0)) * pixelsPerMs)
   const fadeOutY = volumeToY(
     clip.volumeKeyframes && clip.volumeKeyframes.length > 0
-      ? (clip.volumeKeyframes[clip.volumeKeyframes.length - 1]?.volume ?? clip.volume)
-      : clip.volume,
+      ? keyframeGain(clip.volumeKeyframes[clip.volumeKeyframes.length - 1]?.volume ?? 1)
+      : masterGain,
   )
 
   // Handlers for starting drags
@@ -245,12 +265,12 @@ export const TimelineAudioEnvelope = memo(function TimelineAudioEnvelope({
       type: "volume",
       startX: e.clientX,
       startY: e.clientY,
-      startVolume: clip.volume,
+      startVolume: masterGain,
       clickTimeMs,
       moved: false,
     })
     onInteractingChange?.(true)
-    showHud(`Volume: ${Math.round(clip.volume * 100)}% (${volumeToDb(clip.volume)})`)
+    showHud(`Volume: ${Math.round(masterGain * 100)}% (${volumeToDb(masterGain)})`)
   }
 
   function handleFadeInPointerDown(e: React.PointerEvent) {
@@ -289,12 +309,12 @@ export const TimelineAudioEnvelope = memo(function TimelineAudioEnvelope({
       startX: e.clientX,
       startY: e.clientY,
       startTimeMs: kf.timeMs,
-      startVolume: kf.volume,
+      startVolume: keyframeGain(kf.volume),
       moved: false,
     })
     onInteractingChange?.(true)
     showHud(
-      `Keyframe: ${formatTimelineTime(kf.timeMs)} · ${Math.round(kf.volume * 100)}% (${volumeToDb(kf.volume)})`,
+      `Keyframe: ${formatTimelineTime(kf.timeMs)} · ${Math.round(keyframeGain(kf.volume) * 100)}% (${volumeToDb(keyframeGain(kf.volume))})`,
     )
   }
 
@@ -325,12 +345,17 @@ export const TimelineAudioEnvelope = memo(function TimelineAudioEnvelope({
 
         if (activeDrag.moved) {
           const deltaVolume = -(deltaY / usableHeight) * 2
-          const newVolume = Math.max(
+          const nextMaster = Math.max(
             0,
             Math.min(2, Math.round((activeDrag.startVolume + deltaVolume) * 100) / 100),
           )
-          showHud(`Volume: ${Math.round(newVolume * 100)}% (${volumeToDb(newVolume)})`)
-          onUpdateAudio({ volume: newVolume })
+          showHud(`Volume: ${Math.round(nextMaster * 100)}% (${volumeToDb(nextMaster)})`)
+          // The envelope shows the effective gain (track fader included), so
+          // convert back to the clip's own gain before writing.
+          if (trackGain > 0.0001) {
+            const nextClipVolume = Math.max(0, Math.min(2, nextMaster / trackGain))
+            onUpdateAudio({ volume: Math.round(nextClipVolume * 100) / 100 })
+          }
         }
         return
       }
@@ -373,16 +398,21 @@ export const TimelineAudioEnvelope = memo(function TimelineAudioEnvelope({
           0,
           Math.min(clip.durationMs, Math.round(activeDrag.startTimeMs + deltaMs)),
         )
-        const newVol = Math.max(
+        const newEffective = Math.max(
           0,
           Math.min(2, Math.round((activeDrag.startVolume + deltaVol) * 100) / 100),
         )
+        // Keyframes store shape multipliers; divide out the clip+track gain.
+        const newKfVolume =
+          masterGain > 0.0001
+            ? Math.max(0, Math.min(2, newEffective / masterGain))
+            : (clip.volumeKeyframes?.find((k) => k.id === activeDrag.kfId)?.volume ?? 1)
 
         showHud(
-          `Keyframe: ${formatTimelineTime(newTimeMs)} · ${Math.round(newVol * 100)}% (${volumeToDb(newVol)})`,
+          `Keyframe: ${formatTimelineTime(newTimeMs)} · ${Math.round(newEffective * 100)}% (${volumeToDb(newEffective)})`,
         )
         const nextKfs = (clip.volumeKeyframes ?? []).map((k) =>
-          k.id === activeDrag.kfId ? { ...k, timeMs: newTimeMs, volume: newVol } : k,
+          k.id === activeDrag.kfId ? { ...k, timeMs: newTimeMs, volume: newKfVolume } : k,
         )
         onUpdateAudio({ volumeKeyframes: nextKfs })
       }
@@ -399,17 +429,21 @@ export const TimelineAudioEnvelope = memo(function TimelineAudioEnvelope({
         const clickX = rect ? activeDrag.startX - rect.left : 0
         const clickY = rect ? activeDrag.startY - rect.top : usableHeight / 2
         const timeMs = Math.max(0, Math.min(clip.durationMs, Math.round(clickX / pixelsPerMs)))
-        const volume = yToVolume(clickY)
+        const effectiveGain = yToVolume(clickY)
+        // Keyframes are relative to the clip+track gain so raising the clip
+        // volume later scales the automation instead of flattening it.
+        const kfVolume =
+          masterGain > 0.0001 ? Math.max(0, Math.min(2, effectiveGain / masterGain)) : 1
 
         const newKf: AudioVolumeKeyframe = {
           id: crypto.randomUUID(),
           timeMs,
-          volume,
+          volume: kfVolume,
         }
         const nextKfs = [...(clip.volumeKeyframes ?? []), newKf].sort((a, b) => a.timeMs - b.timeMs)
         onUpdateAudio({ volumeKeyframes: nextKfs })
         showHud(
-          `Added keyframe: ${formatTimelineTime(timeMs)} · ${Math.round(volume * 100)}%`,
+          `Added keyframe: ${formatTimelineTime(timeMs)} · ${Math.round(keyframeGain(kfVolume) * 100)}%`,
           1500,
         )
       } else {
@@ -435,10 +469,13 @@ export const TimelineAudioEnvelope = memo(function TimelineAudioEnvelope({
     clip.fadeInMs,
     clip.fadeOutMs,
     clip.volumeKeyframes,
+    keyframeGain,
+    masterGain,
     onUpdateAudio,
     onInteractingChange,
     pixelsPerMs,
     showHud,
+    trackGain,
     usableHeight,
     yToVolume,
   ])
@@ -563,7 +600,7 @@ export const TimelineAudioEnvelope = memo(function TimelineAudioEnvelope({
         {!isLocked &&
           (clip.volumeKeyframes ?? []).map((kf) => {
             const cx = kf.timeMs * pixelsPerMs
-            const cy = volumeToY(kf.volume)
+            const cy = volumeToY(keyframeGain(kf.volume))
             return (
               <g
                 key={kf.id}

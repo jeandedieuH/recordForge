@@ -598,7 +598,7 @@ export const TimelineClipItem = memo(function TimelineClipItem({
               visibleEndMs={visibleEndMs}
               height={clipHeight}
               colorVar={laneColorVar}
-              gain={clip.kind === "audio" ? clip.volume : 1}
+              gain={clip.kind === "audio" ? clip.volume * track.volume : 1}
             />
           ) : null}
 
@@ -635,6 +635,7 @@ export const TimelineClipItem = memo(function TimelineClipItem({
                 clip={clip}
                 pixelsPerMs={pixelsPerMs}
                 height={clipHeight}
+                trackVolume={track.volume}
                 isLocked={isLocked}
                 className="z-20"
                 onUpdateAudio={(update) => onUpdateAudio(clip, update)}

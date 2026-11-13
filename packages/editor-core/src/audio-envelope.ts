@@ -1,7 +1,21 @@
-import type { AudioClip, AudioVolumeKeyframe } from "@recordforge/contracts"
+import type {
+  AudioClip,
+  AudioVolumeKeyframe,
+  TimelineState,
+  TimelineTrack,
+} from "@recordforge/contracts"
+
+export function clampAudioGain(value: number): number {
+  if (!Number.isFinite(value)) return 0
+  return Math.max(0, Math.min(2, value))
+}
 
 /**
  * Evaluates the volume gain multiplier for an AudioClip at a given time inside the clip.
+ *
+ * Keyframes are envelope shape multipliers: the clip's own `volume` scales the
+ * whole curve, exactly like the export's `volume` filter (`kf.volume * clip.volume`).
+ *
  * @param clip The AudioClip with volume, fadeInMs, fadeOutMs, and optional volumeKeyframes
  * @param clipTimeMs Time in milliseconds relative to clip start (0 <= clipTimeMs <= clip.durationMs)
  * @returns Gain multiplier between 0 and 2
@@ -10,6 +24,7 @@ export function evaluateVolumeEnvelope(clip: AudioClip, clipTimeMs: number): num
   if (clipTimeMs < 0 || clipTimeMs > clip.durationMs) {
     return 0
   }
+  const clipVolume = clampAudioGain(clip.volume ?? 1)
 
   // Keyframed volume envelope
   if (clip.volumeKeyframes && clip.volumeKeyframes.length > 0) {
@@ -21,9 +36,9 @@ export function evaluateVolumeEnvelope(clip: AudioClip, clipTimeMs: number): num
     if (firstKf && clipTimeMs <= firstKf.timeMs) {
       if (clip.fadeInMs > 0 && clipTimeMs < clip.fadeInMs) {
         const fadeRatio = Math.max(0, Math.min(1, clipTimeMs / clip.fadeInMs))
-        return fadeRatio * firstKf.volume
+        return clampAudioGain(fadeRatio * firstKf.volume * clipVolume)
       }
-      return firstKf.volume
+      return clampAudioGain(firstKf.volume * clipVolume)
     }
 
     // After last keyframe
@@ -31,9 +46,9 @@ export function evaluateVolumeEnvelope(clip: AudioClip, clipTimeMs: number): num
       const fadeOutStart = Math.max(0, clip.durationMs - clip.fadeOutMs)
       if (clip.fadeOutMs > 0 && clipTimeMs > fadeOutStart) {
         const fadeRatio = Math.max(0, Math.min(1, (clip.durationMs - clipTimeMs) / clip.fadeOutMs))
-        return fadeRatio * lastKf.volume
+        return clampAudioGain(fadeRatio * lastKf.volume * clipVolume)
       }
-      return lastKf.volume
+      return clampAudioGain(lastKf.volume * clipVolume)
     }
 
     // Between keyframes: piecewise linear interpolation
@@ -45,7 +60,7 @@ export function evaluateVolumeEnvelope(clip: AudioClip, clipTimeMs: number): num
         const span = kfB.timeMs - kfA.timeMs
         const ratio = span > 0 ? (clipTimeMs - kfA.timeMs) / span : 0
         const interpolated = kfA.volume + ratio * (kfB.volume - kfA.volume)
-        return Math.max(0, Math.min(2, interpolated))
+        return clampAudioGain(interpolated * clipVolume)
       }
     }
   }
@@ -60,7 +75,63 @@ export function evaluateVolumeEnvelope(clip: AudioClip, clipTimeMs: number): num
       ? Math.min(1, Math.max(0, (clip.durationMs - clipTimeMs) / fadeOut))
       : 1
 
-  return Math.max(0, Math.min(2, clip.volume * Math.min(fadeInGain, fadeOutGain)))
+  return clampAudioGain(clipVolume * Math.min(fadeInGain, fadeOutGain))
+}
+
+/**
+ * Total preview/export gain for a clip: track fader × clip envelope.
+ * The render plan applies the same product, so preview and export agree.
+ */
+export function evaluateAudioGain(clip: AudioClip, clipTimeMs: number, trackVolume = 1): number {
+  return clampAudioGain(clampAudioGain(trackVolume) * evaluateVolumeEnvelope(clip, clipTimeMs))
+}
+
+/**
+ * Preview gain at a timeline playhead position, clamped to what an
+ * `HTMLMediaElement` can reproduce (0..1). Export can boost past 100%; the
+ * element cannot, so only attenuation is audible in the preview.
+ */
+export function evaluatePlayheadGain(clip: AudioClip, playheadMs: number, trackVolume = 1): number {
+  const clipTimeMs = (playheadMs - clip.startMs) * clip.speed
+  return Math.min(1, evaluateAudioGain(clip, clipTimeMs, trackVolume))
+}
+
+export interface TrackGainFoldResult {
+  timeline: TimelineState
+  changed: boolean
+}
+
+/**
+ * Fold a legacy per-track gain into each audio clip's volume so a source has
+ * exactly one visible gain control.
+ *
+ * Track and clip volume multiply in the render plan, but the timeline envelope
+ * only showed the clip half. A track fader left below 100% therefore acted as a
+ * hidden second gain stage (the Audio panel said 100% while the clip was at 0%).
+ * Folding preserves the exact effective gain — `clip' = clamp(clip × track)`,
+ * `track' = 1` — so existing projects render identically while every control
+ * now reports the gain the user actually hears.
+ */
+export function foldTrackGainIntoTimeline(timeline: TimelineState): TrackGainFoldResult {
+  let changed = false
+  const tracks = timeline.tracks.map((track): TimelineTrack => {
+    if (track.kind !== "audio") return track
+    const trackVolume = clampAudioGain(track.volume ?? 1)
+    if (Math.abs(trackVolume - 1) < 1e-9) return track
+    changed = true
+    return {
+      ...track,
+      volume: 1,
+      clips: track.clips.map((clip) => {
+        if (clip.kind !== "audio") return clip
+        return {
+          ...clip,
+          volume: clampAudioGain(clampAudioGain(clip.volume ?? 1) * trackVolume),
+        }
+      }),
+    }
+  })
+  return { timeline: changed ? { ...timeline, tracks } : timeline, changed }
 }
 
 /** Volume envelope fields a surviving audio piece carries after a cut. */
