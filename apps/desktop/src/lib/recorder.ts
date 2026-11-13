@@ -47,6 +47,41 @@ export async function listCaptureSources(): Promise<CaptureSource[]> {
   return invokeValidated("list_capture_sources", undefined, z.array(captureSourceSchema))
 }
 
+/**
+ * Grab one still of a capture source for the setup dialog.
+ *
+ * Returns the absolute path of a cached JPEG, or `null` when a preview cannot
+ * be produced (unsupported source, capture in progress, missing permission,
+ * timeout). Callers must treat `null` as "show the schematic instead".
+ */
+export async function captureSourcePreview(
+  source: CaptureSource,
+  force = false,
+): Promise<string | null> {
+  return invokeValidated(
+    "capture_source_preview",
+    { source: captureSourceSchema.parse(source), force },
+    z.string().nullable(),
+  )
+}
+
+/**
+ * Grab several stills in one native call, index-aligned with `sources`.
+ *
+ * Used to warm every display the setup dialog can switch to; the grabs happen
+ * sequentially in a single native task.
+ */
+export async function captureSourcePreviews(
+  sources: CaptureSource[],
+  force = false,
+): Promise<(string | null)[]> {
+  return invokeValidated(
+    "capture_source_previews",
+    { sources: sources.map((source) => captureSourceSchema.parse(source)), force },
+    z.array(z.string().nullable()),
+  )
+}
+
 // Truthful OS permission snapshot — the macOS recording modal renders the
 // missing-grant banner from this; other platforms report all-granted.
 export async function getSystemPermissions(): Promise<SystemPermissionsReport> {
@@ -178,6 +213,30 @@ export async function runBenchmark(): Promise<BenchmarkReport> {
 
 export async function openFloatingControls(): Promise<void> {
   return invokeValidated<void>("open_floating_controls")
+}
+
+/** Switch the floating transport between the full toolbar and the compact pill. */
+export async function setFloatingControlsCompact(compact: boolean): Promise<void> {
+  return invokeValidated<void>("set_floating_controls_compact", { compact })
+}
+
+/**
+ * Allow or suppress the floating toolbar for this session.
+ *
+ * Needed on platforms that cannot exclude a window from capture: the toolbar is
+ * off by default there so it is never painted into a recording.
+ */
+export async function setFloatingControlsEnabled(enabled: boolean): Promise<void> {
+  return invokeValidated<void>("set_floating_controls_enabled", { enabled })
+}
+
+/**
+ * Allow or suppress the automatic camera self-view at recording start. On
+ * platforms that cannot exclude a window from capture it defaults off, so the
+ * overlay is never painted into a recording unless the user asks for it.
+ */
+export async function setSelfViewEnabled(enabled: boolean): Promise<void> {
+  return invokeValidated<void>("set_self_view_enabled", { enabled })
 }
 
 // Teleprompter (Pro) — capture-protected floating notes window.

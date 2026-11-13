@@ -30,6 +30,7 @@ use crate::media;
 use crate::state::AppState;
 use crate::window::{
     camera_countdown_bounds, BoundaryWindow, CountdownWindow, FloatingWindow, MainWindow,
+    WebcamPreviewWindow,
 };
 
 /// Initialize the shared application state. Called once in `setup`.
@@ -369,30 +370,48 @@ pub async fn prepare_recording(
     let session_id = state.recorder.prepare(config.clone())?;
     remember_quick_config(&state, config.clone());
 
+    let bounds = recording_ui_bounds(&app, &config.source);
+
+    // Show the start capsule (and the armed capture frame) BEFORE the main
+    // window disappears, so the app never seems to vanish into nothing while
+    // the session is being armed.
+    if countdown_seconds > 0 {
+        if let Err(error) = CountdownWindow::open_or_focus(
+            &app,
+            &session_id,
+            countdown_seconds,
+            &config.source.name,
+            bounds,
+        ) {
+            abort_prepared_start(&app, &state, &session_id);
+            return Err(error);
+        }
+    }
+
+    // Camera sources have no screen rectangle to outline. A frame that fails
+    // to open must never block the capture itself.
+    if config.source.kind != "camera" {
+        if let Err(error) = BoundaryWindow::open_or_focus(&app, bounds) {
+            tracing::warn!(error = ?error, "failed to open the capture frame before starting");
+        }
+    }
+
     if let Err(error) = MainWindow::minimize(&app) {
         abort_prepared_start(&app, &state, &session_id);
         return Err(error);
     }
 
+    // Minimizing can move OS focus off the capsule, which would swallow Esc.
+    if countdown_seconds > 0 {
+        CountdownWindow::focus(&app);
+        watch_stalled_countdown(app.clone(), session_id.clone(), countdown_seconds);
+    }
+
     if countdown_seconds == 0 {
-        if let Err(error) = start_prepared_session(
-            &app,
-            &state,
-            &session_id,
-            recording_ui_bounds(&app, &config.source),
-        ) {
+        if let Err(error) = start_prepared_session(&app, &state, &session_id, bounds) {
             abort_prepared_start(&app, &state, &session_id);
             return Err(error);
         }
-    } else if let Err(error) = CountdownWindow::open_or_focus(
-        &app,
-        &session_id,
-        countdown_seconds,
-        &config.source.name,
-        recording_ui_bounds(&app, &config.source),
-    ) {
-        abort_prepared_start(&app, &state, &session_id);
-        return Err(error);
     }
 
     emit_current_status(&app, &state);
@@ -419,7 +438,8 @@ pub async fn confirm_recording_start(
         abort_prepared_start(&app, &state, &session_id);
         return Err(error);
     }
-    CountdownWindow::hide(&app);
+    // Let the capsule finish its "Recording" confirmation, then close it.
+    CountdownWindow::close_after_confirm(&app);
     emit_current_status(&app, &state);
     Ok(())
 }
@@ -431,13 +451,68 @@ pub async fn cancel_recording_start(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<()> {
-    cancel_prepared_recording(&app, &state, &session_id)
+    let result = cancel_prepared_recording(&app, &state, &session_id);
+    if result.is_ok() {
+        // Tells the main window the abort came from a deliberate cancellation
+        // (not a failed start), so it can confirm that nothing was captured.
+        use tauri::Emitter;
+        let _ = app.emit(crate::events::event_names::RECORDING_START_CANCELLED, ());
+    }
+    result
 }
 
 fn remember_quick_config(state: &AppState, config: RecordingConfig) {
     if let Ok(mut guard) = state.quick_config.lock() {
         *guard = Some(config);
     }
+}
+
+/// Ask the main webview to run the normal start flow (config assembly from the
+/// current selections, countdown, capsule) instead of starting a recording
+/// from Rust.
+///
+/// The store owns device reconciliation, persisted preferences, and the
+/// countdown setting, so a native start would duplicate that logic and pick a
+/// stale config. Returns `false` when there is no main webview to ask (the
+/// window was destroyed); the caller should restore the window instead.
+pub(crate) fn request_start_from_ui(app: &tauri::AppHandle) -> bool {
+    if app.get_webview_window("main").is_none() {
+        return false;
+    }
+    use tauri::Emitter;
+    if let Err(error) = app.emit(crate::events::event_names::RECORDING_START_REQUESTED, ()) {
+        tracing::warn!(error = ?error, "could not ask the main window to start recording");
+        return false;
+    }
+    true
+}
+
+/// The start capsule is the only input-taking window in the start flow, so a
+/// webview that never finishes its countdown (crashed renderer, lost IPC) must
+/// not leave the session armed forever — that would block every later start
+/// until the user found the tray's cancel entry. Abort and restore the app.
+fn watch_stalled_countdown(app: tauri::AppHandle, session_id: String, countdown_seconds: u8) {
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(
+            u64::from(countdown_seconds) + 15,
+        ));
+        let state = app.state::<AppState>();
+        let still_armed = state
+            .recorder
+            .status()
+            .map(|status| {
+                status.state == capture::manifest::RecorderState::Countdown
+                    && status.session_id == session_id
+            })
+            .unwrap_or(false);
+        if !still_armed {
+            return;
+        }
+        warn!("countdown did not complete in time; aborting the prepared session");
+        if let Err(error) = cancel_prepared_recording(&app, &state, &session_id) {
+            tracing::error!(error = ?error, "failed to abort a stalled countdown");
+        }
+    });
 }
 
 /// The screen rectangle recording UI may position itself on. Camera sources
@@ -521,7 +596,7 @@ fn open_recording_windows(
     app: &tauri::AppHandle,
     bounds: crate::capture::source::Bounds,
 ) -> Result<()> {
-    FloatingWindow::open_or_focus(app)?;
+    FloatingWindow::open_or_focus(app, bounds)?;
 
     let state = app.state::<AppState>();
     let (capture_webcam, is_camera) = state
@@ -552,9 +627,14 @@ fn open_recording_windows(
     }
 
     // The preview window doubles as the camera HUD: for camera sources it
-    // shows the primary camera feed rather than the sidecar.
-    if (capture_webcam || is_camera) && state.recorder.status()?.webcam_preview_url.is_some() {
-        if let Err(error) = crate::window::WebcamPreviewWindow::open_or_focus(app) {
+    // shows the primary camera feed rather than the sidecar. Opening it is an
+    // explicit opt-in on platforms that cannot exclude it from a recording;
+    // the floating toolbar can still open it on demand.
+    if WebcamPreviewWindow::is_enabled()
+        && (capture_webcam || is_camera)
+        && state.recorder.status()?.webcam_preview_url.is_some()
+    {
+        if let Err(error) = WebcamPreviewWindow::open_or_focus(app) {
             tracing::warn!(error = ?error, "failed to open webcam preview window; recording continues");
         }
     }
@@ -1196,8 +1276,238 @@ pub fn export_recording(options: ExportOptions, state: State<'_, AppState>) -> R
 /// Open a small always-on-top floating window for transport controls.
 #[tauri::command]
 #[instrument]
-pub async fn open_floating_controls(app: tauri::AppHandle) -> Result<()> {
-    crate::window::FloatingWindow::open_or_focus(&app)
+pub async fn open_floating_controls(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<()> {
+    // Position on the captured monitor when a session exists; otherwise fall
+    // back to the primary monitor (the toolbar is created only once, so this
+    // path only matters before the first recording of the process).
+    let bounds = quick_config_bounds(&app, &state).unwrap_or_else(|_| {
+        app.primary_monitor()
+            .ok()
+            .flatten()
+            .map(|monitor| {
+                let position = monitor.position();
+                let size = monitor.size();
+                crate::capture::source::Bounds {
+                    x: position.x,
+                    y: position.y,
+                    width: size.width as i32,
+                    height: size.height as i32,
+                }
+            })
+            .unwrap_or(crate::capture::source::Bounds {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+            })
+    });
+    crate::window::FloatingWindow::open_or_focus(&app, bounds)
+}
+
+/// Max width of a setup-preview still. Wide enough to recognize the content,
+/// small enough that the dialog stays crisp without a heavy decode.
+const SOURCE_PREVIEW_MAX_WIDTH: u32 = 960;
+/// A preview younger than this is reused, so reopening the dialog (or a
+/// development StrictMode remount) does not re-spawn FFmpeg.
+const SOURCE_PREVIEW_FRESH: std::time::Duration = std::time::Duration::from_secs(20);
+/// FFmpeg grabs are serialized: two callers writing the same preview file at
+/// once would interleave bytes.
+static SOURCE_PREVIEW_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Stable, filename-safe cache key for a capture source.
+///
+/// The same display or window rectangle reuses one file; moving or resizing the
+/// source produces a new key.
+fn source_preview_key(source: &CaptureSource) -> String {
+    let raw = format!(
+        "{}-{}-{}-{}-{}x{}",
+        source.kind,
+        source.id,
+        source.bounds.x,
+        source.bounds.y,
+        source.bounds.width,
+        source.bounds.height
+    );
+    raw.chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+                character
+            } else {
+                '_'
+            }
+        })
+        .take(120)
+        .collect()
+}
+
+/// Whether a preview file is recent enough to reuse.
+fn source_preview_is_fresh(path: &std::path::Path) -> bool {
+    path.metadata()
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| modified.elapsed().ok())
+        .is_some_and(|age| age < SOURCE_PREVIEW_FRESH)
+}
+
+/// One cached still for `source`: reuse a fresh file, otherwise grab it.
+///
+/// `Ok(None)` means "no preview available" — the caller shows a schematic. A
+/// preview must never block or fail a start, so every capture error is logged
+/// at debug level and swallowed.
+fn grab_preview(
+    ffmpeg: &str,
+    dir: &std::path::Path,
+    source: &CaptureSource,
+    force: bool,
+) -> Result<Option<String>> {
+    if !matches!(source.kind.as_str(), "display" | "window" | "region")
+        || source.bounds.width <= 0
+        || source.bounds.height <= 0
+    {
+        return Ok(None);
+    }
+    let path = dir.join(format!("{}.jpg", source_preview_key(source)));
+    if !force && source_preview_is_fresh(&path) {
+        return Ok(Some(path.to_string_lossy().to_string()));
+    }
+
+    // Serialized: two grabs writing the same file at once would interleave.
+    // Re-check freshness after taking the lock in case another request won.
+    let _guard = SOURCE_PREVIEW_LOCK.lock();
+    if !force && source_preview_is_fresh(&path) {
+        return Ok(Some(path.to_string_lossy().to_string()));
+    }
+    match crate::capture::ffmpeg::grab_source_frame(
+        ffmpeg,
+        source,
+        &path,
+        SOURCE_PREVIEW_MAX_WIDTH,
+        std::time::Duration::from_secs(8),
+    ) {
+        Ok(()) => Ok(Some(path.to_string_lossy().to_string())),
+        Err(error) => {
+            tracing::debug!(error = %error, "source preview unavailable");
+            Ok(None)
+        }
+    }
+}
+
+/// Grab one still of a capture source for the setup dialog.
+///
+/// Returns the absolute path of a cached JPEG, or `None` when a preview cannot
+/// be produced (unsupported source, capture in progress, capture permission
+/// missing, Wayland without a portal, timeout). The dialog treats `None` as
+/// "show the schematic instead" — a preview must never block or fail a start.
+#[tauri::command]
+#[instrument(skip(app, state))]
+pub async fn capture_source_preview(
+    source: CaptureSource,
+    force: Option<bool>,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<String>> {
+    let dir = source_preview_dir(&app)?;
+
+    // A preview must never compete with an active capture or a media job for
+    // CPU; when the gate is busy the dialog simply keeps its schematic.
+    let Ok(permit) = state.recorder.resource_gate().try_acquire() else {
+        return Ok(None);
+    };
+    let ffmpeg = state.ffmpeg_path.to_string_lossy().to_string();
+    let force = force.unwrap_or(false);
+
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let _permit = permit;
+        grab_preview(&ffmpeg, &dir, &source, force)
+    })
+    .await;
+
+    match result {
+        Ok(path) => path,
+        Err(error) => {
+            tracing::warn!(error = %error, "source preview worker panicked");
+            Ok(None)
+        }
+    }
+}
+
+/// Grab several stills in one native call (used to warm every display the
+/// dialog can switch to). Results are index-aligned with `sources`.
+#[tauri::command]
+#[instrument(skip(app, state))]
+pub async fn capture_source_previews(
+    sources: Vec<CaptureSource>,
+    force: Option<bool>,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Vec<Option<String>>> {
+    if sources.is_empty() {
+        return Ok(Vec::new());
+    }
+    let dir = source_preview_dir(&app)?;
+    let Ok(permit) = state.recorder.resource_gate().try_acquire() else {
+        return Ok(vec![None; sources.len()]);
+    };
+    let ffmpeg = state.ffmpeg_path.to_string_lossy().to_string();
+    let force = force.unwrap_or(false);
+    let count = sources.len();
+
+    // One blocking task, one gate acquisition: the grabs themselves stay
+    // sequential so a multi-monitor dialog cannot spike CPU with N FFmpeg
+    // processes at once.
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let _permit = permit;
+        sources
+            .iter()
+            .map(|source| grab_preview(&ffmpeg, &dir, source, force).unwrap_or(None))
+            .collect::<Vec<_>>()
+    })
+    .await;
+
+    match result {
+        Ok(paths) => Ok(paths),
+        Err(error) => {
+            tracing::warn!(error = %error, "source preview batch worker panicked");
+            Ok(vec![None; count])
+        }
+    }
+}
+
+fn source_preview_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf> {
+    let dir = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|error| InternalError::Storage(format!("resolve preview directory: {error}")))?
+        .join("source-previews");
+    std::fs::create_dir_all(&dir)
+        .map_err(|error| InternalError::Storage(format!("create preview directory: {error}")))?;
+    Ok(dir)
+}
+
+/// Switch the floating toolbar between the full transport and the compact pill.
+#[tauri::command]
+#[instrument]
+pub async fn set_floating_controls_compact(compact: bool, app: tauri::AppHandle) -> Result<()> {
+    crate::window::FloatingWindow::set_compact(&app, compact)
+}
+
+/// Allow or suppress the floating toolbar for this session.
+#[tauri::command]
+#[instrument]
+pub async fn set_floating_controls_enabled(enabled: bool, app: tauri::AppHandle) -> Result<()> {
+    crate::window::FloatingWindow::set_enabled(&app, enabled);
+    Ok(())
+}
+
+/// Allow or suppress the automatic camera self-view at recording start.
+#[tauri::command]
+#[instrument]
+pub async fn set_self_view_enabled(enabled: bool, app: tauri::AppHandle) -> Result<()> {
+    crate::window::WebcamPreviewWindow::set_enabled(&app, enabled);
+    Ok(())
 }
 
 /// Open the fullscreen region selection window on the monitor under the cursor.
@@ -1474,6 +1784,41 @@ mod tests {
         assert!(app_data_dir.is_dir());
         assert_eq!(sessions_dir, app_data_dir.join("sessions"));
         assert!(sessions_dir.is_dir());
+    }
+
+    /// Preview cache keys must be stable for the same source rectangle and
+    /// filename-safe for window titles/ids that carry odd characters.
+    #[test]
+    fn source_preview_key_is_stable_and_filename_safe() {
+        let source = capture::source::CaptureSource {
+            kind: "window".into(),
+            id: "win-197212".into(),
+            name: "Quarterly review — Figma".into(),
+            bounds: capture::source::Bounds {
+                x: 10,
+                y: 20,
+                width: 1280,
+                height: 720,
+            },
+        };
+        let key = source_preview_key(&source);
+        assert_eq!(key, "window-win-197212-10-20-1280x720");
+        assert_eq!(key, source_preview_key(&source));
+        assert!(key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+
+        // A moved window gets a new key so the stale still is not reused.
+        let moved = capture::source::CaptureSource {
+            bounds: capture::source::Bounds {
+                x: 40,
+                y: 20,
+                width: 1280,
+                height: 720,
+            },
+            ..source
+        };
+        assert_ne!(key, source_preview_key(&moved));
     }
 
     /// The profile list surfaced to the UI (and fed to the encoder

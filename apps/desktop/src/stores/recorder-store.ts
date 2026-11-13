@@ -53,12 +53,20 @@ import {
 } from "../lib/recorder"
 import { toErrorMessage } from "../lib/errors"
 import { prepareRecordingMedia } from "../lib/media"
-import { getSetting, isTauri, setSetting } from "../lib/settings"
+import { getSetting, setSetting } from "../lib/settings"
 
 // Transport action currently in flight. Used for granular per-button pending
 // feedback (e.g. "Stopping..." on Stop while FFmpeg flushes) instead of a single
 // global `isLoading` that blocks every transport button at once.
 export type TransportAction = "start" | "pause" | "resume" | "stop" | "discard"
+
+/** Countdown allowed by the native `prepare_recording` command. */
+const DEFAULT_COUNTDOWN_SECONDS = 3
+
+/** Normalizes the persisted `countdownSeconds` setting ("0" | "3" | "5"). */
+export function parseCountdownSeconds(raw: string | null | undefined): number {
+  return raw === "0" ? 0 : raw === "5" ? 5 : DEFAULT_COUNTDOWN_SECONDS
+}
 
 async function queueMediaPreparation(recordingId: string): Promise<boolean> {
   try {
@@ -136,6 +144,16 @@ interface RecorderStore {
   // Which transport action is currently in flight, for per-button feedback.
   pendingAction: TransportAction | null
   error: string | null
+  // Countdown delay before capture starts, mirrored from the
+  // `countdownSeconds` setting so the modal chip and `start()` cannot disagree.
+  countdownSeconds: number
+  countdownLoaded: boolean
+  // One-line progress label while a start is being armed (shown in the modal
+  // and, after the modal closes, on the countdown capsule).
+  startStage: string | null
+  // Set when a start attempt fails after the setup dialog already closed —
+  // the shell surfaces it as a toast with a way back into the dialog.
+  startError: string | null
   // Brief confirmation shown after a recording is saved to the library.
   saveMessage: string | null
   // The durable library ID created by the latest successful stop.
@@ -148,6 +166,8 @@ interface RecorderStore {
 
   loadPreferences: () => Promise<RecordingPreferences>
   savePreferences: (updates: Partial<RecordingPreferences>) => Promise<void>
+  loadCountdownSeconds: () => Promise<number>
+  setCountdownSeconds: (seconds: number) => Promise<void>
   setSelectedSource: (source: CaptureSource | null) => void
   setSelectedSourceType: (type: "screen" | "window" | "region" | "camera") => void
   setSelectedProfileId: (profile: ScreenProfileId) => void
@@ -229,6 +249,10 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
   isLoading: false,
   pendingAction: null,
   error: null,
+  countdownSeconds: DEFAULT_COUNTDOWN_SECONDS,
+  countdownLoaded: false,
+  startStage: null,
+  startError: null,
   saveMessage: null,
   completedRecordingId: null,
   finalizationProgress: null,
@@ -260,6 +284,23 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
       await setSetting("recordingPreferences", JSON.stringify(next))
     } catch {
       // Persistence is non-fatal
+    }
+  },
+
+  loadCountdownSeconds: async () => {
+    const raw = await getSetting("countdownSeconds").catch(() => null)
+    const countdownSeconds = parseCountdownSeconds(raw)
+    set({ countdownSeconds, countdownLoaded: true })
+    return countdownSeconds
+  },
+
+  setCountdownSeconds: async (seconds) => {
+    const next = seconds === 0 || seconds === 5 ? seconds : DEFAULT_COUNTDOWN_SECONDS
+    set({ countdownSeconds: next, countdownLoaded: true })
+    try {
+      await setSetting("countdownSeconds", String(next))
+    } catch {
+      // Persistence is non-fatal — the in-memory choice still applies to this start.
     }
   },
 
@@ -624,6 +665,8 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
       isLoading: true,
       pendingAction: "start",
       error: null,
+      startError: null,
+      startStage: "Preparing capture inputs…",
       markers: [],
       saveMessage: null,
       completedRecordingId: null,
@@ -671,10 +714,13 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
         }
 
         if (!source) {
+          const message = state.error ?? "Select a capture source before recording"
           set({
-            error: state.error ?? "Select a capture source before recording",
+            error: message,
             isLoading: false,
             pendingAction: null,
+            startStage: null,
+            startError: message,
           })
           return
         }
@@ -738,6 +784,8 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
             error: "No camera found. Connect a camera and try again.",
             isLoading: false,
             pendingAction: null,
+            startStage: null,
+            startError: "No camera found. Connect a camera and try again.",
           })
           return
         }
@@ -812,15 +860,29 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
         })
       }
 
-      const configuredCountdown = isTauri()
-        ? await getSetting("countdownSeconds").catch(() => null)
-        : null
-      const countdownSeconds = configuredCountdown === "5" ? 5 : configuredCountdown === "0" ? 0 : 3
+      const countdownSeconds = state.countdownLoaded
+        ? state.countdownSeconds
+        : await get().loadCountdownSeconds()
+      set({ startStage: "Arming capture…" })
       await prepareRecording(config, countdownSeconds)
       const status = await getRecordingStatus()
-      set({ status, isLoading: false, pendingAction: null, error: null })
+      set({
+        status,
+        isLoading: false,
+        pendingAction: null,
+        startStage: null,
+        startError: null,
+        error: null,
+      })
     } catch (error) {
-      set({ error: toErrorMessage(error), isLoading: false, pendingAction: null })
+      const message = toErrorMessage(error)
+      set({
+        error: message,
+        isLoading: false,
+        pendingAction: null,
+        startStage: null,
+        startError: message,
+      })
     }
   },
 

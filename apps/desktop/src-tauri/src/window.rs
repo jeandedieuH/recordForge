@@ -7,9 +7,36 @@ use crate::database::settings;
 use crate::errors::{InternalError, Result};
 use crate::state::AppState;
 
-const FLOATING_WINDOW_WIDTH: f64 = 620.0;
-const FLOATING_WINDOW_HEIGHT: f64 = 88.0;
-const FLOATING_WINDOW_BOTTOM_MARGIN: f64 = 28.0;
+const FLOATING_WINDOW_WIDTH: f64 = 340.0;
+const FLOATING_WINDOW_HEIGHT: f64 = 56.0;
+const FLOATING_WINDOW_BOTTOM_MARGIN: f64 = 24.0;
+// Compact mode keeps the transport reachable without covering the app being
+// recorded: timer + pause/stop/expand only.
+const FLOATING_COMPACT_WIDTH: f64 = 236.0;
+const FLOATING_COMPACT_HEIGHT: f64 = 56.0;
+const FLOATING_COMPACT_BOTTOM_MARGIN: f64 = 20.0;
+
+/// Whether the floating transport may be painted over the desktop.
+///
+/// Windows and macOS exclude it from capture, so it is on by default. X11
+/// screen capture cannot exclude a window (see `overlays_hidden_from_capture`),
+/// so painting the toolbar there would put it in every full-screen recording —
+/// the tray menu and the global shortcuts still control the session, so the
+/// toolbar is opt-in and off by default on Linux.
+const FLOATING_CONTROLS_DEFAULT: bool = !cfg!(target_os = "linux");
+static FLOATING_CONTROLS_ENABLED: AtomicBool = AtomicBool::new(FLOATING_CONTROLS_DEFAULT);
+
+// Start capsule: a small always-on-top badge over the capture target. It must
+// stay small — the old countdown window covered the whole capture rect with a
+// scrim, hiding the very thing the user was about to demonstrate, and even the
+// first capsule version was wide enough to compete with the content.
+const COUNTDOWN_WINDOW_WIDTH: f64 = 200.0;
+const COUNTDOWN_WINDOW_HEIGHT: f64 = 52.0;
+const COUNTDOWN_WINDOW_TOP_MARGIN: f64 = 28.0;
+const COUNTDOWN_WINDOW_EDGE_MARGIN: f64 = 16.0;
+// How long the capsule may stay up after the capture is confirmed live so it
+// can show "Recording" before closing itself.
+const COUNTDOWN_CONFIRM_LINGER: std::time::Duration = std::time::Duration::from_millis(1200);
 
 const WEBCAM_PREVIEW_WINDOW_WIDTH: f64 = 220.0;
 const WEBCAM_PREVIEW_WINDOW_HEIGHT: f64 = 220.0;
@@ -256,8 +283,27 @@ impl MainWindow {
 pub struct FloatingWindow;
 
 impl FloatingWindow {
-    /// Open or focus the floating transport controls toolbar window.
-    pub fn open_or_focus(app: &tauri::AppHandle) -> Result<()> {
+    /// Enable or disable the toolbar. Disabling hides it immediately so the
+    /// change takes effect for a recording that is already running.
+    pub fn set_enabled(app: &tauri::AppHandle, enabled: bool) {
+        FLOATING_CONTROLS_ENABLED.store(enabled, Ordering::Relaxed);
+        if !enabled {
+            Self::hide(app);
+        }
+    }
+
+    pub fn is_enabled() -> bool {
+        FLOATING_CONTROLS_ENABLED.load(Ordering::Relaxed)
+    }
+
+    /// Open or focus the floating transport controls toolbar window. `bounds`
+    /// is the capture rectangle, so the toolbar lands on the monitor that is
+    /// actually being recorded instead of always on the primary one.
+    pub fn open_or_focus(app: &tauri::AppHandle, bounds: Bounds) -> Result<()> {
+        if !Self::is_enabled() {
+            tracing::debug!("floating toolbar disabled; recording continues without it");
+            return Ok(());
+        }
         if let Some(window) = app.get_webview_window("floating") {
             tracing::info!("floating window already exists, showing and focusing");
             if let Err(error) = window.set_content_protected(true) {
@@ -286,16 +332,10 @@ impl FloatingWindow {
         .resizable(false)
         .shadow(false);
 
-        // Position at the bottom-center of the primary monitor so the toolbar
-        // stays close to the pointer without covering the user's main content.
-        if let Ok(Some(monitor)) = app.primary_monitor() {
-            let size = monitor.size();
-            let position = monitor.position();
-            let scale = monitor.scale_factor();
-            let screen_w = size.width as f64 / scale;
-            let screen_h = size.height as f64 / scale;
-            let monitor_x = position.x as f64 / scale;
-            let monitor_y = position.y as f64 / scale;
+        // Bottom-center of the captured monitor so the toolbar stays close to
+        // the action without covering the user's main content.
+        if let Some((monitor_x, monitor_y, screen_w, screen_h)) = monitor_logical_rect(app, bounds)
+        {
             let x = monitor_x + (screen_w - FLOATING_WINDOW_WIDTH) / 2.0;
             let y = monitor_y + screen_h - FLOATING_WINDOW_HEIGHT - FLOATING_WINDOW_BOTTOM_MARGIN;
             tracing::info!(
@@ -303,12 +343,11 @@ impl FloatingWindow {
                 screen_h,
                 x,
                 y,
-                scale,
                 "floating window position calculated"
             );
             builder = builder.position(x, y);
         } else {
-            tracing::warn!("no primary monitor detected for floating window positioning");
+            tracing::warn!("no monitor detected for floating window positioning");
         }
 
         match builder.build() {
@@ -332,6 +371,61 @@ impl FloatingWindow {
             tracing::info!("hiding floating controls window");
             let _ = window.hide();
         }
+    }
+
+    /// Shrink to the compact transport pill (or restore the full toolbar).
+    ///
+    /// The window is not click-through, so its transparent margin must shrink
+    /// with the content — a 620 px invisible strip would swallow clicks across
+    /// the desktop. Recentered on the monitor it currently occupies so a
+    /// user-moved toolbar stays where it was.
+    pub fn set_compact(app: &tauri::AppHandle, compact: bool) -> Result<()> {
+        let Some(window) = app.get_webview_window("floating") else {
+            return Ok(());
+        };
+        let (width, height, margin) = if compact {
+            (
+                FLOATING_COMPACT_WIDTH,
+                FLOATING_COMPACT_HEIGHT,
+                FLOATING_COMPACT_BOTTOM_MARGIN,
+            )
+        } else {
+            (
+                FLOATING_WINDOW_WIDTH,
+                FLOATING_WINDOW_HEIGHT,
+                FLOATING_WINDOW_BOTTOM_MARGIN,
+            )
+        };
+
+        let position = window.outer_position().map_err(|error| {
+            InternalError::Unknown(format!("read floating window position: {error}"))
+        })?;
+        let size = window.outer_size().map_err(|error| {
+            InternalError::Unknown(format!("read floating window size: {error}"))
+        })?;
+        let occupied = Bounds {
+            x: position.x,
+            y: position.y,
+            width: size.width as i32,
+            height: size.height as i32,
+        };
+
+        window
+            .set_size(LogicalSize::new(width, height))
+            .map_err(|error| InternalError::Unknown(format!("resize floating window: {error}")))?;
+
+        if let Some((monitor_x, monitor_y, screen_w, screen_h)) =
+            monitor_logical_rect(app, occupied)
+        {
+            let x = monitor_x + (screen_w - width) / 2.0;
+            let y = monitor_y + screen_h - height - margin;
+            window
+                .set_position(LogicalPosition::new(x, y))
+                .map_err(|error| {
+                    InternalError::Unknown(format!("position floating window: {error}"))
+                })?;
+        }
+        Ok(())
     }
 }
 
@@ -385,7 +479,27 @@ pub fn install_media_permission_autogrant<R: tauri::Runtime>(_window: &tauri::We
 /// Floating webcam preview window management module.
 pub struct WebcamPreviewWindow;
 
+/// Whether the camera self-view opens automatically when a recording starts.
+///
+/// Same reasoning as the floating toolbar: Windows/macOS exclude it from
+/// capture, X11 cannot, so it defaults off on Linux where it would otherwise be
+/// painted into every full-screen recording.
+const SELF_VIEW_DEFAULT: bool = !cfg!(target_os = "linux");
+static SELF_VIEW_ENABLED: AtomicBool = AtomicBool::new(SELF_VIEW_DEFAULT);
+
 impl WebcamPreviewWindow {
+    /// Enable or disable the automatic self-view. Disabling closes an open one.
+    pub fn set_enabled(app: &tauri::AppHandle, enabled: bool) {
+        SELF_VIEW_ENABLED.store(enabled, Ordering::Relaxed);
+        if !enabled {
+            Self::hide(app);
+        }
+    }
+
+    pub fn is_enabled() -> bool {
+        SELF_VIEW_ENABLED.load(Ordering::Relaxed)
+    }
+
     /// Open or focus the floating webcam preview window.
     pub fn open_or_focus(app: &tauri::AppHandle) -> Result<()> {
         let (device_id, device_name, preview_url) = {
@@ -525,9 +639,27 @@ impl WebcamPreviewWindow {
 /// Screen boundary outline window management module.
 pub struct BoundaryWindow;
 
+/// Whether this platform can keep an auxiliary window out of a recording.
+///
+/// Windows (`WDA_EXCLUDEFROMCAPTURE`) and macOS (`sharingType = .none`) can.
+/// tao's `set_content_protection` is a documented no-op on Linux, so a
+/// decorative frame there would be baked into the video instead of being
+/// excluded from it — and absolute window placement is unreliable on Wayland
+/// anyway. The start capsule is unaffected: it is only visible before the
+/// capture begins.
+pub fn overlays_hidden_from_capture() -> bool {
+    cfg!(any(target_os = "windows", target_os = "macos"))
+}
+
 impl BoundaryWindow {
     /// Open or focus a transparent overlay positioned exactly over the capture bounds.
     pub fn open_or_focus(app: &tauri::AppHandle, bounds: Bounds) -> Result<()> {
+        if !overlays_hidden_from_capture() {
+            tracing::debug!(
+                "capture frame disabled: this platform cannot exclude overlays from recordings"
+            );
+            return Ok(());
+        }
         let (position, size) = logical_capture_rect(app, bounds);
         if let Some(window) = app.get_webview_window("boundary") {
             tracing::info!("boundary window already exists, updating bounds");
@@ -754,7 +886,10 @@ pub fn camera_countdown_bounds(app: &tauri::AppHandle) -> Bounds {
         })
 }
 
-/// Dedicated countdown window shown while the main application is minimized.
+/// Dedicated start-capsule window shown over the capture target while the
+/// countdown runs. It covers a card-sized area (not the whole capture rect) so
+/// the user keeps seeing what they are about to record, and it stays
+/// click-through-free so its Cancel button is a real click target.
 pub struct CountdownWindow;
 impl CountdownWindow {
     pub fn open_or_focus(
@@ -768,15 +903,8 @@ impl CountdownWindow {
             let _ = window.close();
         }
 
-        let (position, size) = logical_capture_rect(app, bounds);
-        let logical_position = match position {
-            Position::Logical(position) => position,
-            Position::Physical(position) => position.to_logical(1.0),
-        };
-        let logical_size = match size {
-            Size::Logical(size) => size,
-            Size::Physical(size) => size.to_logical(1.0),
-        };
+        let (capture_x, capture_y, capture_w, capture_h) = logical_rect(app, bounds);
+        let (x, y) = capsule_position(capture_x, capture_y, capture_w, capture_h);
         let script = format!(
             "window.__RECORD_FORGE_WINDOW_KIND = 'countdown'; window.__RECORD_FORGE_COUNTDOWN_PARAMS = {{ sessionId: {:?}, seconds: {}, sourceName: {:?} }};",
             session_id, seconds, source_name
@@ -789,8 +917,8 @@ impl CountdownWindow {
         )
         .initialization_script(&script)
         .title("RecordForge Starting Recording")
-        .inner_size(logical_size.width, logical_size.height)
-        .position(logical_position.x, logical_position.y)
+        .inner_size(COUNTDOWN_WINDOW_WIDTH, COUNTDOWN_WINDOW_HEIGHT)
+        .position(x, y)
         .decorations(false)
         .always_on_top(true)
         .transparent(true)
@@ -801,14 +929,9 @@ impl CountdownWindow {
         .build()
         .map_err(|error| InternalError::Unknown(format!("create countdown window: {error:?}")))?;
 
-        // A blank or stalled countdown must never become a full-screen input trap.
-        if let Err(error) = window.set_ignore_cursor_events(true) {
-            let _ = window.close();
-            return Err(InternalError::Unknown(format!(
-                "make countdown window click-through: {error:?}"
-            ))
-            .into());
-        }
+        // The capsule is the only interactive part of this window and it is
+        // card-sized, so it does not need to be click-through. Focus follows so
+        // Esc can cancel before any capture has begun.
         let _ = window.set_focus();
 
         Ok(())
@@ -819,6 +942,91 @@ impl CountdownWindow {
             let _ = window.close();
         }
     }
+
+    /// Re-focus the capsule after the main window minimizes — minimizing can
+    /// move OS focus elsewhere, and Escape is only delivered to the focused
+    /// window.
+    pub fn focus(app: &tauri::AppHandle) {
+        if let Some(window) = app.get_webview_window("countdown") {
+            let _ = window.set_focus();
+        }
+    }
+
+    /// Close the capsule shortly after the capture is confirmed live so the
+    /// frontend can finish its "Recording" confirmation, then disappear before
+    /// the floating toolbar takes over. On platforms that cannot exclude a
+    /// window from capture the capsule must go immediately — it would
+    /// otherwise be recorded for the first second of the take.
+    pub fn close_after_confirm(app: &tauri::AppHandle) {
+        if !overlays_hidden_from_capture() {
+            Self::hide(app);
+            return;
+        }
+        let app = app.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(COUNTDOWN_CONFIRM_LINGER);
+            if let Some(window) = app.get_webview_window("countdown") {
+                let _ = window.close();
+            }
+        });
+    }
+}
+
+/// Top-center of the capture rectangle, centered when the target is smaller
+/// than the capsule itself. Coordinates are logical CSS pixels.
+fn capsule_position(capture_x: f64, capture_y: f64, capture_w: f64, capture_h: f64) -> (f64, f64) {
+    let x = capture_x + (capture_w - COUNTDOWN_WINDOW_WIDTH) / 2.0;
+    let preferred_y = capture_y + COUNTDOWN_WINDOW_TOP_MARGIN;
+    let lowest_y = capture_y + capture_h - COUNTDOWN_WINDOW_HEIGHT - COUNTDOWN_WINDOW_EDGE_MARGIN;
+    let y = if lowest_y > capture_y + COUNTDOWN_WINDOW_EDGE_MARGIN {
+        preferred_y.min(lowest_y)
+    } else {
+        capture_y + (capture_h - COUNTDOWN_WINDOW_HEIGHT) / 2.0
+    };
+    (x, y)
+}
+
+/// Capture bounds in logical CSS pixels for the monitor they sit on.
+fn logical_rect(app: &tauri::AppHandle, bounds: Bounds) -> (f64, f64, f64, f64) {
+    let (position, size) = logical_capture_rect(app, bounds);
+    let (x, y) = match position {
+        Position::Logical(position) => (position.x, position.y),
+        Position::Physical(position) => (position.x as f64, position.y as f64),
+    };
+    let (width, height) = match size {
+        Size::Logical(size) => (size.width, size.height),
+        Size::Physical(size) => (size.width as f64, size.height as f64),
+    };
+    (x, y, width, height)
+}
+
+/// Logical rect (CSS pixels) of the monitor that contains `bounds`, falling
+/// back to the first available monitor. Used to place auxiliary windows on the
+/// monitor that is actually being recorded.
+fn monitor_logical_rect(app: &tauri::AppHandle, bounds: Bounds) -> Option<(f64, f64, f64, f64)> {
+    let center_x = bounds.x + bounds.width / 2;
+    let center_y = bounds.y + bounds.height / 2;
+    let monitors = app.available_monitors().ok()?;
+    let monitor = monitors
+        .iter()
+        .find(|monitor| {
+            let position = monitor.position();
+            let size = monitor.size();
+            center_x >= position.x
+                && center_x < position.x + size.width as i32
+                && center_y >= position.y
+                && center_y < position.y + size.height as i32
+        })
+        .or_else(|| monitors.first())?;
+    let scale = monitor.scale_factor();
+    let position = monitor.position();
+    let size = monitor.size();
+    Some((
+        position.x as f64 / scale,
+        position.y as f64 / scale,
+        size.width as f64 / scale,
+        size.height as f64 / scale,
+    ))
 }
 
 fn logical_capture_rect(app: &tauri::AppHandle, bounds: Bounds) -> (Position, Size) {

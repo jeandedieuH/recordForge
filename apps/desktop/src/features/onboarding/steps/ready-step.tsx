@@ -48,7 +48,7 @@ export function ReadyStep({ onStartRecording, onFinish }: ReadyStepProps) {
               <span>Record / Stop</span>
             </div>
             <p className="text-[11px] text-subtle-foreground">
-              Start or finalize recording instantly from anywhere on your desktop.
+              Start or stop from anywhere — your last setup and start delay apply.
             </p>
             <div className="flex items-center gap-1">
               <Kbd>{MODIFIER_NAME}</Kbd>

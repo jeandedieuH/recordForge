@@ -27,7 +27,15 @@ export function useRecorderPolling(intervalMs = 1000) {
 
     const id = setInterval(() => {
       const status = useRecorderStore.getState().status
-      if (!status || status.state === "recording" || status.state === "paused") {
+      // Countdown is included: the boundary frame switches from its armed
+      // outline to the recording hairline as soon as the capture goes live,
+      // and a missed status event must not leave it armed.
+      if (
+        !status ||
+        status.state === "countdown" ||
+        status.state === "recording" ||
+        status.state === "paused"
+      ) {
         refreshStatus().catch(() => {})
       }
     }, intervalMs)

@@ -72,6 +72,10 @@ describe("recorder-store preferences & fallback", () => {
       },
       preferencesLoaded: false,
       error: null,
+      countdownSeconds: 3,
+      countdownLoaded: false,
+      startStage: null,
+      startError: null,
     })
   })
 
@@ -797,5 +801,74 @@ describe("recorder-store preferences & fallback", () => {
     expect(useRecorderStore.getState().diagnosticsLoading).toBe(false)
     expect(useRecorderStore.getState().diagnosticsLoaded).toBe(true)
     expect(useRecorderStore.getState().diagnostics?.platform.os).toBe("Windows 11")
+  })
+
+  it("honors the start delay chosen in the modal for the next start", async () => {
+    const source = {
+      kind: "display" as const,
+      id: "display-0",
+      name: "Display 1",
+      bounds: { x: 0, y: 0, width: 1920, height: 1080 },
+    }
+    const prepare = vi.spyOn(recorderApi, "prepareRecording").mockResolvedValue("session-delay")
+    vi.spyOn(recorderApi, "getRecordingStatus").mockResolvedValue({
+      sessionId: "session-delay",
+      state: "countdown",
+      startedAt: null,
+      stoppedAt: null,
+      durationMs: 0,
+      recordedMs: 0,
+      sourceKind: "display",
+      sourceName: "Display 1",
+      microphoneActive: false,
+      systemAudioActive: false,
+      webcamActive: false,
+      error: null,
+    })
+
+    useRecorderStore.setState({
+      sources: [source],
+      selectedSource: source,
+      preferencesLoaded: true,
+    })
+
+    await useRecorderStore.getState().setCountdownSeconds(5)
+    expect(localStorage.getItem("recordforge:countdownSeconds")).toBe("5")
+
+    await useRecorderStore.getState().start()
+
+    expect(prepare).toHaveBeenCalledWith(expect.objectContaining({ source }), 5)
+  })
+
+  it("reports a failed start to the shell and clears the arming stage", async () => {
+    const source = {
+      kind: "display" as const,
+      id: "display-0",
+      name: "Display 1",
+      bounds: { x: 0, y: 0, width: 1920, height: 1080 },
+    }
+    vi.spyOn(recorderApi, "prepareRecording").mockRejectedValue(
+      new Error("capture source is already in use"),
+    )
+
+    useRecorderStore.setState({
+      sources: [source],
+      selectedSource: source,
+      preferencesLoaded: true,
+    })
+
+    await useRecorderStore.getState().start()
+
+    const state = useRecorderStore.getState()
+    expect(state.startError).toBe("capture source is already in use")
+    expect(state.startStage).toBeNull()
+    expect(state.pendingAction).toBeNull()
+    expect(state.error).toBe("capture source is already in use")
+  })
+
+  it("normalizes unknown persisted start delays to 3 seconds", async () => {
+    localStorage.setItem("recordforge:countdownSeconds", "42")
+    await expect(useRecorderStore.getState().loadCountdownSeconds()).resolves.toBe(3)
+    expect(useRecorderStore.getState().countdownSeconds).toBe(3)
   })
 })

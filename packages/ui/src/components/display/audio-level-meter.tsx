@@ -44,7 +44,7 @@ function AudioLevelMeter({
             className={cn(
               "rounded-[1px] transition-colors duration-fast",
               orientation === "horizontal" ? "w-1" : "h-1 w-full",
-              lit ? color : "bg-overlay",
+              lit ? color : "bg-foreground/20",
             )}
             style={orientation === "horizontal" ? { height: `${30 + ratio * 70}%` } : undefined}
           />

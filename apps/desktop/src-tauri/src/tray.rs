@@ -505,30 +505,20 @@ fn recorder_is_active(app: &tauri::AppHandle) -> bool {
 }
 
 fn start_or_focus(state: &tauri::State<AppState>, app: &tauri::AppHandle) -> Result<()> {
-    let bounds = {
-        let status = state.recorder.status()?;
-        if matches!(status.state, RecorderState::Idle) {
-            let quick = state.quick_config.lock().map_err(|_| {
-                crate::errors::InternalError::Capture("quick config mutex poisoned".into())
-            })?;
-            if let Some(config) = quick.as_ref() {
-                let bounds = config.source.bounds;
-                state.recorder.start(config.clone())?;
-                Some(bounds)
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    };
+    let idle = state
+        .recorder
+        .status()
+        .map(|status| matches!(status.state, RecorderState::Idle))
+        .unwrap_or(false);
 
-    if let Some(bounds) = bounds {
-        if let Err(error) = crate::window::MainWindow::minimize(app) {
-            tracing::warn!(error = ?error, "tray start could not minimize main window");
-        }
-        crate::commands::recording::open_recording_windows_async(app, bounds);
-    } else if let Err(error) = crate::window::MainWindow::show_or_recreate(app) {
+    // The React store owns config assembly and the countdown flow, so an idle
+    // Start asks the main window to run the same path as the Start button
+    // rather than starting here with a possibly stale quick config.
+    if idle && crate::commands::recording::request_start_from_ui(app) {
+        return Ok(());
+    }
+
+    if let Err(error) = crate::window::MainWindow::show_or_recreate(app) {
         tracing::warn!(error = ?error, "tray start could not restore main window");
     }
     Ok(())

@@ -1269,6 +1269,109 @@ fn camera_pipes_stdout(enable_preview: bool) -> bool {
     enable_preview
 }
 
+/// Grab one downscaled frame of a capture source for the setup preview.
+///
+/// Reuses the real screen-input plumbing (`add_screen_video_input`) so the
+/// thumbnail shows exactly what the recording will see — same display, same
+/// window rectangle, same DPI normalization — instead of a mock diagram.
+///
+/// Best-effort by design: any failure (permission missing, Wayland without a
+/// portal input, wedged device) returns an error and the setup dialog keeps its
+/// schematic preview. Bounded to `timeout` so a stuck capture cannot leave the
+/// dialog spinning.
+pub fn grab_source_frame(
+    ffmpeg_path: &str,
+    source: &CaptureSource,
+    out_path: &Path,
+    max_width: u32,
+    timeout: Duration,
+) -> crate::errors::Result<()> {
+    let Some(profile) = super::config::builtin_profiles().into_iter().next() else {
+        return Err(crate::errors::InternalError::Capture(
+            "no built-in recording profile available for the preview".into(),
+        )
+        .into());
+    };
+
+    if let Some(parent) = out_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            crate::errors::InternalError::Storage(format!("create preview directory: {error}"))
+        })?;
+    }
+
+    let mut command = crate::process::create_command(ffmpeg_path);
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .args(["-y", "-hide_banner", "-loglevel", "error"]);
+    // `None` ddagrab target keeps Windows on gdigrab: the preview must not
+    // depend on a working GPU capture path.
+    let (_backend, screen_crop) =
+        add_screen_video_input(&mut command, ffmpeg_path, source, &profile, None, None);
+
+    // Backends that can only ingest a whole display (avfoundation) crop to the
+    // source rect first — mirror `build_video_filter` so the still matches the
+    // recording frame instead of showing the entire display.
+    let crop_filter = screen_crop
+        .map(|crop| {
+            format!(
+                "crop={}:{}:{}:{},",
+                crop.width.max(2),
+                crop.height.max(2),
+                crop.x.max(0),
+                crop.y.max(0)
+            )
+        })
+        .unwrap_or_default();
+    command.args([
+        "-frames:v",
+        "1",
+        // Quotes survive into FFmpeg's filter parser (no shell is involved):
+        // fit inside `max_width` without ever upscaling the source.
+        "-vf",
+        &format!("{crop_filter}scale=w='min(iw,{max_width})':h=-2"),
+        "-q:v",
+        "4",
+        out_path.to_string_lossy().as_ref(),
+    ]);
+
+    let mut child = command.spawn().map_err(|error| {
+        crate::errors::InternalError::Capture(format!("spawn preview ffmpeg: {error}"))
+    })?;
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(status)) => {
+                return Err(crate::errors::InternalError::Capture(format!(
+                    "preview ffmpeg exited with {status}"
+                ))
+                .into())
+            }
+            Ok(None) if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(40));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(crate::errors::InternalError::Capture(
+                    "preview capture timed out".into(),
+                )
+                .into());
+            }
+            Err(error) => {
+                let _ = child.kill();
+                return Err(crate::errors::InternalError::Capture(format!(
+                    "wait for preview ffmpeg: {error}"
+                ))
+                .into());
+            }
+        }
+    }
+}
+
 /// Push the platform screen input arguments and return the backend name that
 /// was actually used plus an optional screen-space crop (region/window
 /// sources on backends that can only ingest whole displays — macOS today,

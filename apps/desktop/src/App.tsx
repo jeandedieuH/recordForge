@@ -21,15 +21,16 @@ const AppShell = lazy(() =>
 function BoundaryWindow() {
   useRecorderPolling()
   const status = useRecorderStore((state) => state.status)
-  const isActive = status?.state === "recording" || status?.state === "paused"
+  const phase =
+    status?.state === "recording"
+      ? "recording"
+      : status?.state === "paused"
+        ? "paused"
+        : status?.state === "countdown"
+          ? "arming"
+          : null
 
-  return (
-    <CaptureBoundaryOverlay
-      source={null}
-      isActive={isActive}
-      isPaused={status?.state === "paused"}
-    />
-  )
+  return <CaptureBoundaryOverlay phase={phase} />
 }
 
 // Each auxiliary Tauri window uses a query flag so it can share the compiled

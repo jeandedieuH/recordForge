@@ -2,7 +2,6 @@ import { getCurrentWindow } from "@tauri-apps/api/window"
 import { ChevronDown, Copy, Minus, Monitor, Square, Video, X } from "lucide-react"
 import { useEffect, useState } from "react"
 import {
-  Button,
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
@@ -52,24 +51,27 @@ export function Titlebar({ view, onOpenRecord }: TitlebarProps) {
 
       <div className="flex items-center gap-3">
         {/* Primary Record split button — main half opens the last-used mode,
-            the chevron picks screen vs camera explicitly. */}
+            the chevron picks screen vs camera explicitly. The dot stays solid:
+            the pulse belongs to an active recording, not to a pending start. */}
         {onOpenRecord ? (
-          <div className="flex items-stretch">
-            <Button
+          <div className="flex items-stretch overflow-hidden rounded-lg border border-border-strong bg-surface-container-high shadow-e1">
+            <button
+              type="button"
               onClick={() => onOpenRecord()}
-              className="bg-recording hover:bg-recording-hover text-white font-medium text-xs px-4 py-1.5 h-8 rounded-l-md rounded-r-none flex items-center gap-2 shadow-sm border-0 cursor-pointer"
+              className="flex h-8 cursor-pointer items-center gap-2 px-3 text-xs font-semibold text-foreground transition-colors duration-fast hover:bg-overlay focus-visible:bg-overlay focus-visible:outline-none"
             >
-              <span className="size-2 rounded-full bg-white animate-pulse" />
+              <span className="size-2 shrink-0 rounded-full bg-recording" aria-hidden />
               <span>Record</span>
-            </Button>
+            </button>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <Button
+                <button
+                  type="button"
                   aria-label="Choose what to record"
-                  className="h-8 w-7 rounded-l-none rounded-r-md border-0 border-l border-white/25 bg-recording px-0 text-white shadow-sm hover:bg-recording-hover cursor-pointer"
+                  className="flex h-8 w-7 cursor-pointer items-center justify-center border-l border-border text-muted-foreground transition-colors duration-fast hover:bg-overlay hover:text-foreground focus-visible:bg-overlay focus-visible:outline-none"
                 >
                   <ChevronDown className="size-3.5" aria-hidden />
-                </Button>
+                </button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
                 <DropdownMenuItem onSelect={() => onOpenRecord("screen")}>

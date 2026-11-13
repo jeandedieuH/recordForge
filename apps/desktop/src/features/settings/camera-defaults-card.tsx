@@ -3,6 +3,7 @@ import { Switch, ToggleGroup, ToggleGroupItem } from "@recordforge/ui"
 import type { CameraProfileId } from "@recordforge/contracts"
 import { cameraTiers } from "@recordforge/contracts"
 import { useRecorderStore } from "../../hooks/use-recorder"
+import { isLinux } from "../../lib/platform"
 
 const TIER_DESCRIPTIONS: Record<CameraProfileId, string> = {
   "camera-low": "720p · lightest on CPU and disk",
@@ -89,7 +90,9 @@ export function CameraDefaultsCard() {
           ))}
         </ToggleGroup>
         <p className="mt-1.5 text-[11px] text-subtle-foreground">
-          A small always-on-top window shows your framing. It never appears in the recording.
+          {isLinux
+            ? "The self-view window is off by default on Linux because it can appear in X11 recordings; quality applies when it is enabled in Recording Defaults."
+            : "A small always-on-top window shows your framing. It never appears in the recording."}
         </p>
       </div>
 

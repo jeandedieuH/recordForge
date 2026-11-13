@@ -1,6 +1,6 @@
 import { cva, type VariantProps } from "class-variance-authority"
 import { LoaderCircle } from "lucide-react"
-import type { ButtonHTMLAttributes } from "react"
+import type { ButtonHTMLAttributes, Ref } from "react"
 import { cn } from "../../lib/cn"
 
 const buttonVariants = cva(
@@ -30,6 +30,8 @@ interface ButtonProps
   extends ButtonHTMLAttributes<HTMLButtonElement>, VariantProps<typeof buttonVariants> {
   /** Shows a spinner and disables the button while an action is in flight. */
   loading?: boolean
+  /** React 19 passes refs as props; declared here so consumers can focus the button. */
+  ref?: Ref<HTMLButtonElement>
 }
 
 function Button({ className, variant, size, loading, disabled, children, ...props }: ButtonProps) {

@@ -1,4 +1,4 @@
-import { Crop, Pencil, X } from "lucide-react"
+import { Crop, Monitor, MonitorUp, Pencil, X } from "lucide-react"
 import {
   Button,
   Select,
@@ -10,6 +10,7 @@ import {
 } from "@recordforge/ui"
 import type { ScreenProfileId } from "@recordforge/contracts"
 import { useRecorderStore } from "../../../hooks/use-recorder"
+import { SourcePreview } from "./source-preview"
 
 interface ScreenSourcePanelProps {
   onOpenRegionPicker: () => void
@@ -35,9 +36,33 @@ export function ScreenSourcePanel({ onOpenRegionPicker }: ScreenSourcePanelProps
   const windowSources = sources.filter((s) => s.kind === "window")
   const regionSource = selectedSource?.kind === "region" ? selectedSource : null
 
-  const selectedDisplayResolution = selectedSource?.bounds
-    ? `${selectedSource.bounds.width}×${selectedSource.bounds.height}`
-    : "2560×1440"
+  // The preview inherits the target's real aspect ratio (clamped so an
+  // extreme window can't turn the card into a sliver) instead of always
+  // claiming 16:9.
+  const ratio =
+    selectedSource?.bounds && selectedSource.bounds.height > 0
+      ? selectedSource.bounds.width / selectedSource.bounds.height
+      : 16 / 9
+  const aspectRatio = Math.min(2.4, Math.max(0.9, ratio))
+
+  const PreviewIcon =
+    selectedSourceType === "region" ? Crop : selectedSourceType === "window" ? MonitorUp : Monitor
+  const previewLabel =
+    selectedSourceType === "region"
+      ? regionSource
+        ? regionSource.name
+        : sourcesLoaded
+          ? "No area selected"
+          : "Select an area"
+      : (selectedSource?.name ?? (sourcesLoaded ? "No source selected" : "Detecting…"))
+  const previewMeta =
+    selectedSourceType === "region"
+      ? regionSource
+        ? `${regionSource.bounds.width}×${regionSource.bounds.height} px`
+        : "Physical pixels"
+      : selectedSource?.bounds
+        ? `${selectedSource.bounds.width}×${selectedSource.bounds.height}`
+        : "—"
 
   return (
     <div className="flex flex-col gap-4">
@@ -45,24 +70,31 @@ export function ScreenSourcePanel({ onOpenRegionPicker }: ScreenSourcePanelProps
         Video Source
       </h3>
 
-      {/* Display Preview Thumbnail Container */}
+      {/* Capture target preview — a real still when the native grab
+          succeeds, the schematic otherwise. */}
       <div className="flex flex-col gap-1.5">
-        <div className="relative flex aspect-video w-full items-center justify-center overflow-hidden rounded-lg border border-border bg-background">
-          <div className="absolute inset-0 opacity-20 bg-[radial-gradient(var(--color-primary)_1px,transparent_1px)] bg-size-[16px_16px]" />
-          <div className="relative z-10 flex flex-col items-center gap-2 rounded-md border border-border-strong bg-surface/90 px-4 py-2 text-xs font-medium text-foreground backdrop-blur text-center max-w-[85%]">
-            {!sourcesLoaded && !selectedSource ? (
-              <Skeleton className="h-4 w-40 rounded" />
-            ) : (
-              <span className="truncate">
-                {selectedSourceType === "region"
-                  ? regionSource
-                    ? regionSource.name
-                    : "No region selected yet"
-                  : `${selectedSource?.name || "Display 1"} (${selectedDisplayResolution})`}
-              </span>
-            )}
-          </div>
-        </div>
+        <SourcePreview
+          source={selectedSourceType === "region" ? regionSource : selectedSource}
+          aspectRatio={aspectRatio}
+          alt={`Preview of ${previewLabel}`}
+          fallback={
+            <div className="relative flex max-w-[85%] flex-col items-center gap-1.5 text-center">
+              {!sourcesLoaded && !selectedSource ? (
+                <Skeleton className="h-4 w-40 rounded" />
+              ) : (
+                <>
+                  <PreviewIcon className="size-5 text-subtle-foreground" aria-hidden />
+                  <span className="truncate text-xs font-medium text-foreground">
+                    {previewLabel}
+                  </span>
+                  <span className="font-mono text-[10px] text-subtle-foreground">
+                    {previewMeta}
+                  </span>
+                </>
+              )}
+            </div>
+          }
+        />
 
         {selectedSourceType === "screen" && displaySources.length > 1 ? (
           <Select

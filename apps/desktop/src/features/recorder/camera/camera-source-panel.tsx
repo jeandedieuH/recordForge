@@ -15,6 +15,7 @@ import type { z } from "zod"
 import type { webcamPreviewModeSchema } from "@recordforge/contracts"
 import { useRecorderStore } from "../../../hooks/use-recorder"
 import { useLicenseStore } from "../../../stores/license-store"
+import { isLinux } from "../../../lib/platform"
 import { ProBadge } from "../../licensing/pro-badge"
 import { CameraStage } from "./camera-stage"
 import { CameraQualityPicker } from "./camera-quality-picker"
@@ -151,7 +152,9 @@ export function CameraSourcePanel({
             </ToggleGroup>
             <p className="text-xs text-subtle-foreground">{selfViewCaption}</p>
             <p className="text-xs text-subtle-foreground">
-              A small always-on-top window shows your framing. It never appears in the recording.
+              {isLinux
+                ? "On Linux the self-view window is off by default (it can appear in X11 recordings). Turn it on in Settings → Recording if you want it, or open it from the floating controls."
+                : "A small always-on-top window shows your framing. It never appears in the recording."}
             </p>
             <Button
               variant="secondary"

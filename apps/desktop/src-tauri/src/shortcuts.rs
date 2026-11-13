@@ -72,59 +72,65 @@ pub fn register_shortcuts(app: &tauri::App) -> Result<()> {
     Ok(())
 }
 
+/// What the global record shortcut should do for a given recorder state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShortcutAction {
+    /// Ask the React store to run the normal start flow (config assembly +
+    /// countdown). The shortcut must never start natively: the store owns the
+    /// current source/device selection and the start delay.
+    RequestStart,
+    /// Stop the active session (spawned — the stop command is async).
+    Stop,
+    /// Cancel a prepared session that is still counting down.
+    Cancel,
+    /// Another transition is in flight; leave it alone.
+    Ignore,
+}
+
+pub(crate) fn shortcut_action(state: RecorderState) -> ShortcutAction {
+    match state {
+        RecorderState::Idle | RecorderState::Completed | RecorderState::Failed => {
+            ShortcutAction::RequestStart
+        }
+        RecorderState::Recording | RecorderState::Paused => ShortcutAction::Stop,
+        RecorderState::Countdown => ShortcutAction::Cancel,
+        _ => ShortcutAction::Ignore,
+    }
+}
+
 fn toggle_recording(app: &tauri::AppHandle) -> Result<()> {
     let state = app.state::<AppState>();
 
-    // Track what action was taken so we can open/close auxiliary windows
-    // after releasing the recorder mutex.
-    enum Action {
-        Started(crate::capture::source::Bounds),
-        Aborted,
-        None,
-    }
-
     let action = {
         let status = state.recorder.status()?;
+        let action = shortcut_action(status.state);
 
-        match status.state {
-            RecorderState::Idle | RecorderState::Completed | RecorderState::Failed => {
-                let quick = state.quick_config.lock().map_err(|_| {
-                    crate::errors::InternalError::Capture("quick config mutex poisoned".into())
-                })?;
-                if let Some(config) = quick.as_ref() {
-                    let bounds = config.source.bounds;
-                    state.recorder.start(config.clone())?;
-                    Action::Started(bounds)
-                } else {
-                    Action::None
-                }
-            }
-            RecorderState::Recording | RecorderState::Paused => {
-                let app_handle = app.clone();
-                tauri::async_runtime::spawn(async move {
-                    let state = app_handle.state::<AppState>();
-                    let _ =
-                        crate::commands::recording::stop_recording(app_handle.clone(), state).await;
-                });
-                return Ok(());
-            }
-            RecorderState::Countdown => {
-                state.recorder.cancel_prepared(&status.session_id)?;
-                Action::Aborted
-            }
-            _ => Action::None,
+        if action == ShortcutAction::Stop {
+            let app_handle = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let state = app_handle.state::<AppState>();
+                let _ = crate::commands::recording::stop_recording(app_handle.clone(), state).await;
+            });
+            return Ok(());
         }
+        if action == ShortcutAction::Cancel {
+            state.recorder.cancel_prepared(&status.session_id)?;
+        }
+        action
     };
 
-    // Open or close auxiliary windows outside the recorder lock
+    // Open or close auxiliary windows outside the recorder lock.
     match action {
-        Action::Started(bounds) => {
-            if let Err(error) = crate::window::MainWindow::minimize(app) {
-                tracing::warn!(error = ?error, "shortcut start could not minimize main window");
+        ShortcutAction::RequestStart => {
+            if !crate::commands::recording::request_start_from_ui(app) {
+                // No webview to ask — bring the window back so the user can
+                // press Record instead of failing silently.
+                if let Err(error) = crate::window::MainWindow::show_or_recreate(app) {
+                    tracing::warn!(error = ?error, "shortcut start could not restore main window");
+                }
             }
-            crate::commands::recording::open_recording_windows_async(app, bounds);
         }
-        Action::Aborted => {
+        ShortcutAction::Cancel => {
             crate::window::FloatingWindow::hide(app);
             crate::window::BoundaryWindow::hide(app);
             crate::window::CountdownWindow::hide(app);
@@ -132,8 +138,12 @@ fn toggle_recording(app: &tauri::AppHandle) -> Result<()> {
             if let Err(error) = crate::window::MainWindow::show_or_recreate(app) {
                 tracing::warn!(error = ?error, "shortcut action could not restore main window");
             }
+            // Same deliberate-cancel confirmation the capsule's Cancel button
+            // produces via `cancel_recording_start`.
+            use tauri::Emitter;
+            let _ = app.emit(crate::events::event_names::RECORDING_START_CANCELLED, ());
         }
-        Action::None => {}
+        ShortcutAction::Stop | ShortcutAction::Ignore => {}
     }
 
     // Reflect the shortcut-driven change in the UI immediately rather than
@@ -160,4 +170,55 @@ fn toggle_pause_resume(app: &tauri::AppHandle) -> Result<()> {
 fn insert_marker(app: &tauri::AppHandle) -> Result<()> {
     let state = app.state::<AppState>();
     crate::commands::recording::insert_marker_broadcast(app, &state, String::new()).map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{shortcut_action, ShortcutAction};
+    use crate::capture::manifest::RecorderState;
+
+    /// The regression this guards: the record shortcut used to start a session
+    /// natively from the last quick config, which replayed stale device
+    /// selections and skipped the countdown. Every startable state must ask the
+    /// React store instead.
+    #[test]
+    fn idle_states_request_a_frontend_start() {
+        for state in [
+            RecorderState::Idle,
+            RecorderState::Completed,
+            RecorderState::Failed,
+        ] {
+            assert_eq!(
+                shortcut_action(state),
+                ShortcutAction::RequestStart,
+                "{state:?} must request a store-driven start"
+            );
+        }
+    }
+
+    #[test]
+    fn active_sessions_stop_and_countdowns_cancel() {
+        assert_eq!(
+            shortcut_action(RecorderState::Recording),
+            ShortcutAction::Stop
+        );
+        assert_eq!(shortcut_action(RecorderState::Paused), ShortcutAction::Stop);
+        assert_eq!(
+            shortcut_action(RecorderState::Countdown),
+            ShortcutAction::Cancel
+        );
+    }
+
+    #[test]
+    fn transitional_states_are_left_alone() {
+        for state in [
+            RecorderState::SelectingSource,
+            RecorderState::Configuring,
+            RecorderState::Finalizing,
+            RecorderState::Recovering,
+            RecorderState::RecoveryRequired,
+        ] {
+            assert_eq!(shortcut_action(state), ShortcutAction::Ignore);
+        }
+    }
 }

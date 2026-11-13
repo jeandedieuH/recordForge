@@ -17,6 +17,12 @@ pub mod event_names {
     pub const RECORDER_FINALIZATION_PROGRESS: &str = "recorder-finalization-progress";
     pub const RECORDER_AUDIO_LEVEL: &str = "recorder-audio-level";
     pub const LICENSE_CHANGED: &str = "license-changed";
+    /// Asks the main window to run the normal start flow (config assembly +
+    /// countdown + capsule) for a global-shortcut or tray start.
+    pub const RECORDING_START_REQUESTED: &str = "recording-start-requested";
+    /// Emitted when the user cancels during the start countdown, so the main
+    /// window can confirm that nothing was captured.
+    pub const RECORDING_START_CANCELLED: &str = "recording-start-cancelled";
 }
 
 /// Publishes Tauri events to the React UI.

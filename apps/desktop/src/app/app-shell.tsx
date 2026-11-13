@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { listen } from "@tauri-apps/api/event"
 import { save } from "@tauri-apps/plugin-dialog"
 import { join } from "@tauri-apps/api/path"
@@ -27,8 +27,15 @@ import { SettingsView } from "../features/settings"
 import { AboutView } from "../features/about"
 import { OnboardingModal } from "../features/onboarding"
 import { toErrorMessage } from "../lib/errors"
-import { getDiagnosticsReport } from "../lib/recorder"
+import {
+  getDiagnosticsReport,
+  setFloatingControlsEnabled,
+  setSelfViewEnabled,
+  showMainWindow,
+} from "../lib/recorder"
 import { getSetting, isTauri, setSetting } from "../lib/settings"
+import { isLinux } from "../lib/platform"
+import { runQuickStart } from "../lib/quick-start"
 import { useEditorStore } from "../stores/editor-store"
 import { useThemeStore } from "../stores/theme-store"
 import { useTimelineStore } from "../stores/timeline-store"
@@ -95,6 +102,7 @@ export function AppShell() {
   const clearCompletedRecording = useRecorderStore((state) => state.clearCompletedRecording)
   const saveMessage = useRecorderStore((state) => state.saveMessage)
   const clearSaveMessage = useRecorderStore((state) => state.clearSaveMessage)
+  const startError = useRecorderStore((state) => state.startError)
   const discardRecording = useRecorderStore((state) => state.discard)
   const pendingAction = useRecorderStore((state) => state.pendingAction)
   const timelineRecording = useTimelineStore((state) => state.recording)
@@ -272,6 +280,21 @@ export function AppShell() {
     })
   }, [])
 
+  // Prime the native overlay visibility before the first recording. On Linux
+  // neither overlay can be excluded from an X11 capture, so both default off
+  // there and the tray menu plus the global shortcuts drive the session.
+  useEffect(() => {
+    if (!isTauri()) return
+    void getSetting("floatingControlsEnabled").then((value) => {
+      const enabled = value === null ? !isLinux : value === "true"
+      void setFloatingControlsEnabled(enabled).catch(() => {})
+    })
+    void getSetting("selfViewEnabled").then((value) => {
+      const enabled = value === null ? !isLinux : value === "true"
+      void setSelfViewEnabled(enabled).catch(() => {})
+    })
+  }, [])
+
   // Check hardware specs on first launch and recommend Low Impact profile for low-end machines (<= 2 cores).
   useEffect(() => {
     if (!isTauri()) return
@@ -322,6 +345,50 @@ export function AppShell() {
     void checkOnboarding()
   }, [])
 
+  // A start that fails after the setup dialog closed (device grabbed by another
+  // app, permission revoked) used to be silent — the floating toolbar never
+  // opens for a session that never began. Surface it with a way back in.
+  useEffect(() => {
+    if (!startError) return
+    useRecorderStore.setState({ startError: null })
+    // The open setup dialog already shows the message inline.
+    if (isNewRecordingOpen) return
+    // A shortcut/tray start fails while the window may be in the tray.
+    void showMainWindow().catch(() => {})
+    toast({
+      title: "Couldn't start recording",
+      description: startError,
+      variant: "warning",
+      action: {
+        label: "Review setup",
+        onClick: () => setIsNewRecordingOpen(true),
+      },
+    })
+  }, [isNewRecordingOpen, startError, toast])
+
+  // Cancelling during the countdown tears down every recording window; the
+  // native side tells us the abort was deliberate (a failed start reports its
+  // own error instead) so the confirmation copy stays truthful.
+  useEffect(() => {
+    if (!isTauri()) return
+    let unlisten: (() => void) | undefined
+    let active = true
+    listen("recording-start-cancelled", () => {
+      toast({
+        title: "Recording cancelled",
+        description: "Nothing was captured.",
+        variant: "info",
+      })
+    }).then((fn) => {
+      if (active) unlisten = fn
+      else fn()
+    })
+    return () => {
+      active = false
+      unlisten?.()
+    }
+  }, [toast])
+
   // Open the editor view when a recording is opened from the library.
   useEffect(() => {
     if (editorRecordingId) {
@@ -360,11 +427,64 @@ export function AppShell() {
   async function handleStartRecording() {
     if (editorRecordingId) {
       const closed = await closeSession()
-      if (!closed) return
+      if (!closed) {
+        throw new Error(
+          useEditorStore.getState().saveError ??
+            "Save the current editor changes before recording.",
+        )
+      }
     }
     setActiveView("library")
-    void startRecording()
+    // Awaited so the setup dialog can keep showing its arming stage until the
+    // native session exists (or the failure is known).
+    await startRecording()
   }
+
+  // Global shortcut / tray start: run the exact same flow as the Start button
+  // (config assembly → countdown → capsule) so the two paths cannot diverge.
+  // The ref is refreshed every render so the mount-only listener below always
+  // calls the current closure.
+  const quickStartRef = useRef<() => void>(() => {})
+  useEffect(() => {
+    quickStartRef.current = () => {
+      const recorder = useRecorderStore.getState()
+      void runQuickStart({
+        isStartPending: recorder.pendingAction === "start",
+        needsDeviceRelease:
+          recorder.selectedSourceType === "camera" || Boolean(recorder.selectedWebcamId),
+        closeSetup: () => setIsNewRecordingOpen(false),
+        start: handleStartRecording,
+        onError: (cause) => {
+          // The shortcut/tray path can start from the tray, where a toast in a
+          // hidden window would go unseen.
+          void showMainWindow().catch(() => {})
+          toast({
+            title: "Couldn't start recording",
+            description: toErrorMessage(cause),
+            variant: "warning",
+            action: {
+              label: "Review setup",
+              onClick: () => setIsNewRecordingOpen(true),
+            },
+          })
+        },
+      })
+    }
+  })
+
+  useEffect(() => {
+    if (!isTauri()) return
+    let unlisten: (() => void) | undefined
+    let active = true
+    listen("recording-start-requested", () => quickStartRef.current()).then((fn) => {
+      if (active) unlisten = fn
+      else fn()
+    })
+    return () => {
+      active = false
+      unlisten?.()
+    }
+  }, [])
 
   async function handleCloseEditor() {
     // Phase 1: close the session, flushing any unsaved changes. If the flush

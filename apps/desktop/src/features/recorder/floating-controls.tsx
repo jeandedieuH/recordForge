@@ -4,28 +4,27 @@ import {
   AppWindow,
   ChevronLeft,
   ChevronsDown,
+  ChevronsUp,
   CircleAlert,
   Flag,
-  GripVertical,
   Loader2,
-  Mic,
+  Minimize2,
   MoreVertical,
   Pause,
   Play,
   Square,
   Trash2,
   Video,
-  Volume2,
-  X,
 } from "lucide-react"
 import { Button, IconButton } from "@recordforge/ui"
 import {
   hideFloatingControls,
   hideWebcamPreview,
   openWebcamPreview,
+  setFloatingControlsCompact,
   showMainWindow,
 } from "../../lib/recorder"
-import { isTauri } from "../../lib/settings"
+import { isTauri, getSetting, setSetting } from "../../lib/settings"
 import { MODIFIER_NAME } from "../../lib/platform"
 import { toErrorMessage } from "../../lib/errors"
 import { useRecorderStore, useRecorderPolling } from "../../hooks/use-recorder"
@@ -41,45 +40,9 @@ function formatDuration(ms: number) {
   return [hours, minutes, seconds].map((v) => v.toString().padStart(2, "0")).join(":")
 }
 
-interface InputChipProps {
-  icon: React.ReactNode
-  label: string
-  active: boolean
-  onClick?: () => void
-  title?: string
-}
-
-// Compact active-input indicator (mic / system audio / camera) so the user can
-// verify at a glance what is being captured without opening the main window.
-function InputChip({ icon, label, active, onClick, title }: InputChipProps) {
-  if (!active) return null
-  const tooltip = title ?? `Capturing ${label}`
-  if (onClick) {
-    return (
-      <button
-        type="button"
-        onClick={onClick}
-        className="flex size-5 cursor-pointer items-center justify-center rounded-md bg-overlay text-muted-foreground transition-colors hover:bg-overlay-hover hover:text-foreground"
-        title={tooltip}
-        aria-label={tooltip}
-      >
-        {icon}
-      </button>
-    )
-  }
-  return (
-    <span
-      className="flex size-5 items-center justify-center rounded-md bg-overlay text-muted-foreground"
-      title={tooltip}
-    >
-      {icon}
-    </span>
-  )
-}
-
-// Compact draggable toolbar shown in the separate floating Tauri window. It keeps the
-// timer, live input indicators, and transport controls visible while the user
-// is in another app. The left grip and status area double as the drag region.
+// Compact draggable toolbar shown in the separate floating Tauri window. A
+// single row keeps the timer and transport visible without covering the app
+// being recorded; source and inputs live in tooltips and the actions panel.
 export function FloatingControls() {
   useRecorderPolling()
   // Feeds the live mic meter; mounted only in this window.
@@ -107,6 +70,54 @@ export function FloatingControls() {
   // Secondary actions toggle inline inside the toolbar pill to avoid external popup clipping.
   const [moreActionsOpen, setMoreActionsOpen] = useState(false)
   const [cameraPreviewOpen, setCameraPreviewOpen] = useState(true)
+  // One-time pointer to the drag handle and the marker shortcut — the toolbar
+  // is the only recording UI once the setup dialog closes, so its affordances
+  // have to be discoverable at least once.
+  const [showHint, setShowHint] = useState(false)
+  // Compact mode is persisted because it is a working-style preference: people
+  // who record a lot want the smallest possible overlay every time.
+  const [compact, setCompact] = useState(false)
+
+  useEffect(() => {
+    if (!isTauri()) return
+    void getSetting("floatingCompact").then((value) => {
+      if (value !== "true") return
+      // Resize first: the window is not click-through, so the DOM and the
+      // native bounds must agree before the compact pill paints.
+      void setFloatingControlsCompact(true)
+        .then(() => setCompact(true))
+        .catch(() => {})
+    })
+  }, [])
+
+  async function applyCompact(next: boolean) {
+    try {
+      await setFloatingControlsCompact(next)
+      setCompact(next)
+      void setSetting("floatingCompact", String(next))
+    } catch (error) {
+      useRecorderStore.setState({ error: toErrorMessage(error) })
+    }
+  }
+
+  useEffect(() => {
+    if (!isTauri()) return
+    let cancelled = false
+    void getSetting("floatingHintSeen").then((value) => {
+      if (cancelled || value === "true") return
+      setShowHint(true)
+      void setSetting("floatingHintSeen", "true")
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!showHint) return
+    const timer = window.setTimeout(() => setShowHint(false), 9_000)
+    return () => window.clearTimeout(timer)
+  }, [showHint])
 
   async function handleToggleCameraPreview() {
     try {
@@ -171,82 +182,162 @@ export function FloatingControls() {
   }
 
   if (discardConfirming) {
+    // Single row: the old two-line block assumed the 620px toolbar. The
+    // consequence copy moves into the destructive button's tooltip so the
+    // decision still has its warning without a second text line.
     return (
-      <div className="flex h-full w-full items-center justify-center px-3 py-2 select-none">
+      <div className="flex h-full w-full items-center justify-center p-1.5 select-none">
         <div
-          className="flex h-full w-full items-center gap-3 overflow-hidden rounded-2xl border border-recording/40 bg-surface px-3 shadow-[0_4px_16px_rgba(0,0,0,0.45)]"
+          className="animate-in fade-in-0 flex h-full w-full items-center gap-2 overflow-hidden rounded-2xl border border-recording/40 bg-surface/95 px-2.5 shadow-e1 backdrop-blur-xl duration-fast"
           role="alertdialog"
-          aria-label="Confirm discard recording"
+          aria-label="Discard recording? Video, audio, and markers are permanently deleted."
         >
-          <div className="flex size-9 shrink-0 items-center justify-center rounded-xl border border-recording/30 bg-recording/15 text-recording">
-            <Trash2 className="size-4" aria-hidden />
-          </div>
-          <div className="min-w-0 flex-1">
-            <div className="text-xs font-semibold leading-none text-foreground">
-              Discard this recording?
-            </div>
-            <div className="mt-1 truncate text-[11px] leading-none text-muted-foreground">
-              All video, audio, and markers will be permanently deleted. Nothing will be saved.
-            </div>
-          </div>
-          <div className="flex shrink-0 items-center gap-2">
-            <Button
-              variant="secondary"
-              size="sm"
-              disabled={pendingAction === "discard"}
-              onClick={() => setDiscardConfirming(false)}
+          <Trash2 className="size-4 shrink-0 text-recording" aria-hidden />
+          <span className="min-w-0 flex-1 truncate text-[11px] font-semibold text-foreground">
+            Discard recording?
+          </span>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={pendingAction === "discard"}
+            onClick={() => setDiscardConfirming(false)}
+            title="Keep recording (Esc)"
+            className="h-7 shrink-0 px-2.5 text-xs"
+          >
+            Cancel
+          </Button>
+          <Button
+            size="sm"
+            loading={pendingAction === "discard"}
+            onClick={() => void handleDiscard()}
+            title="Permanently deletes the video, audio, and markers. Nothing is saved."
+            className="h-7 shrink-0 gap-1.5 bg-recording px-2.5 text-xs text-white hover:bg-recording-hover"
+          >
+            Delete
+          </Button>
+        </div>
+      </div>
+    )
+  }
+
+  // Compact pill: timer + transport only, for people who keep the toolbar up
+  // over the app they are recording. The native window is resized with it.
+  if (compact) {
+    return (
+      <div className="flex h-full w-full items-center justify-center p-1.5 select-none">
+        <div className="animate-in zoom-in-95 fade-in-0 flex h-full w-full items-center gap-2 rounded-2xl border border-border-strong/90 bg-surface/95 px-2.5 shadow-e1 backdrop-blur-xl duration-base">
+          <div
+            data-tauri-drag-region
+            className="flex min-w-0 cursor-grab items-center gap-2 active:cursor-grabbing"
+            title="Drag to move toolbar"
+            onMouseDown={handleDragStart}
+          >
+            {isFinalizing ? (
+              <Loader2 className="size-3.5 shrink-0 animate-spin text-recording" aria-hidden />
+            ) : (
+              <span
+                className={`size-2.5 shrink-0 rounded-full ${
+                  isRecording
+                    ? "animate-rec-pulse bg-recording"
+                    : isPaused
+                      ? "bg-warning"
+                      : "bg-muted-foreground/50"
+                }`}
+                aria-hidden
+              />
+            )}
+            <span
+              className="tnum truncate font-mono text-sm font-semibold leading-none text-foreground"
+              data-testid="floating-timer"
             >
-              Cancel
-              <kbd className="ml-1 rounded bg-overlay px-1 font-mono text-[9px] text-subtle-foreground">
-                Esc
-              </kbd>
-            </Button>
-            <Button
-              size="sm"
-              loading={pendingAction === "discard"}
-              onClick={() => void handleDiscard()}
-              className="bg-recording text-white hover:bg-recording-hover"
+              {isFinalizing ? `${finalizationProgress?.percent ?? 15}%` : formatDuration(duration)}
+            </span>
+          </div>
+
+          <div className="ml-auto flex shrink-0 items-center gap-0.5">
+            {error || status?.error ? (
+              <IconButton
+                label="Show recording details"
+                onClick={() => void applyCompact(false)}
+                className="text-recording hover:bg-recording/10"
+              >
+                <CircleAlert className="size-3.5" />
+              </IconButton>
+            ) : null}
+            <IconButton
+              label={isRecording ? "Pause" : "Resume"}
+              variant="outline"
+              className="text-foreground"
+              disabled={!isActive || pendingAction != null}
+              loading={pendingAction === (isRecording ? "pause" : "resume")}
+              onClick={isRecording ? pause : resume}
             >
-              <Trash2 className="size-3.5" aria-hidden />
-              Delete everything
+              {isRecording ? (
+                <Pause className="size-4" />
+              ) : (
+                <Play className="size-4 fill-current" />
+              )}
+            </IconButton>
+            <Button
+              size="icon"
+              variant="destructive"
+              aria-label="Stop & save"
+              title="Stop & save recording"
+              disabled={!isActive || pendingAction != null}
+              onClick={stop}
+              className="size-8 [&_svg]:size-4"
+            >
+              {pendingAction === "stop" ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <Square className="size-3.5 fill-current" />
+              )}
             </Button>
+            <IconButton label="Expand toolbar" onClick={() => void applyCompact(false)}>
+              <ChevronsUp className="size-3.5" />
+            </IconButton>
           </div>
         </div>
       </div>
     )
   }
 
+  // One compact line: alert (only when something is wrong), transport, more,
+  // hide. Marker count rides next to the timer so no second row is needed.
+  const alertMessage = error ?? status?.error ?? warning?.message ?? null
+  const alertIsError = Boolean(error || status?.error)
+  const dismissAlert = () => {
+    if (error) clearError()
+    else if (warning) dismissWarning()
+  }
+  const dragTooltip = showHint
+    ? `Drag to move · ${MODIFIER_NAME}+Shift+M marker`
+    : `${sourceLabel.state} · ${sourceLabel.name}${status?.webcamActive ? " · camera" : ""}`
+
   return (
-    <div className="flex h-full w-full items-center justify-center px-3 py-2 select-none">
-      <div className="flex h-full w-full items-center gap-3 overflow-hidden rounded-2xl border border-border-strong/90 bg-surface px-3 shadow-[0_4px_16px_rgba(0,0,0,0.45)]">
+    <div className="flex h-full w-full items-center justify-center p-1.5 select-none">
+      <div className="animate-in fade-in-0 slide-in-from-bottom-2 flex h-full w-full items-center gap-2 overflow-hidden rounded-2xl border border-border-strong/90 bg-surface/95 px-2.5 shadow-e1 backdrop-blur-xl duration-base">
         {isFinalizing ? (
-          /* Finalization Progress: Stage label and percentage bar */
+          /* Finalization: stage label + percentage bar fill the row. */
           <div
             data-tauri-drag-region
-            className="flex min-w-0 flex-1 cursor-grab active:cursor-grabbing items-center gap-3 pl-1 pr-1"
+            className="flex min-w-0 flex-1 cursor-grab items-center gap-2 active:cursor-grabbing"
             title="Finalizing recording…"
             onMouseDown={handleDragStart}
           >
-            <div
-              data-tauri-drag-region
-              className="flex size-9 shrink-0 items-center justify-center rounded-xl border border-recording/30 bg-recording/10 text-recording"
-            >
-              <Loader2 className="size-4 animate-spin" aria-hidden />
-            </div>
-
+            <Loader2 className="size-3.5 shrink-0 animate-spin text-recording" aria-hidden />
             <div data-tauri-drag-region className="min-w-0 flex-1">
-              <div
-                data-tauri-drag-region
-                className="flex items-center justify-between gap-2 text-[11px] font-semibold leading-none text-foreground"
-              >
-                <span className="truncate">{stageLabel}</span>
-                <span className="tnum font-mono text-[11px] font-medium text-muted-foreground shrink-0">
+              <div data-tauri-drag-region className="flex items-baseline justify-between gap-2">
+                <span className="truncate text-[11px] font-semibold text-foreground">
+                  {stageLabel}
+                </span>
+                <span className="tnum shrink-0 font-mono text-[10px] font-medium text-muted-foreground">
                   {finalizationProgress ? `${finalizationProgress.percent}%` : "15%"}
                 </span>
               </div>
               <div
                 data-tauri-drag-region
-                className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-overlay border border-border/40"
+                className="mt-1 h-1 w-full overflow-hidden rounded-full border border-border/40 bg-overlay"
               >
                 <div
                   className="h-full rounded-full bg-recording transition-all duration-300 ease-out"
@@ -256,149 +347,60 @@ export function FloatingControls() {
             </div>
           </div>
         ) : (
-          /* Grip handle + Status + timer. Entire region supports native Tauri window drag. */
+          /* State dot + timer + live mic meter. The whole strip is the window
+             drag handle; source and inputs are in its tooltip, so no label row. */
           <div
             data-tauri-drag-region
-            className="flex min-w-0 flex-1 cursor-grab active:cursor-grabbing items-center gap-2.5 pl-0.5"
-            title="Drag to move toolbar"
+            className="flex min-w-0 flex-1 cursor-grab items-center gap-2 active:cursor-grabbing"
+            title={dragTooltip}
             onMouseDown={handleDragStart}
           >
-            {/* Visual Grip Handle */}
-            <div
+            <span
               data-tauri-drag-region
-              className="flex size-7 shrink-0 items-center justify-center rounded-lg text-muted-foreground/50 transition-colors hover:text-foreground"
-              aria-hidden
-            >
-              <GripVertical className="size-4" />
-            </div>
-
-            <div
-              data-tauri-drag-region
-              className={`flex size-9 shrink-0 items-center justify-center rounded-xl border ${
+              className={`size-2.5 shrink-0 rounded-full ${
                 isRecording
-                  ? "border-recording/30 bg-recording/15 text-recording"
+                  ? "animate-rec-pulse bg-recording"
                   : isPaused
-                    ? "border-warning/30 bg-warning/15 text-warning"
-                    : "border-border bg-overlay text-muted-foreground"
+                    ? "bg-warning"
+                    : "bg-muted-foreground/50"
               }`}
+              aria-hidden
+            />
+            <span
+              data-tauri-drag-region
+              className={`tnum font-mono text-base font-semibold leading-none tracking-tight ${
+                isPaused ? "text-warning" : "text-foreground"
+              }`}
+              data-testid="floating-timer"
             >
-              {isPaused ? (
-                <Pause className="size-4" aria-hidden />
-              ) : (
-                <span
-                  className={`size-3 rounded-full ${
-                    isRecording ? "animate-rec-pulse bg-recording" : "bg-muted-foreground/50"
-                  }`}
-                />
-              )}
-            </div>
-
-            <div data-tauri-drag-region className="min-w-0 flex-1">
-              {warning ? (
-                /* Warnings take over the row-1 slot — the highest-priority
-                    message (mic silence > capture health) wins, amber,
-                    truncated with the full text in the tooltip. */
-                <div
-                  data-tauri-drag-region
-                  className="flex items-center gap-1.5 text-[11px] font-medium leading-none text-warning"
-                  role="status"
-                >
-                  <CircleAlert className="size-3 shrink-0" aria-hidden />
-                  <span className="truncate" title={warning.message}>
-                    {warning.message}
-                  </span>
-                  <IconButton
-                    label="Dismiss warning"
-                    onClick={dismissWarning}
-                    className="size-4 p-0 text-warning hover:bg-warning/15"
-                  >
-                    <X className="size-3" />
-                  </IconButton>
-                </div>
-              ) : (
-                <div
-                  data-tauri-drag-region
-                  className="flex items-center gap-2 text-[11px] font-semibold leading-none text-foreground"
-                >
-                  <span>{sourceLabel.state}</span>
-                  <span className="text-subtle-foreground">·</span>
-                  {sourceLabel.glyph === "video" ? (
-                    <Video className="size-3 shrink-0 text-muted-foreground" aria-hidden />
-                  ) : null}
-                  <span
-                    className="truncate font-normal text-muted-foreground"
-                    title={sourceLabel.name}
-                  >
-                    {sourceLabel.name}
-                  </span>
-                  <span className="flex shrink-0 items-center gap-1">
-                    <InputChip
-                      active={!!status?.microphoneActive}
-                      label="microphone"
-                      icon={<Mic className="size-3" aria-hidden />}
-                    />
-                    <InputChip
-                      active={!!status?.systemAudioActive}
-                      label="system audio"
-                      icon={<Volume2 className="size-3" aria-hidden />}
-                    />
-                    {/* The camera chip always reports whether the camera is
-                        being recorded; it only toggles the preview window when a
-                        preview stream actually exists for this session. */}
-                    <InputChip
-                      active={!!status?.webcamActive}
-                      label="camera"
-                      icon={<Video className="size-3" aria-hidden />}
-                      onClick={
-                        status?.webcamPreviewUrl
-                          ? () => void handleToggleCameraPreview()
-                          : undefined
-                      }
-                      title={
-                        status?.webcamPreviewUrl
-                          ? cameraPreviewOpen
-                            ? "Self-view is open (click to hide)"
-                            : "Click to show self-view"
-                          : "Capturing camera (self-view off)"
-                      }
-                    />
-                  </span>
-                </div>
-              )}
-              <div data-tauri-drag-region className="mt-1 flex items-baseline gap-2">
-                <span
-                  className="tnum font-mono text-lg font-semibold leading-none tracking-tight text-foreground"
-                  data-testid="floating-timer"
-                >
-                  {formatDuration(duration)}
-                </span>
-                <HudMicMeter visible={Boolean(status?.microphoneActive) && isRecording} />
-                {markers.length > 0 ? (
-                  <span
-                    className="flex items-center gap-1 rounded-md bg-overlay px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground"
-                    title={`${markers.length} marker${markers.length === 1 ? "" : "s"} placed`}
-                  >
-                    <Flag className="size-3" aria-hidden />
-                    <span className="tnum">{markers.length}</span>
-                  </span>
-                ) : null}
-              </div>
-            </div>
+              {formatDuration(duration)}
+            </span>
+            <HudMicMeter visible={Boolean(status?.microphoneActive) && isRecording} />
+            {markers.length > 0 ? (
+              <span
+                className="flex shrink-0 items-center gap-0.5 text-[10px] font-medium text-muted-foreground"
+                title={`${markers.length} marker${markers.length === 1 ? "" : "s"} placed`}
+              >
+                <Flag className="size-2.5" aria-hidden />
+                <span className="tnum">{markers.length}</span>
+              </span>
+            ) : null}
           </div>
         )}
 
-        {/* Actions Zone */}
+        {/* Actions */}
         {moreActionsOpen ? (
           /* Inline Secondary Actions */
-          <div className="flex shrink-0 items-center gap-1 animate-in fade-in-0 slide-in-from-right-2 duration-150">
+          <div className="flex shrink-0 animate-in items-center gap-0.5 fade-in-0 slide-in-from-right-2 duration-150">
             <Button
               size="icon"
               variant="ghost"
               title="Open RecordForge main window"
               aria-label="Open RecordForge"
               onClick={() => void showMainWindow()}
+              className="size-7 [&_svg]:size-3.5"
             >
-              <AppWindow className="size-4" />
+              <AppWindow />
             </Button>
 
             {status?.webcamActive && status?.webcamPreviewUrl ? (
@@ -408,8 +410,9 @@ export function FloatingControls() {
                 title={cameraPreviewOpen ? "Hide camera preview" : "Show camera preview"}
                 aria-label={cameraPreviewOpen ? "Hide camera preview" : "Show camera preview"}
                 onClick={() => void handleToggleCameraPreview()}
+                className="size-7 [&_svg]:size-3.5"
               >
-                <Video className="size-4" />
+                <Video />
               </Button>
             ) : null}
 
@@ -420,12 +423,23 @@ export function FloatingControls() {
                 title="Discard recording…"
                 aria-label="Discard recording"
                 disabled={pendingAction != null}
-                className="text-recording hover:bg-recording/10 hover:text-recording"
+                className="size-7 text-recording hover:bg-recording/10 hover:text-recording [&_svg]:size-3.5"
                 onClick={() => setDiscardConfirming(true)}
               >
-                <Trash2 className="size-4" />
+                <Trash2 />
               </Button>
             ) : null}
+
+            <Button
+              size="icon"
+              variant="ghost"
+              title="Compact toolbar"
+              aria-label="Compact toolbar"
+              onClick={() => void applyCompact(true)}
+              className="size-7 [&_svg]:size-3.5"
+            >
+              <Minimize2 />
+            </Button>
 
             <Button
               size="icon"
@@ -433,25 +447,41 @@ export function FloatingControls() {
               title="Hide this toolbar"
               aria-label="Hide this toolbar"
               onClick={() => void hideFloatingControls()}
+              className="size-7 [&_svg]:size-3.5"
             >
-              <ChevronsDown className="size-4" />
+              <ChevronsDown />
             </Button>
 
-            <div className="mx-0.5 h-5 w-px bg-border" aria-hidden />
+            <div className="mx-0.5 h-4 w-px bg-border" aria-hidden />
 
             <Button
               size="icon"
-              variant="secondary"
+              variant="outline"
               title="Back to recording controls (Esc)"
               aria-label="Back to recording controls"
               onClick={() => setMoreActionsOpen(false)}
+              className="size-7 [&_svg]:size-3.5"
             >
-              <ChevronLeft className="size-4" />
+              <ChevronLeft />
             </Button>
           </div>
         ) : (
           /* Primary Transport Controls */
-          <div className="flex shrink-0 items-center gap-1">
+          <div className="flex shrink-0 items-center gap-0.5">
+            {alertMessage ? (
+              <IconButton
+                label={alertMessage}
+                onClick={dismissAlert}
+                className={`size-7 [&_svg]:size-3.5 ${
+                  alertIsError
+                    ? "text-recording hover:bg-recording/10"
+                    : "text-warning hover:bg-warning/10"
+                }`}
+              >
+                <CircleAlert />
+              </IconButton>
+            ) : null}
+
             <Button
               size="icon"
               variant="ghost"
@@ -459,13 +489,14 @@ export function FloatingControls() {
               aria-label="Add marker"
               disabled={!isActive || pendingAction != null}
               onClick={handleMarker}
+              className="size-7 [&_svg]:size-3.5"
             >
-              <Flag className="size-4" />
+              <Flag />
             </Button>
 
             <Button
               size="icon"
-              variant="secondary"
+              variant="outline"
               title={
                 isRecording
                   ? `Pause (${MODIFIER_NAME}+Shift+P)`
@@ -475,12 +506,9 @@ export function FloatingControls() {
               disabled={!isActive || pendingAction != null}
               loading={pendingAction === (isRecording ? "pause" : "resume")}
               onClick={isRecording ? pause : resume}
+              className="size-7 [&_svg]:size-3.5"
             >
-              {isRecording ? (
-                <Pause className="size-4" />
-              ) : (
-                <Play className="size-4 fill-current" />
-              )}
+              {isRecording ? <Pause className="fill-current" /> : <Play className="fill-current" />}
             </Button>
 
             <Button
@@ -490,11 +518,12 @@ export function FloatingControls() {
               aria-label="Stop & save"
               disabled={!isActive || pendingAction != null}
               onClick={stop}
+              className="size-7 [&_svg]:size-3.5"
             >
               {pendingAction === "stop" ? (
-                <Loader2 className="size-4 animate-spin" />
+                <Loader2 className="animate-spin" />
               ) : (
-                <Square className="size-4 fill-current" />
+                <Square className="fill-current" />
               )}
             </Button>
 
@@ -505,8 +534,9 @@ export function FloatingControls() {
               aria-label="More actions"
               disabled={pendingAction != null}
               onClick={() => setMoreActionsOpen(true)}
+              className="size-7 [&_svg]:size-3.5"
             >
-              <MoreVertical className="size-4" />
+              <MoreVertical />
             </Button>
 
             <Button
@@ -515,38 +545,12 @@ export function FloatingControls() {
               title="Hide this toolbar"
               aria-label="Hide this toolbar"
               onClick={() => void hideFloatingControls()}
+              className="size-7 text-muted-foreground hover:text-foreground [&_svg]:size-3.5"
             >
-              <ChevronsDown className="size-4 text-muted-foreground hover:text-foreground" />
+              <ChevronsDown />
             </Button>
           </div>
         )}
-
-        {/* Error notification banner: store errors and backend status errors
-            (e.g. camera failed while screen kept recording) share one surface.
-            Backend status warnings live on the status payload — only store
-            errors are dismissible here. */}
-        {error || status?.error ? (
-          <div
-            className="flex min-w-0 max-w-44 items-center gap-1.5 rounded-lg border border-recording/30 bg-recording/10 px-2 py-1 text-recording"
-            role="alert"
-            title={error || status?.error || undefined}
-          >
-            <CircleAlert className="size-3.5 shrink-0" aria-hidden />
-            <span className="truncate text-xs">{error || status?.error}</span>
-            {error ? (
-              <Button
-                size="icon"
-                variant="ghost"
-                title="Dismiss error"
-                aria-label="Dismiss error"
-                className="size-5 p-0 text-recording hover:bg-recording/20"
-                onClick={clearError}
-              >
-                <X className="size-3" />
-              </Button>
-            ) : null}
-          </div>
-        ) : null}
       </div>
     </div>
   )

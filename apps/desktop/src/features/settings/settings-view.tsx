@@ -36,6 +36,8 @@ import { join, videoDir } from "@tauri-apps/api/path"
 import { useThemeStore } from "../../stores/theme-store"
 import { useRecorderStore } from "../../hooks/use-recorder"
 import { getSetting, isTauri, setSetting } from "../../lib/settings"
+import { isLinux } from "../../lib/platform"
+import { setFloatingControlsEnabled, setSelfViewEnabled } from "../../lib/recorder"
 import { playExportChime } from "../../lib/export-notifications"
 import { DiagnosticsPanel } from "./diagnostics-panel"
 import { CursorInspector } from "../editor/cursor"
@@ -72,6 +74,10 @@ export function SettingsView({
   const [savePath, setSavePath] = useState("")
   const [countdownSec, setCountdownSec] = useState("3")
   const [minimizeToTray, setMinimizeToTray] = useState(true)
+  // Linux cannot exclude an overlay from an X11 capture, so the platform
+  // default differs; the toggles stay available either way.
+  const [floatingControls, setFloatingControls] = useState(!isLinux)
+  const [selfView, setSelfView] = useState(!isLinux)
   const [notifyOnExport, setNotifyOnExport] = useState(true)
   const [soundOnExport, setSoundOnExport] = useState(true)
   const [cursorSettings, setCursorSettings] = useState<CursorSettings>(defaultCursorSettings)
@@ -103,6 +109,8 @@ export function SettingsView({
           getSetting("defaultOutputFolder").catch(() => null),
           getSetting("notifyOnExportComplete").catch(() => null),
           getSetting("soundOnExportComplete").catch(() => null),
+          getSetting("floatingControlsEnabled").catch(() => null),
+          getSetting("selfViewEnabled").catch(() => null),
         ])
         countdown = results[0]
         minimized = results[1]
@@ -110,6 +118,8 @@ export function SettingsView({
         folder = results[3]
         if (results[4] !== null) setNotifyOnExport(results[4] === "true")
         if (results[5] !== null) setSoundOnExport(results[5] === "true")
+        if (results[6] !== null) setFloatingControls(results[6] === "true")
+        if (results[7] !== null) setSelfView(results[7] === "true")
 
         if (!folder) {
           try {
@@ -151,6 +161,30 @@ export function SettingsView({
   function handleCountdownChange(value: string) {
     setCountdownSec(value)
     if (isTauri()) void setSetting("countdownSeconds", value)
+  }
+
+  async function handleFloatingControlsChange(enabled: boolean) {
+    setFloatingControls(enabled)
+    if (!isTauri()) return
+    try {
+      await setFloatingControlsEnabled(enabled)
+      await setSetting("floatingControlsEnabled", String(enabled))
+    } catch {
+      // The native flag may not apply, but the stored preference should still
+      // be honored on the next launch.
+      void setSetting("floatingControlsEnabled", String(enabled))
+    }
+  }
+
+  async function handleSelfViewChange(enabled: boolean) {
+    setSelfView(enabled)
+    if (!isTauri()) return
+    try {
+      await setSelfViewEnabled(enabled)
+      await setSetting("selfViewEnabled", String(enabled))
+    } catch {
+      void setSetting("selfViewEnabled", String(enabled))
+    }
   }
 
   function handleSavePathChange(value: string) {
@@ -626,7 +660,7 @@ export function SettingsView({
 
           {/* Countdown & Audio Options */}
           <div className="rounded-2xl border border-border bg-surface p-5 space-y-4">
-            <h3 className="text-sm font-semibold text-foreground">Recording Countdown & Audio</h3>
+            <h3 className="text-sm font-semibold text-foreground">Recording Behaviour & Audio</h3>
 
             <div className="grid gap-4 sm:grid-cols-2">
               <div>
@@ -653,6 +687,47 @@ export function SettingsView({
                   <Volume2 className="size-4 text-sky-400" />
                   <span>Hardware Timestamp Synchronized</span>
                 </div>
+              </div>
+            </div>
+
+            {/* Overlay windows: functional on Windows/macOS (excluded from
+                capture); opt-in on Linux, where an overlay cannot be excluded
+                from an X11 recording. */}
+            <div className="flex flex-col gap-4 border-t border-border/60 pt-4">
+              <div className="flex items-start justify-between gap-4">
+                <div className="min-w-0">
+                  <div className="text-xs font-medium text-foreground">
+                    Floating controls while recording
+                  </div>
+                  <p className="mt-1 text-[11px] leading-snug text-subtle-foreground">
+                    {isLinux
+                      ? "Off by default on Linux: this overlay is drawn into full-screen X11 recordings. With it off, use the tray menu or the shortcuts to pause, mark, and stop."
+                      : "The small transport bar with the timer, pause, marker, and stop while you record in another app."}
+                  </p>
+                </div>
+                <Switch
+                  checked={floatingControls}
+                  onCheckedChange={(value) => void handleFloatingControlsChange(value)}
+                  aria-label="Floating controls while recording"
+                />
+              </div>
+
+              <div className="flex items-start justify-between gap-4">
+                <div className="min-w-0">
+                  <div className="text-xs font-medium text-foreground">
+                    Camera self-view while recording
+                  </div>
+                  <p className="mt-1 text-[11px] leading-snug text-subtle-foreground">
+                    {isLinux
+                      ? "Off by default on Linux: the framing window is drawn into full-screen X11 recordings. The camera is still recorded when this is off."
+                      : "A small always-on-top window with your framing. It is never part of the recording itself."}
+                  </p>
+                </div>
+                <Switch
+                  checked={selfView}
+                  onCheckedChange={(value) => void handleSelfViewChange(value)}
+                  aria-label="Camera self-view while recording"
+                />
               </div>
             </div>
           </div>
