@@ -35,14 +35,21 @@ interface ButtonProps
 }
 
 function Button({ className, variant, size, loading, disabled, children, ...props }: ButtonProps) {
+  // An icon button is only as wide as its glyph, so a spinner rendered next to
+  // the icon overflows the square and paints over neighbouring buttons (the
+  // recorder transport row made this obvious). Loading replaces the glyph
+  // there; text buttons keep their label next to the spinner.
+  const spinnerReplacesContent = loading && size === "icon"
+
   return (
     <button
       className={cn(buttonVariants({ variant, size }), className)}
       disabled={disabled || loading}
+      aria-busy={loading || undefined}
       {...props}
     >
       {loading ? <LoaderCircle className="animate-spin" aria-hidden /> : null}
-      {children}
+      {spinnerReplacesContent ? null : children}
     </button>
   )
 }
