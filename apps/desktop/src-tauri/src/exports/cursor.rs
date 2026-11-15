@@ -45,7 +45,34 @@ pub struct RenderCanvas {
     pub aspect_ratio: Option<String>,
     #[serde(default)]
     pub video_position_y: Option<f64>,
+    /// Frame border (spec-010 canvas styling). `border_style` selects the
+    /// treatment, `border_gradient` carries the ramp for `gradient`.
+    #[serde(default)]
+    pub border_width: Option<f64>,
+    #[serde(default)]
+    pub border_color: Option<String>,
+    #[serde(default)]
+    pub border_opacity: Option<f64>,
+    #[serde(default)]
+    pub border_style: Option<String>,
+    #[serde(default)]
+    pub border_gradient: Option<RenderBorderGradient>,
     pub cursor_settings: CursorSettings,
+}
+
+/// Two-colour ramp for a `gradient` border. `angle` is degrees clockwise from
+/// the top of the frame (135° runs top-left → bottom-right).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RenderBorderGradient {
+    pub from: String,
+    pub to: String,
+    #[serde(default = "default_border_gradient_angle")]
+    pub angle: f64,
+}
+
+fn default_border_gradient_angle() -> f64 {
+    135.0
 }
 
 fn default_canvas_background() -> String {

@@ -86,6 +86,10 @@ pub(crate) fn resolve_export_encoder(
     available: &[String],
     mut hevc_supported: impl FnMut(ExportEncoder) -> bool,
 ) -> ExportEncoder {
+    // ProRes has no probed hardware path; `prores_ks` is the software master.
+    if codec == "prores" {
+        return ExportEncoder::Software;
+    }
     if preference == "software" {
         return ExportEncoder::Software;
     }
@@ -116,7 +120,22 @@ fn quality_crf(preset: &str) -> u8 {
     software_preset(preset).1.parse().unwrap_or(20)
 }
 
+/// ProRes profile index for `-profile:v` (0 = proxy … 3 = HQ).
+fn prores_profile_index(profile: &str) -> &'static str {
+    match profile {
+        "proxy" => "0",
+        "lt" => "1",
+        "standard" => "2",
+        _ => "3",
+    }
+}
+
 /// Append the encoder arguments for one export render.
+///
+/// `fps` is the composed canvas frame rate — the export admission step has
+/// already re-gridded the plan for `ExportSettings::frame_rate` (ADR 020 / #7),
+/// so the encoder must emit exactly that rate. Presets only pick quality
+/// settings; they never change the output frame rate.
 ///
 /// Hardware encoders have no CRF mode, so the export preset's CRF target maps
 /// to each vendor's closest constant-quality mode; software output is unchanged
@@ -228,10 +247,7 @@ pub(crate) fn append_export_video_args(
     canvas_width: u32,
     canvas_height: u32,
 ) {
-    let target_fps = match settings.preset.as_str() {
-        "smooth-60fps" | "ultra-4k-60" => 60,
-        _ => fps,
-    };
+    let target_fps = fps.max(1);
     let crf = quality_crf(&settings.preset);
     // `fast-share` favors speed, `high-quality`/`ultra-*` favor quality, and
     // everything else sits in the balanced tier.
@@ -239,6 +255,19 @@ pub(crate) fn append_export_video_args(
         settings.preset.as_str(),
         "high-quality" | "ultra-4k" | "ultra-4k-60"
     );
+
+    if settings.codec == "prores" {
+        // ProRes is an intra-only master codec: `prores_ks` on every platform
+        // (VideoToolbox on macOS is a follow-up), a fixed 10-bit 4:2:2 raster
+        // and the profile's near-lossless quality. FX/colour tags come from
+        // `-vendor apl0`.
+        command
+            .args(["-c:v", "prores_ks", "-profile:v"])
+            .arg(prores_profile_index(&settings.prores_profile))
+            .args(["-vendor", "apl0", "-pix_fmt", "yuv422p10le"]);
+        command.arg("-r").arg(target_fps.to_string());
+        return;
+    }
 
     command.arg("-c:v").arg(encoder.encoder_id(&settings.codec));
     match encoder {
@@ -365,6 +394,9 @@ mod tests {
             codec: codec.into(),
             encoder: encoder.into(),
             container: "mp4".into(),
+            resolution: "canvas".into(),
+            frame_rate: "project".into(),
+            prores_profile: "hq".into(),
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
@@ -669,32 +701,67 @@ mod tests {
     }
 
     #[test]
-    fn sixty_fps_presets_raise_the_output_framerate() {
+    fn prores_args_use_prores_ks_with_the_profile_index() {
+        let mut command = Command::new("ffmpeg");
+        let mut prores = settings("high-quality", "prores", "auto");
+        prores.container = "mov".into();
+        prores.prores_profile = "standard".into();
+        append_export_video_args(
+            &mut command,
+            &prores,
+            ExportEncoder::Software,
+            24,
+            1920,
+            1080,
+        );
+        let args = args_of(&command);
+        assert_eq!(paired(&args, "-c:v"), Some("prores_ks"));
+        assert_eq!(paired(&args, "-profile:v"), Some("2"));
+        assert_eq!(paired(&args, "-vendor"), Some("apl0"));
+        assert_eq!(paired(&args, "-pix_fmt"), Some("yuv422p10le"));
+        assert_eq!(paired(&args, "-r"), Some("24"));
+        // ProRes quality is profile-driven — no CRF/preset ladder applies.
+        assert!(!args.contains(&"-crf".to_string()));
+        assert!(!args.contains(&"-preset".to_string()));
+    }
+
+    #[test]
+    fn prores_always_resolves_to_the_software_encoder() {
+        let resolved = resolve_export_encoder(
+            "auto",
+            "prores",
+            &available(&["h264_nvenc", "hevc_nvenc"]),
+            |_| true,
+        );
+        assert_eq!(resolved, ExportEncoder::Software);
+    }
+
+    #[test]
+    fn video_args_use_the_composed_frame_rate_not_the_preset() {
+        // Admission re-grids the plan for the requested tier, so a 24 fps
+        // composition keeps 24 fps even under the 60 fps preset — the old code
+        // asked the encoder for 60 and silently duplicated frames.
         let mut command = Command::new("ffmpeg");
         append_export_video_args(
             &mut command,
             &settings("smooth-60fps", "h264", "auto"),
             ExportEncoder::Software,
-            30,
+            24,
             1920,
             1080,
         );
-        assert!(args_of(&command)
-            .windows(2)
-            .any(|pair| pair == ["-r", "60"]));
+        assert_eq!(paired(&args_of(&command), "-r"), Some("24"));
 
         let mut high_fps_command = Command::new("ffmpeg");
         append_export_video_args(
             &mut high_fps_command,
-            &settings("ultra-4k-60", "h264", "auto"),
+            &settings("default-mp4", "h264", "auto"),
             ExportEncoder::Software,
-            120,
+            60,
             3_840,
             2_160,
         );
-        assert!(args_of(&high_fps_command)
-            .windows(2)
-            .any(|pair| pair == ["-r", "60"]));
+        assert_eq!(paired(&args_of(&high_fps_command), "-r"), Some("60"));
     }
 
     #[test]

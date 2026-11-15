@@ -7,6 +7,7 @@ import { z } from "zod"
  */
 export const PRO_FEATURE_KEYS = [
   "high-res-export",
+  "prores-export",
   "custom-aspect-ratio",
   "chapters",
   "premium-titles",
@@ -33,6 +34,10 @@ export const PRO_FEATURES: Record<ProFeatureKey, ProFeature> = {
   "high-res-export": {
     label: "High-resolution export",
     description: "Export at 1440p or 4K with the Ultra 4K presets.",
+  },
+  "prores-export": {
+    label: "ProRes export",
+    description: "Master-quality ProRes 422 movies for Final Cut, Premiere and Resolve.",
   },
   "custom-aspect-ratio": {
     label: "Custom aspect ratios",

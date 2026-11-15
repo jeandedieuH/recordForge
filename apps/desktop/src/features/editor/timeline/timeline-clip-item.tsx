@@ -6,7 +6,7 @@ import type {
   TimelineClip,
   TimelineTrack,
 } from "@recordforge/contracts"
-import { Copy, Link2, Link2Off, Lock, Scissors, Trash2 } from "lucide-react"
+import { Copy, Gauge, Link2, Link2Off, Lock, Scissors, Trash2 } from "lucide-react"
 import {
   ContextMenu,
   ContextMenuContent,
@@ -100,6 +100,8 @@ export interface TimelineClipItemProps {
   onDuplicateClip: (clip: TimelineClip) => void
   onSplitClip: (clip: TimelineClip, splitTimeMs?: number) => void
   onDeleteClip: (clip: TimelineClip, ripple?: boolean) => void
+  /** Retime a video/audio clip (speed #9). */
+  onSetClipSpeed?: (clip: TimelineClip, speed: number) => void
   onSeek?: (timeMs: number) => void
   onCursorRangeAction?: (action: CursorRangeAction) => void
   onUpdateAudio?: (
@@ -186,6 +188,7 @@ export const TimelineClipItem = memo(function TimelineClipItem({
   onDuplicateClip,
   onSplitClip,
   onDeleteClip,
+  onSetClipSpeed,
   onSeek,
   onCursorRangeAction,
   onUpdateAudio,
@@ -753,6 +756,26 @@ export const TimelineClipItem = memo(function TimelineClipItem({
           isLocked={isLocked}
           onSplitClip={onSplitClip}
         />
+        {onSetClipSpeed &&
+        (clip.kind === "screen" || clip.kind === "camera" || clip.kind === "audio") ? (
+          <ContextMenuSub>
+            <ContextMenuSubTrigger disabled={isLocked}>
+              <Gauge className="size-3.5 mr-2" /> Speed
+            </ContextMenuSubTrigger>
+            <ContextMenuSubContent>
+              {[0.25, 0.5, 1, 1.5, 2, 4, 8].map((speed) => (
+                <ContextMenuItem
+                  key={speed}
+                  disabled={isLocked}
+                  onSelect={() => onSetClipSpeed(clip, speed)}
+                >
+                  {speed === 1 ? "Normal (1×)" : `${speed}×`}
+                  {clip.speed === speed ? " •" : ""}
+                </ContextMenuItem>
+              ))}
+            </ContextMenuSubContent>
+          </ContextMenuSub>
+        ) : null}
         <ContextMenuSeparator />
         <ContextMenuItem
           className="text-destructive focus:bg-destructive/10 focus:text-destructive"

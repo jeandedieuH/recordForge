@@ -91,6 +91,7 @@ the legacy `annotations`/`texts` fields:
 | Feature key | Trigger |
 |---|---|
 | `high-res-export` | `ultra-4k` / `ultra-4k-60` presets |
+| `prores-export` | `codec: "prores"` (MOV delivery) |
 | `custom-aspect-ratio` | canvas aspect ≠ 16:9 beyond ±0.5%, or `vertical`/`square` presets |
 | `chapters` | chapter mode ≠ `none` with chapters present |
 | `premium-titles` | any enabled text whose `titleDesign.template` ≠ `clean-text` (missing design = legacy preset = Pro) |

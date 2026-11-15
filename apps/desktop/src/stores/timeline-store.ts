@@ -2,8 +2,13 @@ import { create } from "zustand"
 import {
   cursorSettingsSchema,
   defaultSmartZoomSettings,
+  exportPresetFormat,
   recordingPreferencesSchema,
   type ExportEncoderPreference,
+  type ExportCodec,
+  type ExportContainer,
+  type ExportFrameRate,
+  type ExportResolution,
   type ExportRendererPreference,
   type ExportPreset,
   type ExportRange,
@@ -18,6 +23,7 @@ import {
   type KeystrokePlatform,
   type KeystrokeOverlaySettings,
   type MediaMetadata,
+  type ProresProfile,
   type recordForgeProject,
   type TimelineViewState,
 } from "@recordforge/contracts"
@@ -157,9 +163,12 @@ interface TimelineStore {
   setInstantShare: (share: InstantShareSettings) => void
   // YouTube auto-publish preferences (Pro), persisted per project.
   setYouTubePublish: (publish: YouTubeAutoPublishSettings) => void
-  setExportContainer: (container: "mp4" | "gif" | "webp") => void
+  setExportContainer: (container: ExportContainer) => void
   setExportPreset: (preset: ExportPreset) => void
-  setExportCodec: (codec: "h264" | "hevc" | "gif" | "webp") => void
+  setExportCodec: (codec: ExportCodec) => void
+  setExportProresProfile: (profile: ProresProfile) => void
+  setExportResolution: (resolution: ExportResolution) => void
+  setExportFrameRate: (frameRate: ExportFrameRate) => void
   setExportEncoder: (encoder: ExportEncoderPreference) => void
   setExportRenderer: (renderer: ExportRendererPreference) => void
   setExportRange: (range: ExportRange | undefined) => void
@@ -1208,6 +1217,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
   setExportContainer: (container) => {
     const project = get().project
     if (!project || project.exportSettings.container === container) return
+    const isMov = container === "mov"
     const isGif = container === "gif"
     const isWebp = container === "webp"
     const isAnimation = isGif || isWebp
@@ -1219,13 +1229,17 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
             project.exportSettings.preset.startsWith("webp-")
           ? "balanced"
           : project.exportSettings.preset
-    const codec: "h264" | "hevc" | "gif" | "webp" = isGif
-      ? "gif"
-      : isWebp
-        ? "webp"
-        : project.exportSettings.codec === "gif" || project.exportSettings.codec === "webp"
-          ? "h264"
-          : project.exportSettings.codec
+    const codec: ExportCodec = isMov
+      ? "prores"
+      : isGif
+        ? "gif"
+        : isWebp
+          ? "webp"
+          : project.exportSettings.codec === "gif" ||
+              project.exportSettings.codec === "webp" ||
+              project.exportSettings.codec === "prores"
+            ? "h264"
+            : project.exportSettings.codec
     const chapterMode =
       isAnimation &&
       (project.exportSettings.chapterMode === "embed" ||
@@ -1240,6 +1254,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
         preset,
         codec,
         chapterMode,
+        ...exportPresetFormat(preset),
       },
       updatedAt: new Date().toISOString(),
     }
@@ -1256,20 +1271,24 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       preset.startsWith("webp-") ||
       (project.exportSettings.container === "webp" && preset === "selected-range")
     const isAnimation = isGif || isWebp
-    const container: "mp4" | "gif" | "webp" = isGif
+    const container: ExportContainer = isGif
       ? "gif"
       : isWebp
         ? "webp"
         : project.exportSettings.container === "gif" || project.exportSettings.container === "webp"
           ? "mp4"
           : project.exportSettings.container
-    const codec: "h264" | "hevc" | "gif" | "webp" = isGif
+    const codec: ExportCodec = isGif
       ? "gif"
       : isWebp
         ? "webp"
-        : project.exportSettings.codec === "gif" || project.exportSettings.codec === "webp"
-          ? "h264"
-          : project.exportSettings.codec
+        : container === "mov"
+          ? "prores"
+          : project.exportSettings.codec === "gif" ||
+              project.exportSettings.codec === "webp" ||
+              project.exportSettings.codec === "prores"
+            ? "h264"
+            : project.exportSettings.codec
     const chapterMode =
       isAnimation &&
       (project.exportSettings.chapterMode === "embed" ||
@@ -1284,6 +1303,9 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
         container,
         codec,
         chapterMode,
+        // A preset is a starting point: picking one prefills the output format,
+        // and the user can override either field afterwards.
+        ...exportPresetFormat(preset),
       },
       updatedAt: new Date().toISOString(),
     }
@@ -1296,6 +1318,39 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     const nextProject = {
       ...project,
       exportSettings: { ...project.exportSettings, codec },
+      updatedAt: new Date().toISOString(),
+    }
+    get().markProjectChanged(nextProject)
+  },
+
+  setExportResolution: (resolution) => {
+    const project = get().project
+    if (!project || (project.exportSettings.resolution ?? "canvas") === resolution) return
+    const nextProject = {
+      ...project,
+      exportSettings: { ...project.exportSettings, resolution },
+      updatedAt: new Date().toISOString(),
+    }
+    get().markProjectChanged(nextProject)
+  },
+
+  setExportFrameRate: (frameRate) => {
+    const project = get().project
+    if (!project || (project.exportSettings.frameRate ?? "project") === frameRate) return
+    const nextProject = {
+      ...project,
+      exportSettings: { ...project.exportSettings, frameRate },
+      updatedAt: new Date().toISOString(),
+    }
+    get().markProjectChanged(nextProject)
+  },
+
+  setExportProresProfile: (proresProfile) => {
+    const project = get().project
+    if (!project || project.exportSettings.proresProfile === proresProfile) return
+    const nextProject = {
+      ...project,
+      exportSettings: { ...project.exportSettings, proresProfile },
       updatedAt: new Date().toISOString(),
     }
     get().markProjectChanged(nextProject)
@@ -1434,6 +1489,9 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       currentProject.exportSettings.container === "webp" ||
       currentProject.exportSettings.preset.startsWith("webp-")
     const isAnimation = isGif || isWebp
+    // Instant Share / YouTube publish are MP4 deliveries — a ProRes movie
+    // skips them even when the toggles are persisted on.
+    const isProRes = currentProject.exportSettings.container === "mov"
     const sanitizedChapterMode = isAnimation
       ? currentProject.exportSettings.chapterMode === "both" ||
         currentProject.exportSettings.chapterMode === "sidecar"
@@ -1489,7 +1547,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
         // runs them after the render regardless of which screen is open.
         deliveries: buildExportDeliveries(
           currentProject,
-          isAnimation,
+          isAnimation || isProRes,
           !strip && useLicenseStore.getState().status.tier === "pro",
           options?.sharePassword,
           formatYouTubeChapters(

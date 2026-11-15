@@ -959,7 +959,7 @@ impl ExportWorker {
             );
 
             match result {
-                Ok(()) => {
+                Ok(downgrades) => {
                     let conn = self
                         .db
                         .lock()
@@ -979,6 +979,7 @@ impl ExportWorker {
                             } else {
                                 None
                             },
+                            render_notes: downgrades,
                             ..Default::default()
                         },
                     )?;

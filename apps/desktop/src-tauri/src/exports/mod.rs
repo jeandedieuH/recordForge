@@ -12,7 +12,8 @@ use tauri::Manager;
 use tracing::{info, instrument, warn};
 
 use tiny_skia::{
-    Color, FillRule, Paint, Path as SkiaPath, PathBuilder, Pixmap, PixmapPaint, Rect, Transform,
+    Color, FillRule, GradientStop, LinearGradient, Paint, Path as SkiaPath, PathBuilder, Pixmap,
+    PixmapPaint, Point, Rect, SpreadMode, Transform,
 };
 
 mod annotations;
@@ -53,7 +54,7 @@ impl Drop for TempExportDir {
 }
 
 /// Temp artifacts an export leaves behind when the process dies mid-job.
-const STALE_EXPORT_TEMP_PREFIXES: [&str; 11] = [
+const STALE_EXPORT_TEMP_PREFIXES: [&str; 12] = [
     "recordforge_chunks_",
     "recordforge_bg_",
     "recordforge_cam_shadow_",
@@ -62,6 +63,7 @@ const STALE_EXPORT_TEMP_PREFIXES: [&str; 11] = [
     "rf-filter-complex-",
     "rf-mask-",
     "rf-border-cam-",
+    "rf-border-screen-",
     "rf-chapters-",
     "rf-captions-",
     "rf-encoder-probe-",
@@ -109,14 +111,34 @@ pub(crate) fn sweep_stale_temp_files(root: &Path, max_age: Duration) -> usize {
     removed
 }
 
+/// One effect rendered below full quality, surfaced on the finished job and in
+/// the export UI (ADR 020). Ids come from the ADR's effect table.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EffectDowngrade {
+    /// Stable effect id (`motion-blur`, `loupe-glass`, `zoom-detail`, …).
+    pub effect: String,
+    /// Short user-facing explanation ("GPU unavailable").
+    pub reason: String,
+}
+
 /// What one composition run actually emitted — returned to the caller so
 /// output validation checks the rendered result instead of re-deriving the
 /// expectation from the plan.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub(crate) struct RenderOutcome {
     /// `[aout]` was emitted (single/standalone pass) or the dedicated audio
     /// job ran (chunked export).
     pub has_audio: bool,
+    /// Effects this render could not deliver at full quality.
+    pub downgrades: Vec<EffectDowngrade>,
+}
+
+impl RenderOutcome {
+    fn with_downgrades(mut self, downgrades: Vec<EffectDowngrade>) -> Self {
+        self.downgrades = downgrades;
+        self
+    }
 }
 
 type MediaProber =
@@ -502,6 +524,9 @@ pub struct RenderPlanOverlay {
     pub border_width: Option<f64>,
     pub border_color: Option<String>,
     pub border_opacity: Option<f64>,
+    /// Border treatment (`solid`/`gradient`/`double`/`glass`) and its ramp.
+    pub border_style: Option<String>,
+    pub border_gradient: Option<cursor::RenderBorderGradient>,
     pub shadow_enabled: Option<bool>,
     pub shadow_color: Option<String>,
     pub shadow_blur: Option<f64>,
@@ -684,6 +709,20 @@ pub struct ExportSettings {
     pub encoder: String,
     #[serde(default = "default_export_container")]
     pub container: String,
+    /// Output raster tier: `canvas` (default) keeps the composed canvas, any
+    /// other tier (720p/1080p/1440p/2160p) scales the delivered frame down to
+    /// that short edge. Never upscales, and animated containers keep the
+    /// canvas raster because their presets own the scaling.
+    #[serde(default = "default_export_resolution")]
+    pub resolution: String,
+    /// Output frame rate tier: `project` (default) follows the canvas grid;
+    /// `24`, `30` and `60` re-grid the whole composition before any pass runs.
+    #[serde(default = "default_export_frame_rate")]
+    pub frame_rate: String,
+    /// ProRes profile for `codec: "prores"`: `proxy`, `lt`, `standard` or
+    /// `hq` (default). Ignored by every other codec.
+    #[serde(default = "default_prores_profile")]
+    pub prores_profile: String,
     #[serde(default = "default_caption_mode")]
     pub caption_mode: String,
     #[serde(default = "default_chapter_mode")]
@@ -762,6 +801,18 @@ fn default_export_container() -> String {
     "mp4".into()
 }
 
+fn default_export_resolution() -> String {
+    "canvas".into()
+}
+
+fn default_export_frame_rate() -> String {
+    "project".into()
+}
+
+fn default_prores_profile() -> String {
+    "hq".into()
+}
+
 fn default_chapter_mode() -> String {
     "embed".into()
 }
@@ -804,6 +855,79 @@ pub fn capped_output_dimensions(
     let out_w = ((width as f64 * scale).round() as u32 / 2 * 2).max(2);
     let out_h = ((height as f64 * scale).round() as u32 / 2 * 2).max(2);
     (out_w, out_h)
+}
+
+/// Short edge requested by a resolution tier (`None` keeps the canvas).
+fn resolution_short_edge(resolution: &str) -> Option<u32> {
+    match resolution {
+        "720p" => Some(720),
+        "1080p" => Some(1080),
+        "1440p" => Some(1440),
+        "2160p" => Some(2160),
+        _ => None,
+    }
+}
+
+/// Frame rate requested by a frame-rate tier (`None` keeps the canvas grid).
+fn requested_frame_rate(frame_rate: &str) -> Option<u32> {
+    match frame_rate {
+        "24" => Some(24),
+        "30" => Some(30),
+        "60" => Some(60),
+        _ => None,
+    }
+}
+
+/// Fit a canvas down to a requested short edge, keeping the aspect ratio and
+/// even dimensions. Requests at or above the current short edge are no-ops, so
+/// a tier can never upscale.
+fn resolution_dimensions(width: u32, height: u32, short_edge: Option<u32>) -> (u32, u32) {
+    let Some(edge) = short_edge else {
+        return (width, height);
+    };
+    let current = width.min(height).max(1);
+    if edge >= current {
+        return (width, height);
+    }
+    let scale = edge as f64 / current as f64;
+    let out_w = ((width as f64 * scale).round() as u32 / 2 * 2).max(2);
+    let out_h = ((height as f64 * scale).round() as u32 / 2 * 2).max(2);
+    (out_w, out_h)
+}
+
+/// Delivered raster for an export: the canvas scaled down to the requested
+/// resolution tier, then clamped by the license cap (ADR 016). Animated
+/// containers keep the canvas raster — their presets own the output scaling.
+pub fn export_output_dimensions(
+    width: u32,
+    height: u32,
+    settings: &ExportSettings,
+    cap: Option<ExportOutputCap>,
+) -> (u32, u32) {
+    let (width, height) = if matches!(settings.container.as_str(), "gif" | "webp") {
+        (width, height)
+    } else {
+        resolution_dimensions(width, height, resolution_short_edge(&settings.resolution))
+    };
+    capped_output_dimensions(width, height, cap)
+}
+
+/// Rewrite the plan's canvas frame rate to the requested tier before any pass
+/// runs. Every frame grid (decode `fps=`, window spans, zoom pieces, cursor
+/// sampling, plates, frame counts) derives from `canvas.fps`, so the whole
+/// composition is re-gridded instead of letting the encoder duplicate frames.
+fn apply_output_frame_rate(plan: &mut RenderPlan, settings: &ExportSettings) {
+    // Animated GIF/WebP exports keep their preset rate — their palette passes
+    // hardcode `fps=` per preset, so re-gridding the plan would be dead work.
+    if matches!(settings.container.as_str(), "gif" | "webp") {
+        return;
+    }
+    let Some(fps) = requested_frame_rate(&settings.frame_rate) else {
+        return;
+    };
+    if let Some(canvas) = plan.canvas.as_mut() {
+        canvas.fps = fps;
+    }
 }
 
 pub fn escape_ffmetadata_value(val: &str) -> String {
@@ -908,7 +1032,7 @@ pub fn run_render_plan(
     cancel: Arc<std::sync::atomic::AtomicBool>,
     available_encoders: &[String],
     output_cap: Option<ExportOutputCap>,
-) -> Result<()> {
+) -> Result<Vec<EffectDowngrade>> {
     plan.validate()?;
     if plan.project_id != project_id {
         return Err(
@@ -916,6 +1040,9 @@ pub fn run_render_plan(
         );
     }
     validate_export_settings(&settings, &plan)?;
+    // Re-grid the whole composition for the requested frame-rate tier before
+    // any duration/frame math runs (decode, windows, plates, encoder).
+    apply_output_frame_rate(&mut plan, &settings);
     if cancel.load(std::sync::atomic::Ordering::Relaxed) {
         return Err(InternalError::Media("export cancelled".into()).into());
     }
@@ -1012,7 +1139,8 @@ pub fn run_render_plan(
     // retry.
     if encoder != encoding::ExportEncoder::Software {
         if let Some(canvas) = plan.canvas.as_ref() {
-            let (out_w, out_h) = capped_output_dimensions(canvas.width, canvas.height, output_cap);
+            let (out_w, out_h) =
+                export_output_dimensions(canvas.width, canvas.height, &settings, output_cap);
             let preflight_started = std::time::Instant::now();
             if let Err(detail) = encoding::preflight_export_encoder(
                 &ffmpeg, &settings, encoder, canvas.fps, out_w, out_h,
@@ -1190,7 +1318,7 @@ pub fn run_render_plan(
     let output_dims = plan
         .canvas
         .as_ref()
-        .map(|canvas| capped_output_dimensions(canvas.width, canvas.height, output_cap));
+        .map(|canvas| export_output_dimensions(canvas.width, canvas.height, &settings, output_cap));
     let validate_started = std::time::Instant::now();
     validate_export_output_with_dims(
         ffprobe_path,
@@ -1231,7 +1359,7 @@ pub fn run_render_plan(
         }
     }
     info!(project_id = %project_id, "timeline export rendered");
-    Ok(())
+    Ok(outcome.downgrades)
 }
 
 // ---------------------------------------------------------------------------
@@ -1318,13 +1446,17 @@ pub fn run_export_harness_spec(spec_json: &[u8]) -> i32 {
         .with_writer(std::io::stderr)
         .try_init();
 
-    let spec: ExportHarnessSpec = match serde_json::from_slice(spec_json) {
+    let mut spec: ExportHarnessSpec = match serde_json::from_slice(spec_json) {
         Ok(spec) => spec,
         Err(error) => {
             eprintln!("export_harness: spec parse failed: {error}");
             return 2;
         }
     };
+    // Mirror `run_render_plan`: the harness drives the renderers directly, so
+    // it re-grids the plan for the requested frame-rate tier itself.
+    let harness_settings = spec.settings.clone();
+    apply_output_frame_rate(&mut spec.plan, &harness_settings);
 
     let encoder = match resolve_harness_encoder(
         spec.encoder.as_deref(),
@@ -1399,11 +1531,9 @@ pub fn run_export_harness_spec(spec_json: &[u8]) -> i32 {
             return 1;
         }
     };
-    let harness_dims = spec
-        .plan
-        .canvas
-        .as_ref()
-        .map(|canvas| capped_output_dimensions(canvas.width, canvas.height, spec.output_cap));
+    let harness_dims = spec.plan.canvas.as_ref().map(|canvas| {
+        export_output_dimensions(canvas.width, canvas.height, &spec.settings, spec.output_cap)
+    });
     if let Err(error) = validate_export_output_with_dims(
         Path::new(&spec.ffprobe_path),
         Path::new(&spec.output_path),
@@ -1631,7 +1761,11 @@ fn render_timeline_composition_shared(
             ) {
                 Ok(outcome) => {
                     gpu::note_gpu_success();
-                    return Ok(outcome);
+                    return Ok(outcome.with_downgrades(gpu::effect_support(
+                        plan,
+                        settings,
+                        gpu::ExportRenderer::Gpu,
+                    )));
                 }
                 Err(error) => {
                     if cancel.load(std::sync::atomic::Ordering::Relaxed) {
@@ -1654,8 +1788,12 @@ fn render_timeline_composition_shared(
         }
     }
 
+    // Everything below renders on the compatibility path (selected up front,
+    // gated by `plan_limitations`, or after a runtime GPU failure). Report the
+    // effects that path cannot deliver at full quality.
+    let compat_downgrades = gpu::effect_support(plan, settings, gpu::ExportRenderer::Compatibility);
     if should_render_chunked(plan, settings) && chunk_temp_space_ok(plan, settings) {
-        return render_timeline_chunked(
+        let outcome = render_timeline_chunked(
             ffmpeg_path,
             output_path,
             plan,
@@ -1668,9 +1806,10 @@ fn render_timeline_composition_shared(
             resource_dir,
             shared,
             output_cap,
-        );
+        )?;
+        return Ok(outcome.with_downgrades(compat_downgrades));
     }
-    render_composition_window(
+    let outcome = render_composition_window(
         ffmpeg_path,
         output_path,
         plan,
@@ -1686,7 +1825,8 @@ fn render_timeline_composition_shared(
         &CompositionWindow::full(plan),
         &CompositionPass::standalone(),
         output_cap,
-    )
+    )?;
+    Ok(outcome.with_downgrades(compat_downgrades))
 }
 
 /// Output-time window one composition pass renders, in absolute timeline
@@ -2306,6 +2446,56 @@ fn render_composition_window(
         None
     };
 
+    // Canvas frame border (#11). The ring is static for the whole window, so it
+    // ships as one plate over the composited screen and costs nothing per frame.
+    // A side-by-side window moves and shrinks the screen rect per frame, which a
+    // static plate cannot follow; those plans render the ring on the GPU
+    // compositor and report the drop through `effect_support` (ADR 020).
+    let screen_border_idx = match canvas.border_width.filter(|width| *width > 0.0) {
+        Some(border_width) if !layout_varies => {
+            let plate_w = screen_w.round().max(1.0) as u32;
+            let plate_h = screen_h.round().max(1.0) as u32;
+            let radius = (canvas.border_radius as f32)
+                .min(plate_w as f32 / 2.0)
+                .min(plate_h as f32 / 2.0);
+            let key = format!(
+                "screen_border:{plate_w}:{plate_h}:{radius:.2}:{border_width}:{}",
+                border_paint_key(
+                    "rounded",
+                    canvas.border_style.as_deref(),
+                    canvas.border_color.as_deref(),
+                    canvas.border_opacity,
+                    canvas.border_gradient.as_ref(),
+                )
+            );
+            let path = shared.plates.get_or_create(&key, || {
+                let bytes = generate_screen_border_png(
+                    plate_w,
+                    plate_h,
+                    radius as f64,
+                    border_width,
+                    canvas.border_color.as_deref(),
+                    canvas.border_opacity,
+                    canvas.border_style.as_deref(),
+                    canvas.border_gradient.as_ref(),
+                )
+                .map_err(|err| InternalError::Media(format!("generate canvas border: {err}")))?;
+                let path = std::env::temp_dir().join(format!(
+                    "rf-border-screen-{}-{}-{}-{}.png",
+                    project_id,
+                    plate_w,
+                    plate_h,
+                    uuid::Uuid::new_v4()
+                ));
+                std::fs::write(&path, &bytes)
+                    .map_err(|err| InternalError::Storage(format!("write canvas border: {err}")))?;
+                Ok(Some((path, true)))
+            })?;
+            path.map(|path| push_generated(&mut input_specs, "border:canvas", &path))
+        }
+        _ => None,
+    };
+
     let mut camera_mask_indices = HashMap::new();
     let mut camera_border_indices = HashMap::new();
     // camera track index → (shadow input index, plate origin x, origin y).
@@ -2399,7 +2589,18 @@ fn render_composition_window(
         }
 
         if let Some(border_width) = overlay.border_width.filter(|value| *value > 0.0) {
-            let key = format!("cam_border:{index}:{overlay_w}:{overlay_h}");
+            // The plate cache is keyed by every input that changes the pixels,
+            // so a style or colour edit can never reuse a stale border.
+            let key = format!(
+                "cam_border:{index}:{overlay_w}:{overlay_h}:{border_width}:{}",
+                border_paint_key(
+                    &overlay.shape,
+                    overlay.border_style.as_deref(),
+                    overlay.border_color.as_deref(),
+                    overlay.border_opacity,
+                    overlay.border_gradient.as_ref(),
+                )
+            );
             let border_path = shared.plates.get_or_create(&key, || {
                 let border_bytes = generate_camera_border_png(
                     overlay_w,
@@ -2408,6 +2609,8 @@ fn render_composition_window(
                     border_width,
                     overlay.border_color.as_deref(),
                     overlay.border_opacity,
+                    overlay.border_style.as_deref(),
+                    overlay.border_gradient.as_ref(),
                 )
                 .map_err(|err| InternalError::Media(format!("generate camera border: {err}")))?;
                 let border_path = std::env::temp_dir().join(format!(
@@ -2839,6 +3042,23 @@ fn render_composition_window(
     }
 
     let mut current_label = composed_label;
+
+    // Canvas frame border (#11): directly on the screen, below the cursor,
+    // camera bubbles and overlay items — the same stacking the GPU compositor
+    // uses, where the composite pass paints the ring itself.
+    if let Some(border_idx) = screen_border_idx {
+        let plate_w = screen_w.round().max(1.0) as u32;
+        let plate_h = screen_h.round().max(1.0) as u32;
+        current_label = push_screen_border_stage(
+            &mut filters,
+            border_idx,
+            &current_label,
+            screen_x,
+            screen_y,
+            plate_w,
+            plate_h,
+        );
+    }
 
     // The generated overlay stream packs two canvas-sized RGBA planes side by
     // side into one rawvideo input: the cursor plane on the left and the
@@ -3385,9 +3605,15 @@ fn render_composition_window(
         current_label = "with_captions".to_string();
     }
 
-    let final_pix_fmt = match encoder {
-        encoding::ExportEncoder::Qsv | encoding::ExportEncoder::Vaapi => "nv12",
-        _ => "yuv420p",
+    // ProRes masters carry 10-bit 4:2:2, so the graph emits that raster
+    // directly instead of an 8-bit 4:2:0 pass the encoder would upconvert.
+    let final_pix_fmt = if settings.codec == "prores" {
+        "yuv422p10le"
+    } else {
+        match encoder {
+            encoding::ExportEncoder::Qsv | encoding::ExportEncoder::Vaapi => "nv12",
+            _ => "yuv420p",
+        }
     };
     let final_label = "export_output";
     // Re-anchor to zero after the absolute-time window so each emitted file
@@ -3411,7 +3637,8 @@ fn render_composition_window(
     // canvas (Free tier above 1080p), the composed stream is downscaled at the
     // final node — every pass (standalone, chunk intermediates, GIF/WebP)
     // emits the capped raster, so chunk concat still stream-copies.
-    let (out_w, out_h) = capped_output_dimensions(canvas.width, canvas.height, output_cap);
+    let (out_w, out_h) =
+        export_output_dimensions(canvas.width, canvas.height, settings, output_cap);
     let output_scale = if (out_w, out_h) != (canvas.width, canvas.height) {
         format!("scale={out_w}:{out_h}:flags=lanczos,")
     } else {
@@ -3653,7 +3880,7 @@ fn render_composition_window(
             out_h,
         );
         if has_audio {
-            command.args(["-c:a", "aac", "-b:a", audio_bitrate(settings)]);
+            command.args(export_audio_args(settings));
         }
         // Embedded chapters and faststart belong to the finished file only —
         // chunk intermediates defer both to the concat mux stage. `hvc1`
@@ -3664,14 +3891,18 @@ fn render_composition_window(
             if let Some(idx) = chapters_input_index {
                 command.args(["-map_chapters", &idx.to_string()]);
             }
-            command.args(["-movflags", "+faststart"]);
+            command.args(["-movflags", export_movflags(settings)]);
+            if let Some(muxer) = export_forced_muxer(settings) {
+                command.args(["-f", muxer]);
+            }
         }
     }
-    // Chunk intermediates are mpegts slices — stream-copy concat needs no
-    // per-slice global headers, and the concat list pins each slice's exact
-    // frame-count duration.
+    // Chunk intermediates are stream-copied slices — MPEG-TS for H.264/HEVC,
+    // MOV for ProRes (TS cannot carry it) — and the concat list pins each
+    // slice's exact frame-count duration.
     if !pass.standalone && !is_gif && !is_webp {
-        command.args(["-f", "mpegts"]);
+        let (_, muxer) = chunk_intermediate(settings);
+        command.args(["-f", muxer]);
     }
     command.args(["-t", &win_len_s]);
     if pass.threads > 0 && encoder == encoding::ExportEncoder::Software {
@@ -3689,7 +3920,10 @@ fn render_composition_window(
         cursor_plan,
         Some(on_progress),
     )?;
-    Ok(RenderOutcome { has_audio })
+    Ok(RenderOutcome {
+        has_audio,
+        ..Default::default()
+    })
 }
 
 /// Audio is normalized to one canonical sample format so every piece, gap and
@@ -4530,6 +4764,19 @@ fn same_crop(a: Option<&RenderCrop>, b: Option<&RenderCrop>) -> bool {
     }
 }
 
+fn same_border_gradient(
+    a: Option<&cursor::RenderBorderGradient>,
+    b: Option<&cursor::RenderBorderGradient>,
+) -> bool {
+    match (a, b) {
+        (Some(left), Some(right)) => {
+            left.from == right.from && left.to == right.to && same_f64(left.angle, right.angle)
+        }
+        (None, None) => true,
+        _ => false,
+    }
+}
+
 /// Every visual property the compositor derives from an overlay. Pieces may
 /// only share a camera track when all of these match, otherwise they would be
 /// composited with the wrong rect/mask/border/shadow.
@@ -4544,6 +4791,11 @@ fn overlay_visual_matches(left: &RenderPlanOverlay, right: &RenderPlanOverlay) -
         && same_optional_f64(left.border_width, right.border_width)
         && left.border_color == right.border_color
         && same_optional_f64(left.border_opacity, right.border_opacity)
+        && left.border_style == right.border_style
+        && same_border_gradient(
+            left.border_gradient.as_ref(),
+            right.border_gradient.as_ref(),
+        )
         && left.shadow_enabled == right.shadow_enabled
         && left.shadow_color == right.shadow_color
         && same_optional_f64(left.shadow_blur, right.shadow_blur)
@@ -4795,11 +5047,23 @@ fn plan_has_plate_work(plan: &RenderPlan, settings: &ExportSettings) -> bool {
             .is_some_and(|overlay| overlay.enabled && !plan.keystrokes.is_empty())
 }
 
+/// Intermediate container for chunk slices. MPEG-TS carries H.264/HEVC only,
+/// and ProRes is intra-only, so MOV slices concat by stream copy exactly like
+/// the TS slices do.
+fn chunk_intermediate(settings: &ExportSettings) -> (&'static str, &'static str) {
+    if settings.codec == "prores" {
+        ("mov", "mov")
+    } else {
+        ("ts", "mpegts")
+    }
+}
+
 /// Chunked rendering pays a fixed per-chunk cost — an extra FFmpeg process
 /// and a re-decoded source prefix — and only wins when slices run side by
 /// side. Short exports and low-core machines keep the single pass; GIF/WebP
 /// presets stay single-pass because they stream through special muxer-level
-/// filters that don't slice cleanly.
+/// filters that don't slice cleanly. ProRes chunks in MOV slices, which are
+/// intra-only and therefore concat-exact.
 fn should_render_chunked(plan: &RenderPlan, settings: &ExportSettings) -> bool {
     if settings.container == "gif" || settings.preset.starts_with("gif-") {
         return false;
@@ -4967,7 +5231,14 @@ fn render_timeline_chunked(
     // `-ss` skips a large unused head and `-t` caps the tail, so a 5-minute
     // timeline cut from the end of a 60-minute recording does not decode the
     // whole file first.
-    let audio_path = chunk_dir.join("audio.m4a");
+    // The audio intermediate matches the deliverable's codec: AAC in M4A for
+    // H.264/HEVC, PCM in MOV for ProRes (PCM is not legal in MP4).
+    let (chunk_ext, _) = chunk_intermediate(settings);
+    let audio_path = chunk_dir.join(if settings.codec == "prores" {
+        "audio.mov"
+    } else {
+        "audio.m4a"
+    });
     let audio_filter_path = chunk_dir.join("audio-filter.txt");
     if has_audio {
         std::fs::write(&audio_filter_path, audio_filters.join(";\n"))
@@ -5047,8 +5318,15 @@ fn render_timeline_chunked(
                 .arg("-/filter_complex")
                 .arg(&audio_filter_path)
                 .args(["-map", "[aout]"])
-                .args(["-c:a", "aac", "-b:a", audio_bitrate(settings)])
-                .args(["-f", "mp4"])
+                .args(export_audio_args(settings))
+                .args([
+                    "-f",
+                    if settings.codec == "prores" {
+                        "mov"
+                    } else {
+                        "mp4"
+                    },
+                ])
                 .args(["-t", &seconds(plan.duration_ms)])
                 .arg(&audio_path);
             run_export_ffmpeg(
@@ -5064,7 +5342,7 @@ fn render_timeline_chunked(
         } else {
             let chunk_index = job - usize::from(audio_job);
             let (first_frame, end_frame) = boundaries[chunk_index];
-            let chunk_path = chunk_dir.join(format!("chunk_{chunk_index:05}.ts"));
+            let chunk_path = chunk_dir.join(format!("chunk_{chunk_index:05}.{chunk_ext}"));
             let window = CompositionWindow::from_frames(first_frame, end_frame - first_frame, fps);
             let pass = CompositionPass {
                 standalone: false,
@@ -5144,7 +5422,12 @@ fn render_timeline_chunked(
     let entries: Vec<(PathBuf, u64)> = boundaries
         .iter()
         .enumerate()
-        .map(|(index, (first, end))| (chunk_dir.join(format!("chunk_{index:05}.ts")), end - first))
+        .map(|(index, (first, end))| {
+            (
+                chunk_dir.join(format!("chunk_{index:05}.{chunk_ext}")),
+                end - first,
+            )
+        })
         .collect();
     std::fs::write(&list_path, chunk_concat_list(&entries, fps))
         .map_err(|error| InternalError::Storage(format!("write concat list: {error}")))?;
@@ -5171,8 +5454,11 @@ fn render_timeline_chunked(
     if has_chapters {
         mux.args(["-map_chapters", &mux_input_index.to_string()]);
     }
-    mux.args(["-c", "copy", "-movflags", "+faststart"]);
+    mux.args(["-c", "copy", "-movflags", export_movflags(settings)]);
     mux.args(hvc1_tag_args(settings));
+    if let Some(muxer) = export_forced_muxer(settings) {
+        mux.args(["-f", muxer]);
+    }
     mux.args(["-t", &seconds(plan.duration_ms)])
         .arg(output_path);
     on_progress(0.98);
@@ -5194,7 +5480,10 @@ fn render_timeline_chunked(
         mux_ms = mux_started.elapsed().as_millis() as u64,
         "export: chunked render muxed"
     );
-    Ok(RenderOutcome { has_audio })
+    Ok(RenderOutcome {
+        has_audio,
+        ..Default::default()
+    })
 }
 
 /// Build one cursor renderer per enabled effect. Renderers are pure functions
@@ -7083,17 +7372,25 @@ impl RenderPlan {
 }
 
 pub(crate) fn validate_export_settings(settings: &ExportSettings, plan: &RenderPlan) -> Result<()> {
-    let valid_container_codec = if settings.container == "mp4" {
-        matches!(settings.codec.as_str(), "h264" | "hevc")
-    } else if settings.container == "gif" {
-        matches!(settings.codec.as_str(), "gif" | "h264" | "hevc")
-    } else if settings.container == "webp" {
-        matches!(settings.codec.as_str(), "webp" | "h264" | "hevc")
-    } else {
-        false
+    // Container/codec pairs. ProRes is a MOV-only intermediate codec; the
+    // animated containers keep their own muxers.
+    let valid_container_codec = match settings.container.as_str() {
+        "mp4" => matches!(settings.codec.as_str(), "h264" | "hevc"),
+        "mov" => matches!(settings.codec.as_str(), "prores"),
+        "gif" => matches!(settings.codec.as_str(), "gif" | "h264" | "hevc"),
+        "webp" => matches!(settings.codec.as_str(), "webp" | "h264" | "hevc"),
+        _ => false,
     };
     if !valid_container_codec {
         return Err(InternalError::Media("export codec or container is unsupported".into()).into());
+    }
+    if settings.codec == "prores"
+        && !matches!(
+            settings.prores_profile.as_str(),
+            "proxy" | "lt" | "standard" | "hq"
+        )
+    {
+        return Err(InternalError::Media("ProRes profile is unsupported".into()).into());
     }
     if !matches!(settings.encoder.as_str(), "auto" | "software") {
         return Err(InternalError::Media("export encoder preference is unsupported".into()).into());
@@ -7102,6 +7399,15 @@ pub(crate) fn validate_export_settings(settings: &ExportSettings, plan: &RenderP
         return Err(
             InternalError::Media("export renderer preference is unsupported".into()).into(),
         );
+    }
+    if !matches!(
+        settings.resolution.as_str(),
+        "canvas" | "720p" | "1080p" | "1440p" | "2160p"
+    ) {
+        return Err(InternalError::Media("export resolution is unsupported".into()).into());
+    }
+    if !matches!(settings.frame_rate.as_str(), "project" | "24" | "30" | "60") {
+        return Err(InternalError::Media("export frame rate is unsupported".into()).into());
     }
     if !matches!(
         settings.preset.as_str(),
@@ -7197,29 +7503,87 @@ fn audio_bitrate(settings: &ExportSettings) -> &'static str {
     }
 }
 
-/// Rough output-size bound for the disk preflight: canvas pixels × fps ×
-/// bits-per-pixel, plus the muxed audio stream. `bits_per_pixel` is chosen by
-/// the caller for the artifact being sized (final MP4 vs MPEG-TS chunks).
+/// Encoded-audio arguments for the deliverable. ProRes movies carry
+/// uncompressed PCM so NLEs get an edit-friendly master; every other export
+/// uses the preset's AAC bitrate.
+pub(crate) fn export_audio_args(settings: &ExportSettings) -> Vec<String> {
+    if settings.codec == "prores" {
+        return vec!["-c:a".into(), "pcm_s16le".into()];
+    }
+    vec![
+        "-c:a".into(),
+        "aac".into(),
+        "-b:a".into(),
+        audio_bitrate(settings).into(),
+    ]
+}
+
+/// MP4/MOV mux flags for the finished file. `write_colr` preserves the colour
+/// tagging ProRes masters rely on when a grading app opens them.
+pub(crate) fn export_movflags(settings: &ExportSettings) -> &'static str {
+    if settings.codec == "prores" {
+        "+faststart+write_colr"
+    } else {
+        "+faststart"
+    }
+}
+
+/// Explicit muxer for ProRes. The temp partial path keeps the `.mp4`
+/// extension (atomic replace only renames it), so the MOV muxer must be named
+/// on the command line instead of inferred from the file name.
+pub(crate) fn export_forced_muxer(settings: &ExportSettings) -> Option<&'static str> {
+    (settings.codec == "prores").then_some("mov")
+}
+
+/// ProRes is intra-only, so the rate is fixed by profile and pixel rate.
+/// Values are bits per pixel at any resolution (HQ ≈ 220 Mbps at 1080p30).
+fn prores_bits_per_pixel(profile: &str) -> f64 {
+    match profile {
+        "proxy" => 0.94,
+        "lt" => 1.77,
+        "standard" => 2.64,
+        _ => 3.54,
+    }
+}
+
+/// Muxed-audio bitrate for the disk estimate (`pcm_s16le` stereo is 48 kHz
+/// × 16-bit × 2 channels).
+fn audio_bits_per_second(settings: &ExportSettings) -> f64 {
+    if settings.codec == "prores" {
+        48_000.0 * 16.0 * 2.0
+    } else if audio_bitrate(settings) == "192k" {
+        192_000.0
+    } else {
+        128_000.0
+    }
+}
+
+/// Rough output-size bound for the disk preflight: delivered pixels × frame
+/// rate × bits-per-pixel, plus the muxed audio stream. `bits_per_pixel` is
+/// chosen by the caller for the artifact being sized (final MP4 vs MPEG-TS
+/// chunks). The canvas frame rate has already been re-gridded for the
+/// requested tier, and the raster is the delivered one (resolution tier applied).
 fn estimate_export_bytes(plan: &RenderPlan, settings: &ExportSettings, bits_per_pixel: f64) -> u64 {
     let duration_s = plan.duration_ms as f64 / 1000.0;
     let (width, height, fps) = plan
         .canvas
         .as_ref()
         .map(|canvas| {
-            (
-                canvas.width as f64,
-                canvas.height as f64,
-                canvas.fps.max(1) as f64,
-            )
+            let (width, height) =
+                export_output_dimensions(canvas.width, canvas.height, settings, None);
+            (width as f64, height as f64, canvas.fps.max(1) as f64)
         })
         .unwrap_or((1920.0, 1080.0, 30.0));
+    let bits_per_pixel = if settings.codec == "prores" {
+        prores_bits_per_pixel(&settings.prores_profile)
+    } else {
+        bits_per_pixel
+    };
     let video_bytes = width * height * fps * bits_per_pixel * duration_s / 8.0;
     let audio_bps = if settings.container == "gif" || settings.container == "webp" {
         0.0
-    } else if audio_bitrate(settings) == "192k" {
-        192_000.0
     } else {
-        128_000.0
+        audio_bits_per_second(settings)
     };
     (video_bytes + audio_bps / 8.0 * duration_s) as u64
 }
@@ -7624,6 +7988,8 @@ fn validate_export_output_with_dims(
         "gif"
     } else if settings.container == "webp" || settings.codec == "webp" {
         "webp"
+    } else if settings.codec == "prores" {
+        "prores"
     } else if settings.codec == "hevc" {
         "hevc"
     } else {
@@ -7649,12 +8015,17 @@ fn validate_export_output_with_dims(
     if expect_audio != metadata.has_audio {
         return Err(InternalError::Media("export audio stream failed validation".into()).into());
     }
+    let expected_audio_codec = if settings.codec == "prores" {
+        "pcm_s16le"
+    } else {
+        "aac"
+    };
     for stream in metadata
         .streams
         .iter()
         .filter(|stream| stream.kind == "audio")
     {
-        if stream.codec != "aac" {
+        if stream.codec != expected_audio_codec {
             return Err(InternalError::Media("export audio codec failed validation".into()).into());
         }
         if let Some(duration_ms) = stream.duration_ms {
@@ -8004,6 +8375,253 @@ pub(crate) fn generate_shadow_plate_png(
     Some(temp_path)
 }
 
+/// Border treatment selected by `borderStyle` (spec-010). Unknown values fall
+/// back to `solid`, so a project written by a newer build still renders a frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BorderStyle {
+    Solid,
+    Gradient,
+    Double,
+    Glass,
+}
+
+impl BorderStyle {
+    pub(crate) fn from_name(name: Option<&str>) -> Self {
+        match name.unwrap_or("solid") {
+            "gradient" => Self::Gradient,
+            "double" => Self::Double,
+            "glass" => Self::Glass,
+            _ => Self::Solid,
+        }
+    }
+
+    /// Stable id shared with `composite.wgsl` (`FrameParams.border.y`).
+    pub(crate) fn id(self) -> f32 {
+        match self {
+            Self::Solid => 0.0,
+            Self::Gradient => 1.0,
+            Self::Double => 2.0,
+            Self::Glass => 3.0,
+        }
+    }
+}
+
+/// Stable description of everything that changes a painted border's pixels,
+/// used inside plate cache keys.
+pub(crate) fn border_paint_key(
+    shape: &str,
+    style: Option<&str>,
+    color: Option<&str>,
+    opacity: Option<f64>,
+    gradient: Option<&cursor::RenderBorderGradient>,
+) -> String {
+    let ramp = gradient
+        .map(|gradient| format!("{}>{}@{}", gradient.from, gradient.to, gradient.angle))
+        .unwrap_or_default();
+    format!(
+        "{shape}:{}:{color:?}:{opacity:?}:{ramp}",
+        BorderStyle::from_name(style).id()
+    )
+}
+
+/// Append a rounded-rect subpath to an existing builder so a ring can be one
+/// path with an even-odd hole.
+fn append_rounded_rect(pb: &mut PathBuilder, x: f32, y: f32, w: f32, h: f32, radius: f32) {
+    let r = radius.min(w / 2.0).min(h / 2.0).max(0.0);
+    if r <= 0.0 {
+        if let Some(rect) = Rect::from_xywh(x, y, w, h) {
+            pb.push_rect(rect);
+        }
+        return;
+    }
+    pb.move_to(x + r, y);
+    pb.line_to(x + w - r, y);
+    pb.quad_to(x + w, y, x + w, y + r);
+    pb.line_to(x + w, y + h - r);
+    pb.quad_to(x + w, y + h, x + w - r, y + h);
+    pb.line_to(x + r, y + h);
+    pb.quad_to(x, y + h, x, y + h - r);
+    pb.line_to(x, y + r);
+    pb.quad_to(x, y, x + r, y);
+    pb.close();
+}
+
+fn append_ellipse(pb: &mut PathBuilder, cx: f32, cy: f32, rx: f32, ry: f32) {
+    let k = 0.552_284_8;
+    let kx = rx * k;
+    let ky = ry * k;
+    pb.move_to(cx, cy - ry);
+    pb.cubic_to(cx + kx, cy - ry, cx + rx, cy - ky, cx + rx, cy);
+    pb.cubic_to(cx + rx, cy + ky, cx + kx, cy + ry, cx, cy + ry);
+    pb.cubic_to(cx - kx, cy + ry, cx - rx, cy + ky, cx - rx, cy);
+    pb.cubic_to(cx - rx, cy - ky, cx - kx, cy - ry, cx, cy - ry);
+    pb.close();
+}
+
+/// One ring band path: the shape inset by `lo` px with a hole inset by `hi` px.
+#[allow(clippy::too_many_arguments)]
+fn border_band_path(
+    shape: &str,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    radius: f32,
+    lo: f32,
+    hi: f32,
+) -> Option<SkiaPath> {
+    let mut pb = PathBuilder::new();
+    if shape == "circle" {
+        let cx = x + w / 2.0;
+        let cy = y + h / 2.0;
+        let rx = w / 2.0 - lo;
+        let ry = h / 2.0 - lo;
+        if rx <= 0.05 || ry <= 0.05 {
+            return None;
+        }
+        append_ellipse(&mut pb, cx, cy, rx, ry);
+        let inner = (hi - lo).max(0.0);
+        if rx - inner > 0.05 && ry - inner > 0.05 {
+            append_ellipse(&mut pb, cx, cy, rx - inner, ry - inner);
+        }
+    } else {
+        let outer_w = w - lo * 2.0;
+        let outer_h = h - lo * 2.0;
+        if outer_w <= 0.1 || outer_h <= 0.1 {
+            return None;
+        }
+        append_rounded_rect(&mut pb, x + lo, y + lo, outer_w, outer_h, radius - lo);
+        let inner = (hi - lo).max(0.0);
+        let inner_w = outer_w - inner * 2.0;
+        let inner_h = outer_h - inner * 2.0;
+        if inner_w > 0.1 && inner_h > 0.1 {
+            append_rounded_rect(&mut pb, x + hi, y + hi, inner_w, inner_h, radius - hi);
+        }
+    }
+    pb.finish()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fill_border_band(
+    pixmap: &mut Pixmap,
+    shape: &str,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    radius: f32,
+    lo: f32,
+    hi: f32,
+    paint: &Paint,
+) {
+    let Some(path) = border_band_path(shape, x, y, w, h, radius, lo, hi) else {
+        return;
+    };
+    pixmap.fill_path(&path, paint, FillRule::EvenOdd, Transform::identity(), None);
+}
+
+fn solid_border_paint(color: &str, opacity: f32) -> Paint<'static> {
+    let mut paint = Paint::default();
+    paint.set_color(parse_color_hex(&safe_filter_color(color), opacity));
+    paint.anti_alias = true;
+    paint
+}
+
+/// Linear ramp across the frame for `borderStyle: "gradient"`. The angle is
+/// degrees clockwise from the top of the frame, matching the editor preview's
+/// SVG `<linearGradient>`.
+fn gradient_border_paint(
+    gradient: &cursor::RenderBorderGradient,
+    opacity: f32,
+    w: f32,
+    h: f32,
+) -> Option<Paint<'static>> {
+    let angle = gradient.angle.to_radians();
+    let dir = (angle.sin(), -angle.cos());
+    let dx = dir.0 as f32;
+    let dy = dir.1 as f32;
+    let half_len = 0.5 * (dx.abs() * w + dy.abs() * h);
+    let center = (w / 2.0, h / 2.0);
+    let start = Point::from_xy(center.0 - dx * half_len, center.1 - dy * half_len);
+    let end = Point::from_xy(center.0 + dx * half_len, center.1 + dy * half_len);
+    let stops = vec![
+        GradientStop::new(
+            0.0,
+            parse_color_hex(&safe_filter_color(&gradient.from), opacity),
+        ),
+        GradientStop::new(
+            1.0,
+            parse_color_hex(&safe_filter_color(&gradient.to), opacity),
+        ),
+    ];
+    let shader = LinearGradient::new(start, end, stops, SpreadMode::Pad, Transform::identity())?;
+    let paint = Paint {
+        shader,
+        anti_alias: true,
+        ..Default::default()
+    };
+    Some(paint)
+}
+
+/// Paint one border treatment into `pixmap`. The visible rim is `width` px
+/// thick, measured inward from the shape edge, so the canvas frame and the
+/// camera bubble read the same way.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn paint_border(
+    pixmap: &mut Pixmap,
+    shape: &str,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    radius: f32,
+    width: f64,
+    style: Option<&str>,
+    color: Option<&str>,
+    opacity: Option<f64>,
+    gradient: Option<&cursor::RenderBorderGradient>,
+) {
+    if width <= 0.0 || w <= 1.0 || h <= 1.0 {
+        return;
+    }
+    let bw = (width.max(0.5) as f32).min(w / 2.0).min(h / 2.0);
+    let alpha = opacity.unwrap_or(1.0).clamp(0.0, 1.0) as f32;
+    let color = color.unwrap_or("#ffffff");
+    match BorderStyle::from_name(style) {
+        BorderStyle::Solid => {
+            let paint = solid_border_paint(color, alpha);
+            fill_border_band(pixmap, shape, x, y, w, h, radius, 0.0, bw, &paint);
+        }
+        BorderStyle::Gradient => {
+            let paint = gradient
+                .and_then(|gradient| gradient_border_paint(gradient, alpha, w, h))
+                .unwrap_or_else(|| solid_border_paint(color, alpha));
+            fill_border_band(pixmap, shape, x, y, w, h, radius, 0.0, bw, &paint);
+        }
+        BorderStyle::Double => {
+            let paint = solid_border_paint(color, alpha);
+            fill_border_band(pixmap, shape, x, y, w, h, radius, 0.0, bw * 0.55, &paint);
+            fill_border_band(pixmap, shape, x, y, w, h, radius, bw * 0.72, bw, &paint);
+        }
+        BorderStyle::Glass => {
+            let rim = solid_border_paint(color, alpha * 0.35);
+            fill_border_band(pixmap, shape, x, y, w, h, radius, 0.0, bw, &rim);
+            let mut highlight = Paint::default();
+            highlight.set_color(Color::from_rgba8(
+                255,
+                255,
+                255,
+                (alpha * 0.55 * 255.0).round().clamp(0.0, 255.0) as u8,
+            ));
+            highlight.anti_alias = true;
+            fill_border_band(pixmap, shape, x, y, w, h, radius, bw * 0.72, bw, &highlight);
+        }
+    }
+}
+
+/// Camera bubble border plate: one RGBA image the size of the overlay, painted
+/// inside the bubble so the stroke never spills into the canvas.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn generate_camera_border_png(
     width: u32,
     height: u32,
@@ -8011,75 +8629,92 @@ pub(crate) fn generate_camera_border_png(
     border_width: f64,
     border_color: Option<&str>,
     border_opacity: Option<f64>,
+    border_style: Option<&str>,
+    border_gradient: Option<&cursor::RenderBorderGradient>,
 ) -> std::result::Result<Vec<u8>, String> {
     let mut pixmap = Pixmap::new(width.max(1), height.max(1))
         .ok_or_else(|| "failed to allocate camera border pixmap".to_string())?;
 
-    let bw = (border_width.max(0.5) as f32)
-        .min(width.max(1) as f32 / 2.0)
-        .min(height.max(1) as f32 / 2.0);
-    let opacity = border_opacity.unwrap_or(1.0).clamp(0.0, 1.0) as f32;
-    let hex_color = safe_filter_color(border_color.unwrap_or("#ffffff"));
-    let color = parse_color_hex(&hex_color, opacity);
-
     let w = width.max(1) as f32;
     let h = height.max(1) as f32;
-
-    let mut paint = Paint::default();
-    paint.set_color(color);
-    paint.anti_alias = true;
-
-    let stroke = tiny_skia::Stroke {
-        width: bw,
-        ..Default::default()
+    let radius = if shape == "rounded" {
+        (w.min(h) * 0.12).max(4.0)
+    } else {
+        0.0
     };
-
-    let half_bw = bw / 2.0;
-
-    let path = match shape {
-        "circle" => {
-            let rx = (w / 2.0 - half_bw).max(0.1);
-            let ry = (h / 2.0 - half_bw).max(0.1);
-            let cx = w / 2.0;
-            let cy = h / 2.0;
-            let k = 0.552_284_8;
-            let kx = rx * k;
-            let ky = ry * k;
-            let mut pb = PathBuilder::new();
-            pb.move_to(cx, cy - ry);
-            pb.cubic_to(cx + kx, cy - ry, cx + rx, cy - ky, cx + rx, cy);
-            pb.cubic_to(cx + rx, cy + ky, cx + kx, cy + ry, cx, cy + ry);
-            pb.cubic_to(cx - kx, cy + ry, cx - rx, cy + ky, cx - rx, cy);
-            pb.cubic_to(cx - rx, cy - ky, cx - kx, cy - ry, cx, cy - ry);
-            pb.close();
-            pb.finish()
-        }
-        "rounded" => {
-            let r = ((w.min(h) * 0.12).max(4.0) - half_bw).max(0.1);
-            let x = half_bw;
-            let y = half_bw;
-            let inner_w = (w - bw).max(0.1);
-            let inner_h = (h - bw).max(0.1);
-            build_rounded_rect_path(x, y, inner_w, inner_h, r)
-        }
-        _ => {
-            let mut pb = PathBuilder::new();
-            pb.move_to(half_bw, half_bw);
-            pb.line_to(w - half_bw, half_bw);
-            pb.line_to(w - half_bw, h - half_bw);
-            pb.line_to(half_bw, h - half_bw);
-            pb.close();
-            pb.finish()
-        }
-    };
-
-    if let Some(p) = path {
-        pixmap.stroke_path(&p, &paint, &stroke, Transform::identity(), None);
-    }
+    paint_border(
+        &mut pixmap,
+        shape,
+        0.0,
+        0.0,
+        w,
+        h,
+        radius,
+        border_width,
+        border_style,
+        border_color,
+        border_opacity,
+        border_gradient,
+    );
 
     pixmap
         .encode_png()
         .map_err(|e| format!("encode camera border png: {e}"))
+}
+
+/// Canvas frame border plate: one RGBA image the size of the screen rect,
+/// painted inside the frame's rounded corners. Static per window, so the
+/// compatibility renderer pays nothing per frame.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn generate_screen_border_png(
+    width: u32,
+    height: u32,
+    radius: f64,
+    border_width: f64,
+    border_color: Option<&str>,
+    border_opacity: Option<f64>,
+    border_style: Option<&str>,
+    border_gradient: Option<&cursor::RenderBorderGradient>,
+) -> std::result::Result<Vec<u8>, String> {
+    let mut pixmap = Pixmap::new(width.max(1), height.max(1))
+        .ok_or_else(|| "failed to allocate screen border pixmap".to_string())?;
+    paint_border(
+        &mut pixmap,
+        "rounded",
+        0.0,
+        0.0,
+        width.max(1) as f32,
+        height.max(1) as f32,
+        radius.max(0.0) as f32,
+        border_width,
+        border_style,
+        border_color,
+        border_opacity,
+        border_gradient,
+    );
+    pixmap
+        .encode_png()
+        .map_err(|e| format!("encode screen border png: {e}"))
+}
+
+/// Overlay the canvas border plate (one static RGBA ring, generated at the
+/// screen rect) on the composed screen stream and return the new stream label.
+fn push_screen_border_stage(
+    filters: &mut Vec<String>,
+    border_idx: usize,
+    current_label: &str,
+    screen_x: f64,
+    screen_y: f64,
+    plate_w: u32,
+    plate_h: u32,
+) -> String {
+    filters.push(format!(
+        "[{border_idx}:v]format=rgba,scale={plate_w}:{plate_h},setsar=1,loop=loop=-1:size=1:start=0[screen_border_loop];\
+         [{current_label}][screen_border_loop]overlay=x={}:y={}:eof_action=repeat:format=auto[with_screen_border]",
+        screen_x.round() as i64,
+        screen_y.round() as i64,
+    ));
+    "with_screen_border".to_string()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -10113,6 +10748,8 @@ mod tests {
             border_width: None,
             border_color: None,
             border_opacity: None,
+            border_style: None,
+            border_gradient: None,
             shadow_enabled: None,
             shadow_color: None,
             shadow_blur: None,
@@ -10340,6 +10977,9 @@ mod tests {
             codec: "hevc".into(),
             encoder: "software".into(),
             container: "mp4".into(),
+            resolution: "canvas".into(),
+            frame_rate: "project".into(),
+            prores_profile: "hq".into(),
             caption_mode: "none".into(),
             chapter_mode: "none".into(),
             range: None,
@@ -10473,6 +11113,13 @@ mod tests {
     /// payload deserializes into.
     fn default_export_settings() -> ExportSettings {
         serde_json::from_str::<ExportSettings>("{}").expect("empty settings deserialize")
+    }
+
+    fn settings_with(resolution: &str, frame_rate: &str) -> ExportSettings {
+        let mut settings = default_export_settings();
+        settings.resolution = resolution.into();
+        settings.frame_rate = frame_rate.into();
+        settings
     }
 
     fn valid_plan() -> RenderPlan {
@@ -11020,6 +11667,9 @@ mod tests {
                 codec: "h264".into(),
                 encoder: "auto".into(),
                 container: "mp4".into(),
+                resolution: "canvas".into(),
+                frame_rate: "project".into(),
+                prores_profile: "hq".into(),
                 caption_mode: "burn-in".into(),
                 chapter_mode: "embed".into(),
                 range: None,
@@ -11033,6 +11683,9 @@ mod tests {
             codec: "h264".into(),
             encoder: "software".into(),
             container: "mp4".into(),
+            resolution: "canvas".into(),
+            frame_rate: "project".into(),
+            prores_profile: "hq".into(),
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
@@ -11050,6 +11703,9 @@ mod tests {
             codec: "h264".into(),
             encoder: "nvenc".into(),
             container: "mp4".into(),
+            resolution: "canvas".into(),
+            frame_rate: "project".into(),
+            prores_profile: "hq".into(),
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
@@ -11974,6 +12630,8 @@ mod tests {
             border_width: Some(0.0),
             border_color: None,
             border_opacity: None,
+            border_style: None,
+            border_gradient: None,
             shadow_enabled: Some(false),
             shadow_color: None,
             shadow_blur: None,
@@ -12033,6 +12691,9 @@ mod tests {
             codec: "h264".into(),
             encoder: "auto".into(),
             container: "mp4".into(),
+            resolution: "canvas".into(),
+            frame_rate: "project".into(),
+            prores_profile: "hq".into(),
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
@@ -12295,6 +12956,147 @@ mod tests {
     }
 
     #[test]
+    fn resolution_tiers_scale_down_but_never_up() {
+        // A 1080p canvas offers 720p; 1080p is identity and larger tiers clamp.
+        assert_eq!(
+            export_output_dimensions(1920, 1080, &settings_with("720p", "project"), None),
+            (1280, 720)
+        );
+        assert_eq!(
+            export_output_dimensions(1920, 1080, &settings_with("1080p", "project"), None),
+            (1920, 1080)
+        );
+        assert_eq!(
+            export_output_dimensions(1920, 1080, &settings_with("1440p", "project"), None),
+            (1920, 1080)
+        );
+        assert_eq!(
+            export_output_dimensions(1920, 1080, &settings_with("2160p", "project"), None),
+            (1920, 1080)
+        );
+        // Vertical canvases keep their aspect ratio (720p = 720 short edge).
+        assert_eq!(
+            export_output_dimensions(1080, 1920, &settings_with("720p", "project"), None),
+            (720, 1280)
+        );
+        // The license cap still applies to the tiered raster.
+        assert_eq!(
+            export_output_dimensions(
+                3840,
+                2160,
+                &settings_with("2160p", "project"),
+                Some(ExportOutputCap::FULL_HD)
+            ),
+            (1920, 1080)
+        );
+        // Animated containers keep the canvas raster — their preset scales it.
+        let mut gif = settings_with("720p", "project");
+        gif.container = "gif".into();
+        assert_eq!(
+            export_output_dimensions(1920, 1080, &gif, None),
+            (1920, 1080)
+        );
+    }
+
+    #[test]
+    fn frame_rate_tiers_regrid_the_canvas() {
+        let mut plan = valid_plan();
+        assert_eq!(plan.canvas.as_ref().expect("canvas").fps, 30);
+        apply_output_frame_rate(&mut plan, &settings_with("canvas", "60"));
+        assert_eq!(plan.canvas.as_ref().expect("canvas").fps, 60);
+        apply_output_frame_rate(&mut plan, &settings_with("canvas", "24"));
+        assert_eq!(plan.canvas.as_ref().expect("canvas").fps, 24);
+        // `project` keeps whatever grid the plan already has.
+        apply_output_frame_rate(&mut plan, &settings_with("canvas", "project"));
+        assert_eq!(plan.canvas.as_ref().expect("canvas").fps, 24);
+
+        // Animated exports keep their preset rate.
+        let mut gif = settings_with("canvas", "60");
+        gif.container = "gif".into();
+        let mut gif_plan = valid_plan();
+        apply_output_frame_rate(&mut gif_plan, &gif);
+        assert_eq!(gif_plan.canvas.as_ref().expect("canvas").fps, 30);
+    }
+
+    #[test]
+    fn chunk_intermediates_follow_the_delivery_codec() {
+        let mp4 = settings_with("canvas", "project");
+        assert_eq!(chunk_intermediate(&mp4), ("ts", "mpegts"));
+
+        let mut prores = mp4.clone();
+        prores.codec = "prores".into();
+        prores.container = "mov".into();
+        assert_eq!(chunk_intermediate(&prores), ("mov", "mov"));
+    }
+
+    #[test]
+    fn prores_settings_require_a_mov_container() {
+        let plan = valid_plan();
+        let mut prores = settings_with("canvas", "project");
+        prores.codec = "prores".into();
+        prores.container = "mov".into();
+        assert!(validate_export_settings(&prores, &plan).is_ok());
+
+        let mut bad_profile = prores.clone();
+        bad_profile.prores_profile = "ultra".into();
+        assert!(validate_export_settings(&bad_profile, &plan).is_err());
+
+        let mut wrong_container = prores.clone();
+        wrong_container.container = "mp4".into();
+        assert!(validate_export_settings(&wrong_container, &plan).is_err());
+
+        let mut mov_h264 = settings_with("canvas", "project");
+        mov_h264.container = "mov".into();
+        assert!(validate_export_settings(&mov_h264, &plan).is_err());
+    }
+
+    #[test]
+    fn prores_delivery_uses_pcm_audio_and_mov_flags() {
+        let mut prores = settings_with("canvas", "project");
+        prores.codec = "prores".into();
+        prores.container = "mov".into();
+        assert_eq!(export_audio_args(&prores), vec!["-c:a", "pcm_s16le"]);
+        assert_eq!(export_movflags(&prores), "+faststart+write_colr");
+        assert_eq!(export_forced_muxer(&prores), Some("mov"));
+
+        let mp4 = settings_with("canvas", "project");
+        assert_eq!(export_audio_args(&mp4), vec!["-c:a", "aac", "-b:a", "128k"]);
+        assert_eq!(export_movflags(&mp4), "+faststart");
+        assert_eq!(export_forced_muxer(&mp4), None);
+    }
+
+    #[test]
+    fn prores_disk_estimate_scales_with_the_profile() {
+        let mut plan = valid_plan();
+        plan.duration_ms = 60_000;
+        let mp4 = settings_with("canvas", "project");
+        let mut hq = mp4.clone();
+        hq.codec = "prores".into();
+        hq.container = "mov".into();
+        let mut proxy = hq.clone();
+        proxy.prores_profile = "proxy".into();
+
+        let hq_bytes = estimate_export_bytes(&plan, &hq, 0.01);
+        let proxy_bytes = estimate_export_bytes(&plan, &proxy, 0.01);
+        let mp4_bytes = estimate_export_bytes(&plan, &mp4, 0.01);
+        // HQ ≈ 3.5 bpp, proxy ≈ 0.9 bpp, and both dwarf a compressed MP4 bound.
+        assert!(hq_bytes > proxy_bytes);
+        assert!(proxy_bytes > mp4_bytes);
+    }
+
+    #[test]
+    fn frame_spans_use_cumulative_rounding_at_any_grid() {
+        // Segment edges round on the cumulative timeline, so re-gridding a
+        // cut-heavy plan can never accumulate per-segment drift.
+        assert_eq!(output_frame_index(1000.0 / 3.0, 24.0), 8);
+        assert_eq!(output_frame_index(2000.0 / 3.0, 24.0), 16);
+        assert_eq!(output_frame_index(1000.0, 24.0), 24);
+        assert_eq!(output_frame_index(500.0, 24.0), 12);
+        assert_eq!(output_frame_index(1000.0, 60.0), 60);
+        assert_eq!(output_frame_index(1000.0 / 3.0, 60.0), 20);
+    }
+
+    #[test]
     fn test_validate_export_settings_chapter_modes() {
         let plan = valid_plan();
         for mode in ["embed", "sidecar", "both", "none"] {
@@ -12305,6 +13107,9 @@ mod tests {
                 codec: "h264".into(),
                 encoder: "auto".into(),
                 container: "mp4".into(),
+                resolution: "canvas".into(),
+                frame_rate: "project".into(),
+                prores_profile: "hq".into(),
                 caption_mode: "burn-in".into(),
                 chapter_mode: mode.into(),
                 range: None,
@@ -12321,6 +13126,9 @@ mod tests {
             codec: "h264".into(),
             encoder: "auto".into(),
             container: "mp4".into(),
+            resolution: "canvas".into(),
+            frame_rate: "project".into(),
+            prores_profile: "hq".into(),
             caption_mode: "burn-in".into(),
             chapter_mode: "invalid_mode".into(),
             range: None,
@@ -12341,6 +13149,9 @@ mod tests {
                 codec: "gif".into(),
                 encoder: "auto".into(),
                 container: "gif".into(),
+                resolution: "canvas".into(),
+                frame_rate: "project".into(),
+                prores_profile: "hq".into(),
                 caption_mode: "burn-in".into(),
                 chapter_mode: "none".into(),
                 range: None,
@@ -12358,6 +13169,9 @@ mod tests {
             codec: "gif".into(),
             encoder: "auto".into(),
             container: "gif".into(),
+            resolution: "canvas".into(),
+            frame_rate: "project".into(),
+            prores_profile: "hq".into(),
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
@@ -12374,6 +13188,9 @@ mod tests {
             codec: "gif".into(),
             encoder: "auto".into(),
             container: "gif".into(),
+            resolution: "canvas".into(),
+            frame_rate: "project".into(),
+            prores_profile: "hq".into(),
             caption_mode: "burn-in".into(),
             chapter_mode: "sidecar".into(),
             range: None,
@@ -12399,6 +13216,9 @@ mod tests {
                 codec: "webp".into(),
                 encoder: "auto".into(),
                 container: "webp".into(),
+                resolution: "canvas".into(),
+                frame_rate: "project".into(),
+                prores_profile: "hq".into(),
                 caption_mode: "burn-in".into(),
                 chapter_mode: "none".into(),
                 range: None,
@@ -12416,6 +13236,9 @@ mod tests {
             codec: "webp".into(),
             encoder: "auto".into(),
             container: "webp".into(),
+            resolution: "canvas".into(),
+            frame_rate: "project".into(),
+            prores_profile: "hq".into(),
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
@@ -12432,6 +13255,9 @@ mod tests {
             codec: "webp".into(),
             encoder: "auto".into(),
             container: "webp".into(),
+            resolution: "canvas".into(),
+            frame_rate: "project".into(),
+            prores_profile: "hq".into(),
             caption_mode: "burn-in".into(),
             chapter_mode: "sidecar".into(),
             range: None,
@@ -12450,6 +13276,9 @@ mod tests {
             codec: "gif".into(),
             encoder: "auto".into(),
             container: "gif".into(),
+            resolution: "canvas".into(),
+            frame_rate: "project".into(),
+            prores_profile: "hq".into(),
             caption_mode: "burn-in".into(),
             chapter_mode: "none".into(),
             range: None,
@@ -12466,6 +13295,9 @@ mod tests {
             codec: "h264".into(),
             encoder: "auto".into(),
             container: "mp4".into(),
+            resolution: "canvas".into(),
+            frame_rate: "project".into(),
+            prores_profile: "hq".into(),
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
@@ -12486,6 +13318,9 @@ mod tests {
             codec: "h264".into(),
             encoder: "auto".into(),
             container: "mp4".into(),
+            resolution: "canvas".into(),
+            frame_rate: "project".into(),
+            prores_profile: "hq".into(),
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
@@ -12499,6 +13334,9 @@ mod tests {
         let gif_settings = ExportSettings {
             preset: "gif-balanced".into(),
             container: "gif".into(),
+            resolution: "canvas".into(),
+            frame_rate: "project".into(),
+            prores_profile: "hq".into(),
             keystroke_overlay: None,
             ..settings
         };
@@ -12828,6 +13666,9 @@ mod tests {
             codec: "h264".into(),
             encoder: "auto".into(),
             container: "mp4".into(),
+            resolution: "canvas".into(),
+            frame_rate: "project".into(),
+            prores_profile: "hq".into(),
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
@@ -12943,6 +13784,9 @@ mod tests {
             codec: "gif".into(),
             encoder: "auto".into(),
             container: "gif".into(),
+            resolution: "canvas".into(),
+            frame_rate: "project".into(),
+            prores_profile: "hq".into(),
             caption_mode: "burn-in".into(),
             chapter_mode: "none".into(),
             range: None,
@@ -13080,6 +13924,9 @@ mod tests {
                 codec: "h264".into(),
                 encoder: "auto".into(),
                 container: "mp4".into(),
+                resolution: "canvas".into(),
+                frame_rate: "project".into(),
+                prores_profile: "hq".into(),
                 caption_mode: "burn-in".into(),
                 chapter_mode: "none".into(),
                 range: None,
@@ -13182,6 +14029,9 @@ mod tests {
                 codec: "h264".into(),
                 encoder: "auto".into(),
                 container: "mp4".into(),
+                resolution: "canvas".into(),
+                frame_rate: "project".into(),
+                prores_profile: "hq".into(),
                 caption_mode: "burn-in".into(),
                 chapter_mode: "none".into(),
                 range: None,
@@ -13305,6 +14155,9 @@ mod tests {
                 codec: "h264".into(),
                 encoder: "auto".into(),
                 container: "mp4".into(),
+                resolution: "canvas".into(),
+                frame_rate: "project".into(),
+                prores_profile: "hq".into(),
                 caption_mode: "burn-in".into(),
                 chapter_mode: "none".into(),
                 range: None,
@@ -13410,6 +14263,9 @@ mod tests {
                 codec: "h264".into(),
                 encoder: "auto".into(),
                 container: "mp4".into(),
+                resolution: "canvas".into(),
+                frame_rate: "project".into(),
+                prores_profile: "hq".into(),
                 caption_mode: "burn-in".into(),
                 chapter_mode: "none".into(),
                 range: None,
@@ -13517,6 +14373,9 @@ mod tests {
                 codec: "h264".into(),
                 encoder: "auto".into(),
                 container: "mp4".into(),
+                resolution: "canvas".into(),
+                frame_rate: "project".into(),
+                prores_profile: "hq".into(),
                 caption_mode: "burn-in".into(),
                 chapter_mode: "none".into(),
                 range: None,
@@ -13653,6 +14512,9 @@ mod tests {
             codec: "webp".into(),
             encoder: "auto".into(),
             container: "webp".into(),
+            resolution: "canvas".into(),
+            frame_rate: "project".into(),
+            prores_profile: "hq".into(),
             caption_mode: "burn-in".into(),
             chapter_mode: "none".into(),
             range: None,
@@ -13778,6 +14640,9 @@ mod tests {
             codec: "gif".into(),
             encoder: "auto".into(),
             container: "gif".into(),
+            resolution: "canvas".into(),
+            frame_rate: "project".into(),
+            prores_profile: "hq".into(),
             caption_mode: "burn-in".into(),
             chapter_mode: "none".into(),
             range: None,
@@ -13841,8 +14706,16 @@ mod tests {
     #[test]
     fn test_camera_border_generation_all_shapes() {
         for shape in ["rectangle", "rounded", "circle"] {
-            let border_bytes =
-                generate_camera_border_png(320, 240, shape, 3.0, Some("#38bdf8"), Some(0.9));
+            let border_bytes = generate_camera_border_png(
+                320,
+                240,
+                shape,
+                3.0,
+                Some("#38bdf8"),
+                Some(0.9),
+                Some("solid"),
+                None,
+            );
             assert!(
                 border_bytes.is_ok(),
                 "Border generation failed for shape {shape}"
@@ -13851,6 +14724,107 @@ mod tests {
             assert!(!png_bytes.is_empty());
             assert_eq!(&png_bytes[0..8], b"\x89PNG\r\n\x1a\n");
         }
+    }
+
+    #[test]
+    fn canvas_border_stage_sits_on_the_screen_stream() {
+        let mut filters = Vec::new();
+        let label = push_screen_border_stage(&mut filters, 7, "composed", 24.0, 12.0, 1_872, 1_056);
+        assert_eq!(label, "with_screen_border");
+        let graph = filters.join(";\n");
+        assert!(
+            graph.contains("[7:v]format=rgba,scale=1872:1056"),
+            "{graph}"
+        );
+        assert!(
+            graph.contains("[composed][screen_border_loop]overlay=x=24:y=12"),
+            "{graph}"
+        );
+    }
+
+    #[test]
+    fn border_styles_paint_a_visible_ring() {
+        // Every treatment must leave ink, and the gradient ramp must actually
+        // vary across the frame (a solid fallback would paint one colour).
+        for style in ["solid", "gradient", "double", "glass"] {
+            let mut pixmap = Pixmap::new(64, 64).expect("pixmap");
+            let gradient = cursor::RenderBorderGradient {
+                from: "#ff0000".into(),
+                to: "#0000ff".into(),
+                angle: 135.0,
+            };
+            paint_border(
+                &mut pixmap,
+                "rounded",
+                0.0,
+                0.0,
+                64.0,
+                64.0,
+                12.0,
+                6.0,
+                Some(style),
+                Some("#ffffff"),
+                Some(1.0),
+                Some(&gradient),
+            );
+            let (texels, _) = pixmap.data().as_chunks::<4>();
+            let painted = texels.iter().filter(|texel| texel[3] > 0).count();
+            assert!(painted > 0, "style {style} painted nothing");
+        }
+
+        let mut solid = Pixmap::new(64, 64).expect("pixmap");
+        paint_border(
+            &mut solid,
+            "rounded",
+            0.0,
+            0.0,
+            64.0,
+            64.0,
+            12.0,
+            6.0,
+            Some("solid"),
+            Some("#ffffff"),
+            Some(1.0),
+            None,
+        );
+        // A solid ring paints the same colour on both edges of the frame.
+        let row = 32 * 64;
+        let left = solid.data()[(row + 1) * 4..(row + 2) * 4].to_vec();
+        let right = solid.data()[(row + 62) * 4..(row + 63) * 4].to_vec();
+        assert!(left[3] > 0, "solid ring must cover the frame edge");
+        assert_eq!(left, right, "solid ring should be uniform around the frame");
+        let mut gradient = Pixmap::new(64, 64).expect("pixmap");
+        let ramp = cursor::RenderBorderGradient {
+            from: "#ff0000".into(),
+            to: "#0000ff".into(),
+            angle: 90.0,
+        };
+        paint_border(
+            &mut gradient,
+            "rounded",
+            0.0,
+            0.0,
+            64.0,
+            64.0,
+            12.0,
+            6.0,
+            Some("gradient"),
+            Some("#ffffff"),
+            Some(1.0),
+            Some(&ramp),
+        );
+        // 90° runs left → right: the left rim is red-ish, the right rim blue-ish.
+        let row = 32 * 64;
+        let left = &gradient.data()[(row + 1) * 4..(row + 2) * 4];
+        let right = &gradient.data()[(row + 62) * 4..(row + 63) * 4];
+        assert!(
+            left[3] > 0 && right[3] > 0,
+            "gradient ring must cover both edges"
+        );
+        assert!(
+            left[0] > right[0],
+            "gradient left edge should be warmer than the right edge"
+        );
     }
 
     #[test]
@@ -14092,6 +15066,9 @@ mod tests {
             codec: "h264".into(),
             encoder: "auto".into(),
             container: "mp4".into(),
+            resolution: "canvas".into(),
+            frame_rate: "project".into(),
+            prores_profile: "hq".into(),
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
@@ -14507,6 +15484,8 @@ mod tests {
                 border_width: Some(0.0),
                 border_color: Some("#ffffff".into()),
                 border_opacity: Some(1.0),
+                border_style: None,
+                border_gradient: None,
                 shadow_enabled: Some(false),
                 shadow_color: Some("#000000".into()),
                 shadow_blur: Some(0.0),
@@ -14599,6 +15578,9 @@ mod tests {
             codec: "h264".into(),
             encoder: "auto".into(),
             container: "mp4".into(),
+            resolution: "canvas".into(),
+            frame_rate: "project".into(),
+            prores_profile: "hq".into(),
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
@@ -14976,6 +15958,8 @@ mod tests {
                 border_width: Some(0.0),
                 border_color: Some("#ffffff".into()),
                 border_opacity: Some(1.0),
+                border_style: None,
+                border_gradient: None,
                 shadow_enabled: Some(false),
                 shadow_color: Some("#000000".into()),
                 shadow_blur: Some(0.0),
@@ -15011,6 +15995,9 @@ mod tests {
             codec: "h264".into(),
             encoder: "auto".into(),
             container: "mp4".into(),
+            resolution: "canvas".into(),
+            frame_rate: "project".into(),
+            prores_profile: "hq".into(),
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
@@ -15155,6 +16142,8 @@ mod tests {
                 border_width: Some(2.0),
                 border_color: Some("#ffffff".into()),
                 border_opacity: Some(1.0),
+                border_style: None,
+                border_gradient: None,
                 shadow_enabled: Some(true),
                 shadow_color: Some("#000000".into()),
                 shadow_blur: Some(10.0),
@@ -15233,6 +16222,9 @@ mod tests {
             codec: "h264".into(),
             encoder: "auto".into(),
             container: "mp4".into(),
+            resolution: "canvas".into(),
+            frame_rate: "project".into(),
+            prores_profile: "hq".into(),
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
@@ -15426,6 +16418,9 @@ mod tests {
             codec: "h264".into(),
             encoder: "auto".into(),
             container: "mp4".into(),
+            resolution: "canvas".into(),
+            frame_rate: "project".into(),
+            prores_profile: "hq".into(),
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
@@ -15562,6 +16557,8 @@ mod tests {
                     border_color: Some("#ffffff".into()),
                     border_width: Some(2.0),
                     border_opacity: Some(1.0),
+                    border_style: None,
+                    border_gradient: None,
                     shadow_enabled: Some(true),
                     shadow_color: Some("#000000".into()),
                     shadow_blur: Some(8.0),
@@ -15588,6 +16585,8 @@ mod tests {
                     border_color: Some("#3884f3".into()),
                     border_width: Some(3.0),
                     border_opacity: Some(0.5),
+                    border_style: None,
+                    border_gradient: None,
                     shadow_enabled: Some(true),
                     shadow_color: Some("#000000".into()),
                     shadow_blur: Some(12.0),
@@ -15633,6 +16632,9 @@ mod tests {
             codec: "h264".into(),
             encoder: "auto".into(),
             container: "mp4".into(),
+            resolution: "canvas".into(),
+            frame_rate: "project".into(),
+            prores_profile: "hq".into(),
             caption_mode: "burn-in".into(),
             chapter_mode: "none".into(),
             range: None,
@@ -15770,6 +16772,8 @@ mod tests {
                 border_color: Some("#ffffff".into()),
                 border_width: Some(2.0),
                 border_opacity: Some(1.0),
+                border_style: None,
+                border_gradient: None,
                 shadow_enabled: Some(true),
                 shadow_color: Some("#000000".into()),
                 shadow_blur: Some(8.0),
@@ -15810,6 +16814,9 @@ mod tests {
             codec: "h264".into(),
             encoder: "auto".into(),
             container: "mp4".into(),
+            resolution: "canvas".into(),
+            frame_rate: "project".into(),
+            prores_profile: "hq".into(),
             caption_mode: "burn-in".into(),
             chapter_mode: "none".into(),
             range: None,
@@ -15990,6 +16997,8 @@ mod tests {
                 border_width: None,
                 border_color: None,
                 border_opacity: None,
+                border_style: None,
+                border_gradient: None,
                 shadow_enabled: None,
                 shadow_color: None,
                 shadow_blur: None,
@@ -16055,6 +17064,9 @@ mod tests {
             codec: "h264".into(),
             encoder: "software".into(),
             container: "mp4".into(),
+            resolution: "canvas".into(),
+            frame_rate: "project".into(),
+            prores_profile: "hq".into(),
             caption_mode: "none".into(),
             chapter_mode: "none".into(),
             range: None,
@@ -16129,6 +17141,9 @@ mod tests {
             codec: "h264".into(),
             encoder: "software".into(),
             container: "mp4".into(),
+            resolution: "canvas".into(),
+            frame_rate: "project".into(),
+            prores_profile: "hq".into(),
             caption_mode: "none".into(),
             chapter_mode: "none".into(),
             range: None,

@@ -40,6 +40,7 @@ import {
   createRippleDeleteRangeCommand,
   createResizeCursorRangeCommand,
   createSplitAllClipsCommand,
+  createSetClipSpeedCommand,
   createSplitClipCommand,
   createSplitCursorRangeCommand,
   createSplitZoomSegmentCommand,
@@ -100,6 +101,7 @@ import { useOverlayInteraction } from "../canvas/use-overlay-interaction"
 import { useTimelineInteraction } from "./use-timeline-interaction"
 import { usePlaybackClock } from "./use-playback-clock"
 import { PlaybackOverlays } from "../canvas/playback-overlays"
+import { BorderOverlay } from "../canvas/border-overlay"
 import { getPlayheadSnapshot, subscribeToPlayhead } from "./use-playback-state"
 import { ResizableHandle } from "../shell/resizable-handle"
 import { useResizableDimension } from "../shell/use-resizable-dimension"
@@ -1275,6 +1277,17 @@ export function TimelineView({
     handleSplitAllAtTime(getPlayheadSnapshot())
   }
 
+  function setClipSpeed(clip: TimelineClip, speed: number) {
+    // Retime the whole selection when the clicked clip is part of it; the
+    // command itself expands span-aligned recorded siblings and group members.
+    const selection = view.selection
+    const clipIds =
+      selection?.kind === "clip" && selection.clipIds.includes(clip.id)
+        ? selection.clipIds
+        : [clip.id]
+    execute(createSetClipSpeedCommand(clipIds, speed))
+  }
+
   function deleteClip(clip: TimelineClip, ripple = false) {
     const selection = view.selection
     if (
@@ -2193,6 +2206,31 @@ export function TimelineView({
                 </div>
               )}
 
+              {/* Canvas frame border — above the screen, below camera bubbles
+                  and overlay items, the same stacking the exporters use. */}
+              {videoBounds && (timeline.canvas.borderWidth ?? 0) > 0 ? (
+                <div
+                  className="pointer-events-none absolute z-20"
+                  style={{
+                    left: videoBounds.left,
+                    top: videoBounds.top,
+                    width: videoBounds.width,
+                    height: videoBounds.height,
+                  }}
+                >
+                  <BorderOverlay
+                    width={videoBounds.width}
+                    height={videoBounds.height}
+                    radius={timeline.canvas.borderRadius * videoBounds.scale}
+                    borderWidth={(timeline.canvas.borderWidth ?? 0) * videoBounds.scale}
+                    style={timeline.canvas.borderStyle ?? "solid"}
+                    color={timeline.canvas.borderColor ?? "#ffffff"}
+                    opacity={timeline.canvas.borderOpacity ?? 1}
+                    gradient={timeline.canvas.borderGradient}
+                  />
+                </div>
+              ) : null}
+
               {mediaUrl && cameraClips.length > 0 ? (
                 <CameraPreview
                   clips={cameraClips}
@@ -2203,6 +2241,7 @@ export function TimelineView({
                   frameMs={frameMs}
                   canvasWidth={timeline.canvas.width}
                   canvasHeight={timeline.canvas.height}
+                  previewScale={videoBounds?.scale ?? 1}
                   selectedClipId={
                     view.selection?.kind === "clip" ? view.selection.primaryClipId : null
                   }
@@ -2433,6 +2472,7 @@ export function TimelineView({
           onDuplicateClip={duplicateClip}
           onSplitClip={splitClip}
           onDeleteClip={deleteClip}
+          onSetClipSpeed={setClipSpeed}
           onAddAssetAtTime={addAssetAtTime}
           onCursorRangeAction={onCursorRangeAction}
           onZoomSegmentAction={onZoomSegmentAction}

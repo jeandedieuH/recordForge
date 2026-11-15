@@ -169,6 +169,9 @@ describe("freeExportSettings", () => {
     encoder: "auto",
     renderer: "auto",
     container: "mp4",
+    resolution: "2160p",
+    frameRate: "project",
+    proresProfile: "hq",
     captionMode: "burn-in",
     chapterMode: "embed",
     keystrokeOverlay: { ...defaultKeystrokeOverlaySettings },
@@ -186,6 +189,24 @@ describe("freeExportSettings", () => {
     expect(settings.preset).toBe("high-quality")
     expect(settings.chapterMode).toBe("none")
     expect(settings.codec).toBe("h264")
+    // Free is capped at 1080p in Rust, so the requested tier drops to match.
+    expect(settings.resolution).toBe("1080p")
+  })
+
+  it("keeps a Free-tier resolution request intact", () => {
+    expect(freeExportSettings({ ...base, resolution: "720p" }).resolution).toBe("720p")
+  })
+
+  it("falls back to MP4/H.264 when a ProRes master is requested", () => {
+    const settings = freeExportSettings({
+      ...base,
+      preset: "high-quality",
+      codec: "prores",
+      container: "mov",
+    })
+    expect(settings.codec).toBe("h264")
+    expect(settings.container).toBe("mp4")
+    expect(settings.preset).toBe("high-quality")
   })
 
   it("neutralizes ratio presets but leaves others untouched", () => {

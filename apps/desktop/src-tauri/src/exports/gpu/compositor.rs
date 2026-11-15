@@ -170,6 +170,25 @@ pub(super) struct CanvasFrame {
     /// Second background plate with the shadow painted around `sbs_rect`; only
     /// present when the layout varies and the canvas has a shadow.
     pub sbs_plate: Option<PathBuf>,
+    /// Canvas frame border (#11). Painted analytically by the composite pass so
+    /// it follows the side-by-side slot per frame; `None` costs nothing.
+    pub border: Option<BorderFrame>,
+}
+
+/// A canvas frame border in compositor-ready form. Kept separate from the
+/// plate-based camera border because the screen rect changes per frame inside
+/// side-by-side windows.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct BorderFrame {
+    /// Visible rim thickness in canvas px.
+    pub width: f32,
+    /// `crate::exports::BorderStyle::id()`.
+    pub style: f32,
+    pub opacity: f32,
+    pub from: [f32; 3],
+    pub to: [f32; 3],
+    /// Gradient angle in radians, clockwise from the top of the frame.
+    pub angle: f32,
 }
 
 impl CanvasFrame {
@@ -179,6 +198,7 @@ impl CanvasFrame {
         self.plate.is_none()
             && self.sbs_rect.is_none()
             && self.radius == 0
+            && self.border.is_none()
             && self.rect.0.abs() < 0.5
             && self.rect.1.abs() < 0.5
             && self.rect.2 >= width as f64 - 0.5
@@ -236,6 +256,10 @@ struct FrameParams {
     background: [f32; 4],
     corner: [f32; 4],
     source_rect: [f32; 4],
+    // x = rim width px, y = style id, z = opacity, w = gradient angle (radians).
+    border: [f32; 4],
+    border_from: [f32; 4],
+    border_to: [f32; 4],
 }
 
 #[repr(C)]
@@ -502,6 +526,22 @@ impl Compositor {
         // it exists and the canvas-wide plate otherwise, so "plate present"
         // covers either source.
         let sbs_plate = sbs_background.is_some() || full_plate;
+        // Border uniforms are constant for the export; only `dest_rect` moves
+        // between frames (side-by-side), which is what makes the ring follow the
+        // screen rect exactly.
+        let border = frame.border.unwrap_or(BorderFrame {
+            width: 0.0,
+            style: 0.0,
+            opacity: 0.0,
+            from: [0.0; 3],
+            to: [0.0; 3],
+            angle: 0.0,
+        });
+        let border_params = [
+            [border.width, border.style, border.opacity, border.angle],
+            [border.from[0], border.from[1], border.from[2], 0.0],
+            [border.to[0], border.to[1], border.to[2], 0.0],
+        ];
         let params = FrameParams {
             canvas_size: [width as f32, height as f32, 0.0, 0.0],
             dest_rect: [
@@ -524,6 +564,9 @@ impl Compositor {
                 frame.rect.2.max(1.0) as f32,
                 frame.rect.3.max(1.0) as f32,
             ],
+            border: border_params[0],
+            border_from: border_params[1],
+            border_to: border_params[2],
         };
         let mut sbs_params = params;
         sbs_params.background[3] = 1.0 - f32::from(sbs_plate);
@@ -2716,6 +2759,7 @@ mod tests {
             background: [0.0, 0.0, 0.0],
             plate: None,
             sbs_plate: None,
+            border: None,
         }
     }
 

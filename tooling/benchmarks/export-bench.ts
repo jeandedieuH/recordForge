@@ -490,6 +490,7 @@ const ABLATION_ORDER = [
   "radius",
   "shadow",
   "zoom",
+  "zoom-border",
   "cursor",
   "items",
   "masks",
@@ -516,7 +517,7 @@ interface AblationKey {
 }
 
 function ablationKey(spec: string): AblationKey | undefined {
-  const match = /^spec_abl-([a-z]+)_chunked((?:_[a-z0-9]+)*)$/.exec(spec)
+  const match = /^spec_abl-([a-z][a-z-]*)_chunked((?:_[a-z0-9]+)*)$/.exec(spec)
   if (!match) return undefined
   const tokens = match[2].split("_").filter(Boolean)
   const renderer = tokens.includes("gpu") ? "gpu" : "compatibility"

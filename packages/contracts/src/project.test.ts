@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import {
   annotationClipSchema,
+  clipTransformSchema,
   exportTimelineOptionsSchema,
   imageClipSchema,
   renderPlanSchema,
@@ -200,6 +201,9 @@ describe("project contract", () => {
       encoder: "auto",
       renderer: "auto",
       container: "mp4",
+      resolution: "canvas",
+      frameRate: "project",
+      proresProfile: "hq",
       captionMode: "burn-in",
       chapterMode: "embed",
       keystrokeOverlay: {
@@ -255,6 +259,9 @@ describe("project contract", () => {
       codec: "gif",
       encoder: "auto",
       renderer: "auto",
+      resolution: "canvas",
+      frameRate: "project",
+      proresProfile: "hq",
       captionMode: "burn-in",
       chapterMode: "none",
       keystrokeOverlay: {
@@ -287,6 +294,9 @@ describe("project contract", () => {
       codec: "webp",
       encoder: "auto",
       renderer: "auto",
+      resolution: "canvas",
+      frameRate: "project",
+      proresProfile: "hq",
       captionMode: "burn-in",
       chapterMode: "none",
       keystrokeOverlay: {
@@ -306,6 +316,50 @@ describe("project contract", () => {
         captionsLanguage: "en",
       },
     })
+  })
+
+  it("backfills the output format from the preset for legacy projects", () => {
+    const smooth = projectSchema.parse({
+      ...minimalProject,
+      exportSettings: { preset: "smooth-60fps", codec: "h264", container: "mp4" },
+    })
+    expect(smooth.exportSettings.resolution).toBe("canvas")
+    expect(smooth.exportSettings.frameRate).toBe("60")
+
+    const ultra = projectSchema.parse({
+      ...minimalProject,
+      exportSettings: { preset: "ultra-4k", codec: "h264", container: "mp4" },
+    })
+    expect(ultra.exportSettings.resolution).toBe("2160p")
+    expect(ultra.exportSettings.frameRate).toBe("project")
+  })
+
+  it("keeps an explicit output format over the preset prefill", () => {
+    const parsed = projectSchema.parse({
+      ...minimalProject,
+      exportSettings: {
+        preset: "smooth-60fps",
+        codec: "h264",
+        container: "mp4",
+        resolution: "1080p",
+        frameRate: "30",
+      },
+    })
+    expect(parsed.exportSettings.resolution).toBe("1080p")
+    expect(parsed.exportSettings.frameRate).toBe("30")
+  })
+
+  it("parses a ProRes MOV export payload", () => {
+    const parsed = projectExportSettingsSchema.parse({
+      container: "mov",
+      codec: "prores",
+      proresProfile: "lt",
+    })
+    expect(parsed.container).toBe("mov")
+    expect(parsed.codec).toBe("prores")
+    expect(parsed.proresProfile).toBe("lt")
+    // Every other export keeps the HQ default.
+    expect(projectExportSettingsSchema.parse({}).proresProfile).toBe("hq")
   })
 
   it("requires project-scoped render plans and keeps media paths out of the DTO", () => {
@@ -623,5 +677,32 @@ describe("project contract", () => {
     })
     expect(parsed.canvas.backgroundBlur).toBe(24)
     expect(parsed.canvas.backgroundDim).toBe(0.35)
+  })
+
+  it("persists canvas and camera frame borders", () => {
+    const parsed = projectSchema.parse({
+      ...minimalProject,
+      canvas: {
+        ...minimalProject.canvas,
+        borderWidth: 8,
+        borderColor: "#38bdf8",
+        borderOpacity: 0.8,
+        borderStyle: "gradient",
+        borderGradient: { from: "#38bdf8", to: "#6366f1", angle: 90 },
+      },
+    })
+    expect(parsed.canvas.borderWidth).toBe(8)
+    expect(parsed.canvas.borderStyle).toBe("gradient")
+    expect(parsed.canvas.borderGradient).toEqual({ from: "#38bdf8", to: "#6366f1", angle: 90 })
+
+    const transform = clipTransformSchema.parse({
+      borderWidth: 6,
+      borderStyle: "double",
+      borderGradient: { from: "#ffffff", to: "#000000" },
+    })
+    expect(transform.borderStyle).toBe("double")
+    // The ramp angle defaults, so a hand-written project cannot break it.
+    expect(transform.borderGradient?.angle).toBe(135)
+    expect(() => clipTransformSchema.parse({ borderStyle: "neon" })).toThrow()
   })
 })

@@ -32,6 +32,11 @@ struct FrameParams {
     // decode pass always fits the screen into this rect; `dest_rect` is where
     // the current frame draws it.
     source_rect: vec4<f32>,
+    // Canvas frame border (#11): x = rim width px, y = style id (0 solid,
+    // 1 gradient, 2 double, 3 glass), z = opacity, w = gradient angle (radians).
+    border: vec4<f32>,
+    border_from: vec4<f32>,
+    border_to: vec4<f32>,
 };
 
 @group(0) @binding(0) var src_y: texture_2d<f32>;
@@ -132,6 +137,24 @@ fn canvas_background(px: vec2<f32>) -> vec3<f32> {
     return textureLoad(background, vec2<i32>(px), 0).rgb;
 }
 
+// Coverage of the band `[lo, hi]` px inward from the frame edge, for a frame
+// whose signed distance is `distance` (negative inside). Both edges are
+// anti-aliased over one pixel.
+fn border_band(distance: f32, lo: f32, hi: f32) -> f32 {
+    let depth = -distance;
+    return clamp(0.5 + depth - lo, 0.0, 1.0) * clamp(0.5 + hi - depth, 0.0, 1.0);
+}
+
+// Gradient ramp across the current screen rect. The angle runs clockwise from
+// the top of the frame, matching the preview's SVG gradient and the compat
+// plate painter.
+fn border_ramp(canvas_px: vec2<f32>) -> vec3<f32> {
+    let dir = vec2<f32>(sin(frame.border.w), -cos(frame.border.w));
+    let local = (canvas_px - frame.dest_rect.xy) / max(frame.dest_rect.zw, vec2<f32>(1.0, 1.0));
+    let t = clamp(dot(local - vec2<f32>(0.5, 0.5), dir) + 0.5, 0.0, 1.0);
+    return mix(frame.border_from.rgb, frame.border_to.rgb, t);
+}
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let canvas_px = in.uv * frame.canvas_size.xy;
@@ -187,5 +210,39 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         y_byte = sample_bicubic(src_y, sample_uv, y_dims).r * 255.0;
     }
     let screen = yuv_to_rgb(y_byte, uv_byte);
-    return vec4<f32>(mix(bg, screen, coverage), 1.0);
+    var color = mix(bg, screen, coverage);
+
+    // Canvas frame border: an analytic ring just inside the screen rect, so it
+    // follows the side-by-side slot without a per-frame plate.
+    let border_width = min(frame.border.x, min(half.x, half.y));
+    if (border_width > 0.0) {
+        let style = frame.border.y;
+        let opacity = clamp(frame.border.z, 0.0, 1.0);
+        if (style > 2.5) {
+            // glass: translucent tint plus a bright inner highlight.
+            let rim = clamp(border_band(distance, 0.0, border_width) * 0.35, 0.0, 1.0);
+            let highlight = clamp(
+                border_band(distance, border_width * 0.72, border_width) * 0.55,
+                0.0,
+                1.0,
+            );
+            color = mix(color, frame.border_from.rgb, rim * opacity * coverage);
+            color = mix(color, vec3<f32>(1.0), highlight * opacity * coverage);
+        } else {
+            var ring: f32;
+            var ring_color = frame.border_from.rgb;
+            if (style > 1.5) {
+                // double: two strokes with a gap between them.
+                ring = border_band(distance, 0.0, border_width * 0.55)
+                    + border_band(distance, border_width * 0.72, border_width);
+            } else {
+                ring = border_band(distance, 0.0, border_width);
+                if (style > 0.5) {
+                    ring_color = border_ramp(canvas_px);
+                }
+            }
+            color = mix(color, ring_color, clamp(ring, 0.0, 1.0) * opacity * coverage);
+        }
+    }
+    return vec4<f32>(color, 1.0);
 }

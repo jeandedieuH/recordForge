@@ -9,7 +9,8 @@ import {
   timelineMarkerSchema,
   timelineTrackSchema,
 } from "./timeline"
-import { exportSettingsSchema } from "./timeline"
+import { exportPresetFormat, exportSettingsSchema } from "./timeline"
+import type { ExportPreset } from "./timeline"
 import { youtubeAutoPublishSchema } from "./publish"
 
 // Canvas settings are stored in the on-disk project file under the same schema.
@@ -140,8 +141,25 @@ export function migrateProjectInput(value: unknown): unknown {
     markers: value.markers ?? [],
     zoomSegments: value.zoomSegments ?? [],
     smartZoomSettings: value.smartZoomSettings ?? {},
-    exportSettings: value.exportSettings ?? {},
+    exportSettings: normalizeExportFormatInput(value.exportSettings ?? {}),
     checksum: value.checksum ?? "",
+  }
+}
+
+/**
+ * Backfill the output format fields from the preset for projects saved before
+ * they existed, so a legacy `smooth-60fps` project keeps exporting at 60 fps
+ * and `ultra-4k` keeps its 2160p raster.
+ */
+export function normalizeExportFormatInput(value: unknown): unknown {
+  if (!isRecord(value)) return value
+  const format = exportPresetFormat(
+    (typeof value.preset === "string" ? value.preset : "default-mp4") as ExportPreset,
+  )
+  return {
+    ...value,
+    resolution: value.resolution ?? format.resolution,
+    frameRate: value.frameRate ?? format.frameRate,
   }
 }
 

@@ -38,6 +38,7 @@ import { SolidBackgroundPicker } from "./layout/solid-background-picker"
 import { GradientBackgroundPicker } from "./layout/gradient-background-picker"
 import { ImageBackgroundPicker } from "./layout/image-background-picker"
 import { ShadowControls } from "./layout/shadow-controls"
+import { BorderControls } from "./layout/border-controls"
 
 const PADDING_PRESETS = [0, 24, 48, 64, 96]
 const RADIUS_PRESETS = [
@@ -360,6 +361,12 @@ export function LayoutPanel() {
         onChange={(updates) => execute(createUpdateCanvasCommand(updates))}
       />
 
+      {/* Frame Border */}
+      <BorderControls
+        canvas={canvas}
+        onChange={(updates) => execute(createUpdateCanvasCommand(updates))}
+      />
+
       {/* Footer Reset Action */}
       <div className="mt-auto flex flex-col gap-2 pt-2 border-t border-border">
         <Button
@@ -380,6 +387,7 @@ export function LayoutPanel() {
                   backgroundBlur: 0,
                   backgroundDim: 0,
                   shadow: false,
+                  borderWidth: 0,
                 },
                 { cameraSources: collectCameraSources(timeline, cameraSourceCtx) },
               ),

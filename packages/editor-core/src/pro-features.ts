@@ -57,6 +57,8 @@ function enabledClips(state: TimelineState, kind: "annotation" | "text") {
 export function analyzeProFeatureUsage(
   timeline: TimelineState,
   settings?: Pick<ProjectExportSettings, "preset" | "chapterMode"> & {
+    container?: ProjectExportSettings["container"]
+    codec?: ProjectExportSettings["codec"]
     keystrokeOverlay?: { enabled: boolean }
   },
 ): ProUsageAnalysis {
@@ -68,6 +70,10 @@ export function analyzeProFeatureUsage(
 
   if (settings?.preset && HIGH_RES_PRESETS.has(settings.preset)) {
     push("high-res-export", 1, "4K export preset")
+  }
+
+  if (settings?.codec === "prores") {
+    push("prores-export", 1, "ProRes movie")
   }
 
   const nonStandardRatio =

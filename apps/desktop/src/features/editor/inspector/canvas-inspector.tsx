@@ -86,6 +86,12 @@ export function CanvasInspector() {
             value={`${Math.round((timeline.canvas.backgroundDim ?? 0) * 100)}%`}
           />
         ) : null}
+        {(timeline.canvas.borderWidth ?? 0) > 0 ? (
+          <InfoField
+            label="Frame border"
+            value={`${timeline.canvas.borderWidth}px ${timeline.canvas.borderStyle ?? "solid"}`}
+          />
+        ) : null}
       </div>
 
       {recording ? (

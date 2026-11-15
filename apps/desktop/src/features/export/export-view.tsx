@@ -1,18 +1,28 @@
 import { useEffect, useMemo, useState } from "react"
 import type {
+  ExportCodec,
+  ExportContainer,
   ExportEncoderPreference,
+  ExportFrameRate,
   ExportPreset,
   ExportRange,
+  ExportResolution,
   ExportRendererPreference,
   InstantShareSettings,
   JobDelivery,
   MediaJob,
   ProjectExportSettings,
+  ProresProfile,
   RenderCaptionMode,
   RenderChapterMode,
   TimelineCanvas,
   TimelineMarker,
   YouTubeAutoPublishSettings,
+} from "@recordforge/contracts"
+import {
+  EXPORT_RESOLUTION_EDGE,
+  resolveOutputDimensions,
+  resolveOutputFrameRate,
 } from "@recordforge/contracts"
 import { canvasResolutionTier, formatYouTubeChapters } from "@recordforge/editor-core"
 import type { ProFeatureKey } from "@recordforge/contracts"
@@ -70,9 +80,12 @@ interface ExportViewProps {
   // Re-run one post-export delivery (share/youtube) on the completed export.
   onRetryDelivery?: (kind: "share" | "youtube") => void | Promise<void>
   markers?: TimelineMarker[]
-  onContainerChange?: (container: "mp4" | "gif" | "webp") => void
+  onContainerChange?: (container: ExportContainer) => void
   onPresetChange?: (preset: ExportPreset) => void
-  onCodecChange?: (codec: "h264" | "hevc" | "gif" | "webp") => void
+  onCodecChange?: (codec: ExportCodec) => void
+  onProresProfileChange?: (profile: ProresProfile) => void
+  onResolutionChange?: (resolution: ExportResolution) => void
+  onFrameRateChange?: (frameRate: ExportFrameRate) => void
   onEncoderChange?: (encoder: ExportEncoderPreference) => void
   onRendererChange?: (renderer: ExportRendererPreference) => void
   /** Display name of the detected hardware encoder, or null when none was found. */
@@ -230,6 +243,15 @@ export const PRO_PRESETS: Partial<Record<ExportPreset, ProFeatureKey>> = {
   square: "custom-aspect-ratio",
 }
 
+/** Output raster tiers, largest last (options above the canvas are hidden). */
+export const EXPORT_RESOLUTIONS: ExportResolution[] = ["canvas", "720p", "1080p", "1440p", "2160p"]
+
+/** Output frame-rate tiers; `project` keeps the canvas grid. */
+export const EXPORT_FRAME_RATES: ExportFrameRate[] = ["project", "24", "30", "60"]
+
+/** Tiers above 1080p are Pro — Free exports are capped at 1080p in Rust. */
+export const PRO_RESOLUTIONS: ExportResolution[] = ["1440p", "2160p"]
+
 export const ANIMATION_MAX_DURATION_MS = 60_000
 
 // The GIF encoder builds one global palette and animated WebP frames are
@@ -240,7 +262,7 @@ export const ANIMATION_MAX_DURATION_MS = 60_000
 // selected-range preset with no valid range reports false here — the
 // existing range check already blocks that state.
 export function exceedsAnimationDurationLimit(
-  container: "mp4" | "gif" | "webp",
+  container: ExportContainer,
   preset: ExportPreset,
   durationMs: number,
   range: ExportRange | undefined,
@@ -284,7 +306,7 @@ export function resolveExportRange(
 
 function normalizePreset(
   preset: ExportPreset | undefined,
-  container: "mp4" | "gif" | "webp" = "mp4",
+  container: ExportContainer = "mp4",
 ): ExportPreset {
   if (!preset || preset === "default-mp4") {
     return container === "webp"
@@ -313,6 +335,9 @@ export function ExportView({
   onContainerChange,
   onPresetChange,
   onCodecChange,
+  onProresProfileChange,
+  onResolutionChange,
+  onFrameRateChange,
   onEncoderChange,
   onRendererChange,
   hardwareEncoderName = null,
@@ -335,10 +360,36 @@ export function ExportView({
         : "mp4")
   const isGif = container === "gif"
   const isWebp = container === "webp"
+  const isProRes = container === "mov"
   const isAnimation = isGif || isWebp
   const presets = isWebp ? WEBP_PRESETS : isGif ? GIF_PRESETS : MP4_PRESETS
   const isPro = useLicenseStore((state) => state.status.tier === "pro")
   const openUpgradeDialog = useLicenseStore((state) => state.openUpgradeDialog)
+  // Effects the finished job rendered below full quality (ADR 020). Rust
+  // persists them on the job, so this survives reopening the export view.
+  const renderNotes = exportJob?.outputs.renderNotes ?? []
+  const resolution = exportSettings?.resolution ?? "canvas"
+  const frameRate = exportSettings?.frameRate ?? "project"
+  // A tier only ever scales down, so options above the canvas are hidden.
+  const resolutionOptions = useMemo<ExportResolution[]>(() => {
+    const shortEdge = canvas ? Math.min(canvas.width, canvas.height) : null
+    return EXPORT_RESOLUTIONS.filter((tier) => {
+      const edge = EXPORT_RESOLUTION_EDGE[tier]
+      return edge === null || shortEdge === null || edge <= shortEdge
+    })
+  }, [canvas])
+  // The delivered raster and grid: the badge shows what the file will be,
+  // which is the canvas exactly when both fields stay at `canvas`/`project`.
+  // Animated GIF/WebP exports keep the canvas grid here — their presets own
+  // the palette scaling and frame rate.
+  const outputFormat = useMemo(() => {
+    if (!canvas) return null
+    if (isAnimation) return { width: canvas.width, height: canvas.height, fps: canvas.fps }
+    return {
+      ...resolveOutputDimensions(canvas.width, canvas.height, resolution),
+      fps: resolveOutputFrameRate(frameRate, canvas.fps),
+    }
+  }, [canvas, isAnimation, resolution, frameRate])
   // Instant Share — MP4-only Pro feature (docs/specs/instant-share.md).
   // `target` is "hosted" or the id of an S3 storage profile (BYO bucket);
   // enabled/target/expiry persist per project. The password stays
@@ -479,15 +530,35 @@ export function ExportView({
     }
   }
 
-  function handleFormatChange(nextContainer: "mp4" | "gif" | "webp") {
+  function selectResolution(next: ExportResolution) {
+    // Above-1080p tiers stay selectable on Free — picking one opens the
+    // upgrade dialog instead of silently rendering a capped file.
+    if (!isPro && PRO_RESOLUTIONS.includes(next)) {
+      openUpgradeDialog(["high-res-export"])
+      return
+    }
+    onResolutionChange?.(next)
+  }
+
+  function handleFormatChange(nextContainer: ExportContainer) {
     if (nextContainer === container) return
+    // ProRes is a Pro delivery codec — the format button opens the upgrade
+    // dialog instead of switching the export.
+    if (nextContainer === "mov" && !isPro) {
+      openUpgradeDialog(["prores-export"])
+      return
+    }
     onContainerChange?.(nextContainer)
     const nextPreset: ExportPreset =
       nextContainer === "webp"
         ? "webp-balanced"
         : nextContainer === "gif"
           ? "gif-balanced"
-          : "balanced"
+          : nextContainer === "mov"
+            ? selectedPreset.startsWith("gif-") || selectedPreset.startsWith("webp-")
+              ? "high-quality"
+              : selectedPreset
+            : "balanced"
     setSelectedPreset(nextPreset)
     onPresetChange?.(nextPreset)
   }
@@ -532,9 +603,9 @@ export function ExportView({
           <Badge variant="outline" className="font-mono text-[11px] leading-none">
             {formatDuration(durationMs)}
           </Badge>
-          {canvas ? (
+          {outputFormat ? (
             <Badge variant="outline" className="font-mono text-[11px] leading-none">
-              {canvas.width}×{canvas.height} @ {canvas.fps}fps
+              {outputFormat.width}×{outputFormat.height} @ {outputFormat.fps}fps
             </Badge>
           ) : null}
         </div>
@@ -550,6 +621,20 @@ export function ExportView({
               Configure video encoding, animations, audio tracks, and chapter metadata.
             </p>
           </div>
+
+          {renderNotes.length > 0 ? (
+            <div
+              className="mb-6 flex flex-col gap-1 rounded-lg border border-border bg-surface px-3 py-2 text-xs text-subtle-foreground"
+              role="status"
+            >
+              <span className="font-semibold text-foreground">Rendered with simplifications</span>
+              <ul className="flex list-disc flex-col gap-0.5 pl-4">
+                {renderNotes.map((note) => (
+                  <li key={`${note.effect}-${note.reason}`}>{note.reason}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
 
           {error ? (
             <div
@@ -592,7 +677,7 @@ export function ExportView({
                 disabled={isRunning}
                 onClick={() => handleFormatChange("mp4")}
                 className={`flex-1 rounded-md py-1.5 text-xs font-medium transition-colors ${
-                  !isAnimation
+                  !isAnimation && !isProRes
                     ? "bg-primary text-primary-foreground shadow-sm"
                     : "text-subtle-foreground hover:text-foreground"
                 }`}
@@ -622,6 +707,19 @@ export function ExportView({
                 }`}
               >
                 Animated WebP
+              </button>
+              <button
+                type="button"
+                disabled={isRunning}
+                onClick={() => handleFormatChange("mov")}
+                className={`flex flex-1 items-center justify-center gap-1.5 rounded-md py-1.5 text-xs font-medium transition-colors ${
+                  isProRes
+                    ? "bg-primary text-primary-foreground shadow-sm"
+                    : "text-subtle-foreground hover:text-foreground"
+                }`}
+              >
+                ProRes
+                {!isPro ? <ProBadge /> : null}
               </button>
             </div>
           </div>
@@ -730,7 +828,13 @@ export function ExportView({
             >
               <span className="flex items-center gap-2 font-label">
                 <Film className="size-4 text-track-screen" aria-hidden />
-                {isWebp ? "WebP settings" : isGif ? "GIF settings" : "Video and captions"}
+                {isWebp
+                  ? "WebP settings"
+                  : isGif
+                    ? "GIF settings"
+                    : isProRes
+                      ? "ProRes settings"
+                      : "Video and captions"}
               </span>
               {videoAccordionOpen ? (
                 <ChevronUp className="size-4" />
@@ -772,51 +876,140 @@ export function ExportView({
                 {!isAnimation ? (
                   <>
                     <label className="flex flex-col gap-1.5 text-xs text-subtle-foreground">
-                      Codec
+                      Resolution
                       <Select
-                        value={exportSettings?.codec ?? "h264"}
-                        onValueChange={(value) => onCodecChange?.(value as "h264" | "hevc")}
+                        value={resolution}
+                        onValueChange={(value) => selectResolution(value as ExportResolution)}
                         disabled={isRunning}
                       >
                         <SelectTrigger
-                          aria-label="Export codec"
+                          aria-label="Export resolution"
                           className="border-border bg-background text-xs text-foreground"
                         >
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
-                          <SelectItem value="h264">H.264 (AVC)</SelectItem>
-                          <SelectItem value="hevc">H.265 (HEVC)</SelectItem>
+                          {resolutionOptions.map((tier) => {
+                            const dims = canvas
+                              ? resolveOutputDimensions(canvas.width, canvas.height, tier)
+                              : null
+                            const gated = !isPro && PRO_RESOLUTIONS.includes(tier)
+                            return (
+                              <SelectItem key={tier} value={tier}>
+                                {tier === "canvas" ? "Project canvas" : tier}
+                                {dims ? ` · ${dims.width}×${dims.height}` : ""}
+                                {gated ? " (Pro)" : ""}
+                              </SelectItem>
+                            )
+                          })}
                         </SelectContent>
                       </Select>
+                      <span className="text-[11px] text-subtle-foreground">
+                        Larger tiers are never upscaled from the project canvas.
+                      </span>
                     </label>
                     <label className="flex flex-col gap-1.5 text-xs text-subtle-foreground">
-                      Encoder
+                      Frame rate
                       <Select
-                        value={exportSettings?.encoder ?? "auto"}
-                        onValueChange={(value) =>
-                          onEncoderChange?.(value as ExportEncoderPreference)
-                        }
+                        value={frameRate}
+                        onValueChange={(value) => onFrameRateChange?.(value as ExportFrameRate)}
                         disabled={isRunning}
                       >
                         <SelectTrigger
-                          aria-label="Export encoder"
+                          aria-label="Export frame rate"
                           className="border-border bg-background text-xs text-foreground"
                         >
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
-                          <SelectItem value="auto">Auto (hardware when available)</SelectItem>
-                          <SelectItem value="software">Software (x264/x265)</SelectItem>
+                          <SelectItem value="project">
+                            {canvas ? `Project (${canvas.fps} fps)` : "Project"}
+                          </SelectItem>
+                          <SelectItem value="24">24 fps</SelectItem>
+                          <SelectItem value="30">30 fps</SelectItem>
+                          <SelectItem value="60">60 fps</SelectItem>
                         </SelectContent>
                       </Select>
-                      {hardwareEncoderName ? (
-                        <span className="flex items-center gap-1.5 text-[11px] text-subtle-foreground">
-                          <Zap className="size-3 text-track-screen" aria-hidden />
-                          {hardwareEncoderName} detected and will be used by Auto
-                        </span>
-                      ) : null}
+                      <span className="text-[11px] text-subtle-foreground">
+                        Every frame is composed at this rate — motion, zoom and cursor are never
+                        frame-duplicated.
+                      </span>
                     </label>
+                    {isProRes ? (
+                      <label className="flex flex-col gap-1.5 text-xs text-subtle-foreground">
+                        ProRes profile
+                        <Select
+                          value={exportSettings?.proresProfile ?? "hq"}
+                          onValueChange={(value) => onProresProfileChange?.(value as ProresProfile)}
+                          disabled={isRunning}
+                        >
+                          <SelectTrigger
+                            aria-label="ProRes profile"
+                            className="border-border bg-background text-xs text-foreground"
+                          >
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="hq">422 HQ — mastering (default)</SelectItem>
+                            <SelectItem value="standard">422 — high quality</SelectItem>
+                            <SelectItem value="lt">422 LT — lighter</SelectItem>
+                            <SelectItem value="proxy">422 Proxy — offline edits</SelectItem>
+                          </SelectContent>
+                        </Select>
+                        <span className="text-[11px] text-subtle-foreground">
+                          10-bit 4:2:2 intra-only; audio is uncompressed PCM.
+                        </span>
+                      </label>
+                    ) : (
+                      <label className="flex flex-col gap-1.5 text-xs text-subtle-foreground">
+                        Codec
+                        <Select
+                          value={exportSettings?.codec ?? "h264"}
+                          onValueChange={(value) => onCodecChange?.(value as "h264" | "hevc")}
+                          disabled={isRunning}
+                        >
+                          <SelectTrigger
+                            aria-label="Export codec"
+                            className="border-border bg-background text-xs text-foreground"
+                          >
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="h264">H.264 (AVC)</SelectItem>
+                            <SelectItem value="hevc">H.265 (HEVC)</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </label>
+                    )}
+                    {isProRes ? null : (
+                      <label className="flex flex-col gap-1.5 text-xs text-subtle-foreground">
+                        Encoder
+                        <Select
+                          value={exportSettings?.encoder ?? "auto"}
+                          onValueChange={(value) =>
+                            onEncoderChange?.(value as ExportEncoderPreference)
+                          }
+                          disabled={isRunning}
+                        >
+                          <SelectTrigger
+                            aria-label="Export encoder"
+                            className="border-border bg-background text-xs text-foreground"
+                          >
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="auto">Auto (hardware when available)</SelectItem>
+                            <SelectItem value="software">Software (x264/x265)</SelectItem>
+                          </SelectContent>
+                        </Select>
+                        {hardwareEncoderName ? (
+                          <span className="flex items-center gap-1.5 text-[11px] text-subtle-foreground">
+                            <Zap className="size-3 text-track-screen" aria-hidden />
+                            {hardwareEncoderName} detected and will be used by Auto
+                          </span>
+                        ) : null}
+                      </label>
+                    )}
                     <label className="flex flex-col gap-1.5 text-xs text-subtle-foreground">
                       Renderer
                       <Select
@@ -1058,7 +1251,7 @@ export function ExportView({
             </div>
           ) : null}
 
-          {!isAnimation ? (
+          {!isAnimation && !isProRes ? (
             <div className="overflow-hidden rounded-xl border border-border bg-surface">
               <div className="flex w-full items-center justify-between p-4">
                 <span className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-muted-foreground font-label">
@@ -1168,7 +1361,7 @@ export function ExportView({
 
           {/* YouTube publishing (Pro): auto-publish runs inside the export
               job; the manual section re-uploads the finished MP4. */}
-          {!isAnimation ? (
+          {!isAnimation && !isProRes ? (
             <YouTubePublishCard
               exportJob={exportJob}
               projectName={projectName ?? "RecordForge export"}
@@ -1224,7 +1417,9 @@ export function ExportView({
         onOpenChange={setUploadDialogOpen}
         localPath={exportJob?.outputs?.outputPath ?? ""}
         exportId={exportJob?.id}
-        defaultName={`${projectName ?? "export"}.${isWebp ? "webp" : isGif ? "gif" : "mp4"}`}
+        defaultName={`${projectName ?? "export"}.${
+          isWebp ? "webp" : isGif ? "gif" : isProRes ? "mov" : "mp4"
+        }`}
       />
     </div>
   )

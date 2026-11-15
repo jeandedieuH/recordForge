@@ -81,6 +81,7 @@ export interface TimelineLaneRowProps {
   onDuplicateClip: (clip: TimelineClip) => void
   onSplitClip: (clip: TimelineClip, splitTimeMs?: number) => void
   onDeleteClip: (clip: TimelineClip, ripple?: boolean) => void
+  onSetClipSpeed?: (clip: TimelineClip, speed: number) => void
   onCursorRangeAction?: (action: CursorRangeAction) => void
   onUpdateClipAudio?: (
     clip: AudioClip,
@@ -138,6 +139,7 @@ export const TimelineLaneRow = memo(function TimelineLaneRow({
   onDuplicateClip,
   onSplitClip,
   onDeleteClip,
+  onSetClipSpeed,
   onCursorRangeAction,
   onUpdateClipAudio,
   onRippleDeleteRange,
@@ -296,6 +298,7 @@ export const TimelineLaneRow = memo(function TimelineLaneRow({
             onDuplicateClip={onDuplicateClip}
             onSplitClip={onSplitClip}
             onDeleteClip={onDeleteClip}
+            onSetClipSpeed={onSetClipSpeed}
             onSeek={onSeek}
             onCursorRangeAction={onCursorRangeAction}
             onUpdateAudio={onUpdateClipAudio}

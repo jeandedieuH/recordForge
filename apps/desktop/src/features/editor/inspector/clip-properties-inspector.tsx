@@ -1,10 +1,14 @@
 import { useEffect, useState } from "react"
 import type { MediaMetadata, TimelineClip, TimelineTrack } from "@recordforge/contracts"
-import { createTrimClipCommand, createUpdateTrackCommand } from "@recordforge/editor-core"
-import { Sliders, Volume2 } from "lucide-react"
+import {
+  createSetClipSpeedCommand,
+  createTrimClipCommand,
+  createUpdateTrackCommand,
+} from "@recordforge/editor-core"
+import { Gauge, Sliders, Volume2 } from "lucide-react"
 import { Badge, Button, Switch } from "@recordforge/ui"
 import { useTimelineStore } from "../../../stores/timeline-store"
-import { InfoField, TrimField } from "./fields"
+import { DebouncedSlider, InfoField, NumberField, TrimField } from "./fields"
 
 interface ClipPropertiesInspectorProps {
   clip: TimelineClip
@@ -22,6 +26,8 @@ export function ClipPropertiesInspector({
   const execute = useTimelineStore((state) => state.execute)
   const [sourceInText, setSourceInText] = useState(String(clip.sourceInMs))
   const [sourceOutText, setSourceOutText] = useState(String(clip.sourceOutMs))
+  const [speedDraft, setSpeedDraft] = useState(clip.speed)
+  const canRetime = clip.kind === "screen" || clip.kind === "camera" || clip.kind === "audio"
 
   const stream = streamDetails(clip, metadata)
   const streamIndex = "streamIndex" in clip ? clip.streamIndex : undefined
@@ -29,7 +35,14 @@ export function ClipPropertiesInspector({
   useEffect(() => {
     setSourceInText(String(clip.sourceInMs))
     setSourceOutText(String(clip.sourceOutMs))
+    setSpeedDraft(clip.speed)
   }, [clip])
+
+  const clampedSpeed = Math.min(16, Math.max(0.1, Number.isFinite(speedDraft) ? speedDraft : 1))
+  const previewDurationMs = Math.max(
+    1,
+    Math.round((clip.sourceOutMs - clip.sourceInMs) / clampedSpeed),
+  )
 
   function applyTrim() {
     const sourceInMs = Number.parseInt(sourceInText, 10)
@@ -43,6 +56,10 @@ export function ClipPropertiesInspector({
         clip.kind === "caption" ? { startMs: sourceInMs } : undefined,
       ),
     )
+  }
+
+  function applySpeed() {
+    execute(createSetClipSpeedCommand([clip.id], clampedSpeed))
   }
 
   return (
@@ -83,6 +100,45 @@ export function ClipPropertiesInspector({
           Apply source trim
         </Button>
       </div>
+
+      {canRetime ? (
+        <div className="flex flex-col gap-3">
+          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-subtle-foreground">
+            <Gauge className="size-4 text-primary" aria-hidden />
+            <span>Playback speed</span>
+          </div>
+          <div className="grid grid-cols-2 gap-3 text-xs">
+            <NumberField
+              label="Speed (×)"
+              value={clampedSpeed}
+              min={0.1}
+              max={16}
+              step={0.05}
+              onChange={setSpeedDraft}
+            />
+            <InfoField label="New duration" value={formatInspectorTime(previewDurationMs)} />
+          </div>
+          <DebouncedSlider
+            value={[Math.min(8, clampedSpeed)]}
+            min={0.1}
+            max={8}
+            step={0.05}
+            aria-label="Clip speed"
+            onValueCommit={([value]) => {
+              const next = value ?? clampedSpeed
+              setSpeedDraft(Math.round(next * 100) / 100)
+            }}
+          />
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={applySpeed}
+            disabled={Math.abs(clampedSpeed - clip.speed) < 0.001}
+          >
+            Apply speed
+          </Button>
+        </div>
+      ) : null}
 
       <div className="flex items-center justify-between border-t border-border pt-4 text-xs">
         <div className="flex items-center gap-2 text-subtle-foreground">

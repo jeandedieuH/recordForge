@@ -125,6 +125,9 @@ export function AppShell() {
   const setExportContainer = useTimelineStore((state) => state.setExportContainer)
   const setExportPreset = useTimelineStore((state) => state.setExportPreset)
   const setExportCodec = useTimelineStore((state) => state.setExportCodec)
+  const setExportProresProfile = useTimelineStore((state) => state.setExportProresProfile)
+  const setExportResolution = useTimelineStore((state) => state.setExportResolution)
+  const setExportFrameRate = useTimelineStore((state) => state.setExportFrameRate)
   const setExportEncoder = useTimelineStore((state) => state.setExportEncoder)
   const setExportRenderer = useTimelineStore((state) => state.setExportRenderer)
   const setExportRange = useTimelineStore((state) => state.setExportRange)
@@ -525,6 +528,8 @@ export function AppShell() {
       : exportSettings.chapterMode
     return analyzeProFeatureUsage(timeline, {
       preset: exportSettings.preset,
+      container: exportSettings.container,
+      codec: exportSettings.codec,
       chapterMode,
       keystrokeOverlay: exportSettings.keystrokeOverlay,
     })
@@ -537,7 +542,8 @@ export function AppShell() {
         exportSettings?.container === "gif" || exportSettings?.preset?.startsWith("gif-")
       const isWebp =
         exportSettings?.container === "webp" || exportSettings?.preset?.startsWith("webp-")
-      const extension = isGif ? "gif" : isWebp ? "webp" : "mp4"
+      const isProRes = exportSettings?.container === "mov"
+      const extension = isGif ? "gif" : isWebp ? "webp" : isProRes ? "mov" : "mp4"
       let defaultPath = `${timelineRecording.name}-edited.${extension}`
       if (isTauri()) {
         const defaultFolder = await getSetting("defaultOutputFolder").catch(() => null)
@@ -554,13 +560,17 @@ export function AppShell() {
           ? "Export animated GIF"
           : isWebp
             ? "Export animated WebP"
-            : "Export edited recording",
+            : isProRes
+              ? "Export ProRes movie"
+              : "Export edited recording",
         defaultPath,
         filters: isGif
           ? [{ name: "Animated GIF", extensions: ["gif"] }]
           : isWebp
             ? [{ name: "Animated WebP", extensions: ["webp"] }]
-            : [{ name: "MP4 video", extensions: ["mp4"] }],
+            : isProRes
+              ? [{ name: "ProRes movie", extensions: ["mov"] }]
+              : [{ name: "MP4 video", extensions: ["mp4"] }],
       })
       if (!outputPath) return
       // Phase 1: the export path flushes and freezes a durable project revision
@@ -725,6 +735,9 @@ export function AppShell() {
                   onContainerChange={setExportContainer}
                   onPresetChange={setExportPreset}
                   onCodecChange={setExportCodec}
+                  onProresProfileChange={setExportProresProfile}
+                  onResolutionChange={setExportResolution}
+                  onFrameRateChange={setExportFrameRate}
                   onEncoderChange={setExportEncoder}
                   onRendererChange={setExportRenderer}
                   hardwareEncoderName={hardwareEncoderName}

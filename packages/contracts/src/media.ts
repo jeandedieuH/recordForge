@@ -189,6 +189,14 @@ export const jobDeliverySchema = z.object({
 })
 export type JobDelivery = z.infer<typeof jobDeliverySchema>
 
+// One effect a finished export rendered below full quality (ADR 020).
+// `effect` is a stable id from the ADR effect table; `reason` is user-facing.
+export const effectDowngradeSchema = z.object({
+  effect: z.string(),
+  reason: z.string(),
+})
+export type EffectDowngrade = z.infer<typeof effectDowngradeSchema>
+
 // Output files produced by a prepare job.
 export const mediaJobOutputsSchema = z.object({
   prepareVersion: z.number().int().min(0).default(0),
@@ -205,6 +213,7 @@ export const mediaJobOutputsSchema = z.object({
   outputPath: z.string().nullish(),
   captionsPath: z.string().nullish(),
   deliveries: z.array(jobDeliverySchema).default([]),
+  renderNotes: z.array(effectDowngradeSchema).default([]),
 })
 
 export type MediaJobOutputs = z.infer<typeof mediaJobOutputsSchema>

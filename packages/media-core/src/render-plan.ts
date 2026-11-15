@@ -223,6 +223,8 @@ function toOverlays(
           borderWidth: transform.borderWidth,
           borderColor: transform.borderColor,
           borderOpacity: transform.borderOpacity,
+          borderStyle: transform.borderStyle,
+          borderGradient: transform.borderGradient,
           shadowEnabled: transform.shadowEnabled,
           shadowColor: transform.shadowColor,
           shadowBlur: transform.shadowBlur,
@@ -1133,19 +1135,31 @@ export function stripProTimelineFeatures(state: TimelineState): TimelineState {
 /**
  * Neutralize Pro-only export settings for a Free export: 4K presets fall back
  * to `high-quality` (the 1080p output cap still applies), ratio presets fall
- * back to `balanced`, and chapter output is disabled — markers stay in the
- * project and remain free.
+ * back to `balanced`, resolution tiers above 1080p drop to 1080p, and chapter
+ * output is disabled — markers stay in the project and remain free.
  */
 export function freeExportSettings(settings: ProjectExportSettings): ProjectExportSettings {
-  const preset =
-    settings.preset === "ultra-4k" || settings.preset === "ultra-4k-60"
+  // ProRes is a Pro delivery codec; a Free export falls back to MP4/H.264.
+  const isProRes = settings.codec === "prores" || settings.container === "mov"
+  const preset = isProRes
+    ? "high-quality"
+    : settings.preset === "ultra-4k" || settings.preset === "ultra-4k-60"
       ? "high-quality"
       : settings.preset === "vertical" || settings.preset === "square"
         ? "balanced"
         : settings.preset
+  // Free is capped at 1080p in Rust; keep the requested tier honest so the
+  // render plan never asks for a raster the license cannot deliver.
+  const resolution =
+    settings.resolution === "1440p" || settings.resolution === "2160p"
+      ? "1080p"
+      : settings.resolution
   return {
     ...settings,
     preset,
+    resolution,
+    codec: isProRes ? "h264" : settings.codec,
+    container: isProRes ? "mp4" : settings.container,
     chapterMode: "none",
     // Keystroke overlay is Pro — badges never render on Free exports, but
     // the user's style choices survive for when they upgrade.

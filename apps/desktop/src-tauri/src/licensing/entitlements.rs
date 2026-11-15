@@ -13,6 +13,7 @@ use overlay_engine::titles::TitleTemplate;
 /// Feature keys shared with `PRO_FEATURES` in `packages/contracts`.
 pub const PRO_FEATURE_KEYS: &[&str] = &[
     "high-res-export",
+    "prores-export",
     "custom-aspect-ratio",
     "chapters",
     "premium-titles",
@@ -27,6 +28,7 @@ pub const PRO_FEATURE_KEYS: &[&str] = &[
 ];
 
 const HIGH_RES_EXPORT: &str = "high-res-export";
+const PRORES_EXPORT: &str = "prores-export";
 const CUSTOM_ASPECT: &str = "custom-aspect-ratio";
 const CHAPTERS: &str = "chapters";
 const PREMIUM_TITLES: &str = "premium-titles";
@@ -70,6 +72,11 @@ pub fn required_pro_features(plan: &RenderPlan, settings: &ExportSettings) -> Ve
     // reject — Free output is downscaled by the output cap instead.
     if matches!(settings.preset.as_str(), "ultra-4k" | "ultra-4k-60") {
         push(HIGH_RES_EXPORT);
+    }
+
+    // ProRes is a Pro mastering format regardless of preset.
+    if settings.codec == "prores" {
+        push(PRORES_EXPORT);
     }
 
     let non_standard_ratio = plan
@@ -253,6 +260,9 @@ mod tests {
             codec: "h264".to_string(),
             encoder: "auto".to_string(),
             container: "mp4".to_string(),
+            resolution: "canvas".into(),
+            frame_rate: "project".into(),
+            prores_profile: "hq".into(),
             caption_mode: "burn-in".to_string(),
             chapter_mode: "none".to_string(),
             range: None,
@@ -294,6 +304,20 @@ mod tests {
             "x": 0.0, "y": 0.0, "width": 200.0, "height": 60.0,
         }))
         .expect("text")
+    }
+
+    #[test]
+    fn prores_exports_require_the_prores_entitlement() {
+        let plan = plan_with_canvas(1920, 1080);
+        let mut settings = mp4_settings("high-quality");
+        settings.codec = "prores".into();
+        settings.container = "mov".into();
+        assert_eq!(required_pro_features(&plan, &settings), vec![PRORES_EXPORT]);
+        assert!(
+            enforce_export_entitlements(&plan, &settings, Entitlements { pro_enabled: true })
+                .is_ok()
+        );
+        assert!(enforce_export_entitlements(&plan, &settings, Entitlements::default()).is_err());
     }
 
     #[test]

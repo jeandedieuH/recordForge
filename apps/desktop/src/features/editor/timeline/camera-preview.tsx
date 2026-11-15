@@ -9,6 +9,7 @@ import { buildPreviewSegments, type PreviewSegment } from "@recordforge/editor-c
 import { cn } from "@recordforge/ui"
 import { Circle, Square } from "lucide-react"
 import { toAssetUrl } from "../media/derivative-resources"
+import { BorderOverlay } from "../canvas/border-overlay"
 import { useDualMediaSlots } from "./playback/use-dual-media-slots"
 import { usePlayheadMs } from "./use-playback-state"
 
@@ -21,6 +22,8 @@ interface CameraPreviewProps {
   frameMs: number
   canvasWidth: number
   canvasHeight: number
+  /** CSS px per canvas px in the preview, so border widths match the render. */
+  previewScale?: number
   selectedClipId?: string | null
   onSelectClip?: (clipId: string) => void
   onUpdateTransform?: (
@@ -166,6 +169,7 @@ interface CameraStreamSurfaceProps {
   frameMs: number
   canvasWidth: number
   canvasHeight: number
+  previewScale?: number
   selectedClipId?: string | null
   onSelectClip?: (clipId: string) => void
   onUpdateTransform?: CameraPreviewProps["onUpdateTransform"]
@@ -183,6 +187,7 @@ function CameraStreamSurface({
   frameMs,
   canvasWidth,
   canvasHeight,
+  previewScale = 1,
   selectedClipId,
   onSelectClip,
   onUpdateTransform,
@@ -264,6 +269,13 @@ function CameraStreamSurface({
   const cropVideoWidth = crop ? (sourceWidth / cropWidth) * 100 : 100
   const cropVideoHeight = crop ? (sourceHeight / cropHeight) * 100 : 100
   const borderColor = mixBorderColor(transform.borderColor, transform.borderOpacity)
+  const borderStyle = transform.borderStyle ?? "solid"
+  // Solid keeps the CSS border; every richer treatment needs the SVG ring so a
+  // gradient can follow the radius.
+  const cssBorder =
+    borderStyle === "solid" && transform.borderWidth
+      ? `${transform.borderWidth}px solid ${borderColor}`
+      : undefined
 
   function beginDrag(
     event: React.PointerEvent<HTMLDivElement>,
@@ -433,9 +445,7 @@ function CameraStreamSurface({
         className="relative size-full overflow-hidden"
         style={{
           borderRadius: radius,
-          border: transform.borderWidth
-            ? `${transform.borderWidth}px solid ${borderColor}`
-            : undefined,
+          border: cssBorder,
           boxShadow: transform.shadowEnabled
             ? `${transform.shadowOffsetX ?? 0}px ${transform.shadowOffsetY ?? 4}px ${transform.shadowBlur ?? 12}px ${transform.shadowColor ?? "var(--color-pip-shadow)"}`
             : undefined,
@@ -475,6 +485,23 @@ function CameraStreamSurface({
             visibility: activeSlot === 1 ? "visible" : "hidden",
           }}
         />
+        {transform.borderWidth && borderStyle !== "solid" ? (
+          <BorderOverlay
+            width={transform.width * previewScale}
+            height={transform.height * previewScale}
+            radius={
+              transform.shape === "rounded"
+                ? Math.min(transform.width, transform.height) * 0.12 * previewScale
+                : 0
+            }
+            circular={transform.shape === "circle"}
+            borderWidth={transform.borderWidth * previewScale}
+            style={borderStyle}
+            color={transform.borderColor ?? "#ffffff"}
+            opacity={transform.borderOpacity ?? 1}
+            gradient={transform.borderGradient}
+          />
+        ) : null}
       </div>
 
       {/* Selection Ring & On-Canvas Direct Manipulation Handles */}
@@ -624,6 +651,7 @@ export function CameraPreview({
   frameMs,
   canvasWidth,
   canvasHeight,
+  previewScale,
   selectedClipId,
   onSelectClip,
   onUpdateTransform,
@@ -643,6 +671,7 @@ export function CameraPreview({
           frameMs={frameMs}
           canvasWidth={canvasWidth}
           canvasHeight={canvasHeight}
+          previewScale={previewScale}
           selectedClipId={selectedClipId}
           onSelectClip={onSelectClip}
           onUpdateTransform={onUpdateTransform}

@@ -217,4 +217,22 @@ describe("analyzeProFeatureUsage", () => {
       ),
     ).toEqual(["custom-aspect-ratio"])
   })
+
+  it("flags a ProRes delivery as prores-export", () => {
+    const timeline = makeTimeline()
+    expect(
+      analyzeProFeatureUsage(timeline, {
+        preset: "high-quality",
+        chapterMode: "none",
+        codec: "prores",
+      }).features.map((f) => f.feature),
+    ).toEqual(["prores-export"])
+    expect(
+      analyzeProFeatureUsage(timeline, {
+        preset: "high-quality",
+        chapterMode: "none",
+        codec: "h264",
+      }).requiresPro,
+    ).toBe(false)
+  })
 })

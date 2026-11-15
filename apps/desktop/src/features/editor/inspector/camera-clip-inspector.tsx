@@ -1,4 +1,5 @@
 import type {
+  BorderStyle,
   CameraClip,
   CameraPlacementPreset,
   ClipTransform,
@@ -354,13 +355,93 @@ export function CameraClipInspector({
           </div>
 
           <div className="flex items-center justify-between gap-3 text-xs text-subtle-foreground">
-            <span>Border color</span>
-            <ColorPicker
-              aria-label="Camera border color"
-              value={clip.transform.borderColor ?? "#ffffff"}
-              onChange={(borderColor) => updateTransform({ borderColor })}
+            <span>Border style</span>
+            <SimpleSelect
+              aria-label="Camera border style"
+              size="sm"
+              value={clip.transform.borderStyle ?? "solid"}
+              onValueChange={(value) =>
+                updateTransform({ borderStyle: value as BorderStyle })
+              }
+              className="w-32"
+              options={[
+                { value: "solid", label: "Solid" },
+                { value: "gradient", label: "Gradient" },
+                { value: "double", label: "Double" },
+                { value: "glass", label: "Glass" },
+              ]}
             />
           </div>
+
+          {(clip.transform.borderStyle ?? "solid") === "gradient" ? (
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center justify-between gap-3 text-xs text-subtle-foreground">
+                <span>Gradient start</span>
+                <ColorPicker
+                  aria-label="Camera border gradient start colour"
+                  value={
+                    clip.transform.borderGradient?.from ?? clip.transform.borderColor ?? "#ffffff"
+                  }
+                  onChange={(from) =>
+                    updateTransform({
+                      borderGradient: {
+                        from,
+                        to: clip.transform.borderGradient?.to ?? "#6366f1",
+                        angle: clip.transform.borderGradient?.angle ?? 135,
+                      },
+                    })
+                  }
+                />
+              </div>
+              <div className="flex items-center justify-between gap-3 text-xs text-subtle-foreground">
+                <span>Gradient end</span>
+                <ColorPicker
+                  aria-label="Camera border gradient end colour"
+                  value={clip.transform.borderGradient?.to ?? "#6366f1"}
+                  onChange={(to) =>
+                    updateTransform({
+                      borderGradient: {
+                        from:
+                          clip.transform.borderGradient?.from ??
+                          clip.transform.borderColor ??
+                          "#ffffff",
+                        to,
+                        angle: clip.transform.borderGradient?.angle ?? 135,
+                      },
+                    })
+                  }
+                />
+              </div>
+              <NumberField
+                label="Gradient angle"
+                value={clip.transform.borderGradient?.angle ?? 135}
+                min={0}
+                max={360}
+                step={15}
+                onChange={(angle) =>
+                  updateTransform({
+                    borderGradient: {
+                      from:
+                        clip.transform.borderGradient?.from ??
+                        clip.transform.borderColor ??
+                        "#ffffff",
+                      to: clip.transform.borderGradient?.to ?? "#6366f1",
+                      angle,
+                    },
+                  })
+                }
+              />
+            </div>
+          ) : (
+            <div className="flex items-center justify-between gap-3 text-xs text-subtle-foreground">
+              <span>Border color</span>
+              <ColorPicker
+                aria-label="Camera border color"
+                value={clip.transform.borderColor ?? "#ffffff"}
+                onChange={(borderColor) => updateTransform({ borderColor })}
+              />
+            </div>
+          )}
         </div>
       </InspectorSection>
     </div>

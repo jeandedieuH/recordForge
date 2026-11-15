@@ -24,9 +24,10 @@
  * compatibility baseline (`render_abl-plain_chunked.mp4` /
  * `render-spec_abl-plain_chunked_nvenc-auto.mp4`). Exits 1 on any failed pair, 0
  * when every pair passes. `export-synth-spec.ts` emits the full G4 ablation
- * matrix (plain/padding/radius/shadow/zoom/cursor/items/masks/keys/captions/
- * camera) for both renderers; run the renderer side with `export-bench.ts
- * --require-gpu` so a silently gated plan cannot masquerade as a GPU row.
+ * matrix (plain/padding/radius/shadow/zoom/zoom-border/cursor/items/masks/keys/
+ * captions/camera) for both renderers; run the renderer side with
+ * `export-bench.ts --require-gpu` so a silently gated plan cannot masquerade as
+ * a GPU row.
  *
  * ffmpeg/ffprobe resolve like export-synth-spec.ts: repo sidecars first,
  * RF_FFMPEG/RF_FFPROBE override.

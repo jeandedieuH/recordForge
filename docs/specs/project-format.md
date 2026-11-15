@@ -49,6 +49,12 @@ sessions/{session_id}/
     "padding": 0,
     "borderRadius": 0,
     "shadow": false,
+    // Frame border (#11). Every field is optional; absent means no border.
+    "borderWidth": 8,
+    "borderColor": "#ffffff",
+    "borderOpacity": 1,
+    "borderStyle": "solid",
+    "borderGradient": { "from": "#38bdf8", "to": "#6366f1", "angle": 135 },
   },
   "assets": [
     {
@@ -123,6 +129,9 @@ sessions/{session_id}/
     "preset": "default-mp4",
     "codec": "h264",
     "container": "mp4",
+    "resolution": "canvas",
+    "frameRate": "project",
+    "proresProfile": "hq",
     "captionMode": "burn-in",
     "range": null,
   },
@@ -132,9 +141,24 @@ sessions/{session_id}/
 }
 ```
 
-### 2.3 Checksum
+### 2.2.1 Canvas frame border
 
+`canvas.borderWidth` draws a rim **inside** the screen rect, so it frames the recording instead of covering it. The other border fields are optional and only read when `borderWidth > 0`.
+
+| Field            | Type           | Default     | Description                                                                                       |
+| ---------------- | -------------- | ----------- | ------------------------------------------------------------------------------------------------- |
+| `borderWidth`    | number 0–200   | `0`         | Rim thickness in canvas px                                                                        |
+| `borderColor`    | string         | `#ffffff`   | Solid colour, and the tint for `glass`                                                            |
+| `borderOpacity`  | number 0–1     | `1`         | Multiplies the rim alpha                                                                          |
+| `borderStyle`    | enum           | `solid`     | `solid`, `gradient`, `double` (two strokes with a gap), or `glass` (tinted rim + inner highlight) |
+| `borderGradient` | object         | —           | `{ from, to, angle }` for `gradient`; `angle` is degrees clockwise from the top (default `135`)    |
+
+Camera bubbles carry the same treatment per clip: `transform.borderStyle` and `transform.borderGradient` sit next to the existing `borderWidth`/`borderColor`/`borderOpacity`. Both renderers rasterize the same ring — a tiny-skia plate on the compatibility path, an analytic SDF ring in the GPU composite pass — so the preview, the GPU export and the FFmpeg export agree. The exception is a side-by-side camera layout that moves the screen rect mid-timeline: the compatibility renderer cannot follow it with a static plate, drops the canvas border, and reports a `canvas-border` downgrade on the job (ADR 020).
+
+### 2.3 Checksum
 The `checksum` field holds `sha256:<hex>` where the hex value is the SHA-256 digest of the canonical JSON of the project object with the `checksum` field removed. Rust recomputes it on every atomic save and validates it on every load, falling back to `project.json.bak` when the primary file is corrupt.
+
+**Forward compatibility.** New optional fields (for example `exportSettings.resolution`, `frameRate` and `proresProfile`) are unknown to older app builds, and those builds strip unknown keys when they save a project. Editing the same project in an older version can therefore drop a newer field; the release notes call this out whenever a field ships, and defaults keep the older behaviour until the field is edited again.
 
 ---
 

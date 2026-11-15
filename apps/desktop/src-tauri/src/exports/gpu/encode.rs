@@ -16,8 +16,9 @@ use tracing::warn;
 
 use super::super::encoding::{self, ExportEncoder};
 use super::super::{
-    append_audio_graph, audio_bitrate, audio_input_windows, captions, collect_input_assets,
-    generate_ffmetadata, hvc1_tag_args, CompositionShared, ExportSettings, RenderPlan,
+    append_audio_graph, audio_input_windows, captions, collect_input_assets, export_audio_args,
+    export_forced_muxer, export_movflags, generate_ffmetadata, hvc1_tag_args, CompositionShared,
+    ExportSettings, RenderPlan,
 };
 use super::gpu_error;
 
@@ -182,7 +183,7 @@ pub(super) fn spawn(
     });
     if has_audio {
         command.args(["-map", "[aout]"]);
-        command.args(["-c:a", "aac", "-b:a", audio_bitrate(settings)]);
+        command.args(export_audio_args(settings));
     } else {
         command.arg("-an");
     }
@@ -190,16 +191,20 @@ pub(super) fn spawn(
         command.args(["-map_chapters", &index.to_string()]);
     }
     encoding::append_export_video_args(&mut command, settings, encoder, fps, out_width, out_height);
-    if encoder != ExportEncoder::Vaapi {
+    if encoder != ExportEncoder::Vaapi && settings.codec != "prores" {
         // The compositor already emits NV12. Repeating `-pix_fmt` makes it the
         // authoritative value (FFmpeg's last occurrence wins), so the encoder
         // consumes the composited planes instead of paying a full-frame
         // NV12→yuv420p swscale first. VAAPI is exempt: it consumes uploaded
-        // hardware frames, not a system pixel format.
+        // hardware frames, not a system pixel format. ProRes is exempt too:
+        // `prores_ks` needs the 10-bit 4:2:2 raster its argument stage set.
         command.args(["-pix_fmt", "nv12"]);
     }
     command.args(hvc1_tag_args(settings));
-    command.args(["-movflags", "+faststart"]);
+    command.args(["-movflags", export_movflags(settings)]);
+    if let Some(muxer) = export_forced_muxer(settings) {
+        command.args(["-f", muxer]);
+    }
     command.arg(output_path);
     command
         .stdin(Stdio::piped())

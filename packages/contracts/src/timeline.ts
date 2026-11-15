@@ -90,6 +90,23 @@ export const DEFAULT_CANVAS_BACKGROUND =
 export const backgroundFitSchema = z.enum(["cover", "contain", "fill"]).default("cover")
 export type BackgroundFit = z.infer<typeof backgroundFitSchema>
 
+// Frame border treatments (spec-010 canvas styles). `solid` is the plain stroke
+// the camera bubble has always had; `gradient` ramps `borderGradient` around the
+// ring; `double` paints two concentric strokes with a gap; `glass` paints a
+// translucent rim with a bright inner highlight.
+export const borderStyleSchema = z.enum(["solid", "gradient", "double", "glass"])
+export type BorderStyle = z.infer<typeof borderStyleSchema>
+
+// Two-colour ramp for `borderStyle: "gradient"`, measured in degrees clockwise
+// from the top of the frame (135° runs top-left → bottom-right, matching the
+// default background gradient).
+export const borderGradientSchema = z.object({
+  from: z.string(),
+  to: z.string(),
+  angle: z.number().min(0).max(360).default(135),
+})
+export type BorderGradient = z.infer<typeof borderGradientSchema>
+
 export const timelineCanvasSchema = z.object({
   width: z.number().int().min(1),
   height: z.number().int().min(1),
@@ -109,6 +126,13 @@ export const timelineCanvasSchema = z.object({
   backgroundBlur: z.number().min(0).max(100).optional(),
   backgroundDim: z.number().min(0).max(1).optional(),
   backgroundFit: backgroundFitSchema.optional(),
+  // Frame border. Like the other canvas styling fields these stay optional so
+  // v1 project files load unchanged and the render helpers apply defaults.
+  borderWidth: z.number().min(0).max(200).optional(),
+  borderColor: z.string().optional(),
+  borderOpacity: z.number().min(0).max(1).optional(),
+  borderStyle: borderStyleSchema.optional(),
+  borderGradient: borderGradientSchema.optional(),
   cursorSettings: cursorSettingsSchema.default(defaultCursorSettings),
 })
 
@@ -138,6 +162,8 @@ export const clipTransformSchema = z.object({
   borderWidth: z.number().min(0).optional(),
   borderColor: z.string().optional(),
   borderOpacity: z.number().min(0).max(1).optional(),
+  borderStyle: borderStyleSchema.optional(),
+  borderGradient: borderGradientSchema.optional(),
   shadowEnabled: z.boolean().optional(),
   shadowColor: z.string().optional(),
   shadowBlur: z.number().min(0).optional(),
@@ -700,6 +726,77 @@ export const exportRangeSchema = z.object({
 })
 export type ExportRange = z.infer<typeof exportRangeSchema>
 
+// Output raster tier. `canvas` keeps the project canvas; the other tiers scale
+// the composed frame down to the requested short edge (never up), so a 1080p
+// canvas offers 720p and 1080p but not 1440p. Animated GIF/WebP exports keep
+// their preset scaling and ignore this field.
+export const exportResolutionSchema = z.enum(["canvas", "720p", "1080p", "1440p", "2160p"])
+export type ExportResolution = z.infer<typeof exportResolutionSchema>
+
+// ProRes mastering profiles; `hq` is Apple's standard delivery profile.
+export const proresProfileSchema = z.enum(["proxy", "lt", "standard", "hq"])
+export type ProresProfile = z.infer<typeof proresProfileSchema>
+
+// Output frame rate. `project` follows the canvas grid; the numeric tiers
+// re-grid the whole composition (decode, zoom, cursor and plates all render at
+// the requested rate) instead of letting the encoder duplicate frames.
+export const exportFrameRateSchema = z.enum(["project", "24", "30", "60"])
+export type ExportFrameRate = z.infer<typeof exportFrameRateSchema>
+
+// Short edge of each resolution tier in pixels (`null` = the project canvas).
+export const EXPORT_RESOLUTION_EDGE: Record<ExportResolution, number | null> = {
+  canvas: null,
+  "720p": 720,
+  "1080p": 1080,
+  "1440p": 1440,
+  "2160p": 2160,
+}
+
+// Frame rate of each tier in fps (`null` = the project canvas rate).
+export const EXPORT_FRAME_RATE_VALUE: Record<ExportFrameRate, number | null> = {
+  project: null,
+  "24": 24,
+  "30": 30,
+  "60": 60,
+}
+
+// What each preset prefills in the output format fields. Presets stay the
+// starting point — the user can override either field afterwards, and the
+// renderer reads only the fields themselves.
+export function exportPresetFormat(preset: ExportPreset): {
+  resolution: ExportResolution
+  frameRate: ExportFrameRate
+} {
+  if (preset === "smooth-60fps") return { resolution: "canvas", frameRate: "60" }
+  if (preset === "ultra-4k") return { resolution: "2160p", frameRate: "project" }
+  if (preset === "ultra-4k-60") return { resolution: "2160p", frameRate: "60" }
+  return { resolution: "canvas", frameRate: "project" }
+}
+
+/**
+ * Delivered raster for a resolution tier. Mirrors `resolution_dimensions` in
+ * Rust: fit the requested short edge, even dimensions, never upscale.
+ */
+export function resolveOutputDimensions(
+  width: number,
+  height: number,
+  resolution: ExportResolution,
+): { width: number; height: number } {
+  const edge = EXPORT_RESOLUTION_EDGE[resolution]
+  const current = Math.min(width, height)
+  if (!edge || edge >= current) return { width, height }
+  const scale = edge / current
+  return {
+    width: Math.max(2, Math.floor(Math.round(width * scale) / 2) * 2),
+    height: Math.max(2, Math.floor(Math.round(height * scale) / 2) * 2),
+  }
+}
+
+/** Delivered frame rate for a tier; `project` keeps the canvas rate. */
+export function resolveOutputFrameRate(frameRate: ExportFrameRate, canvasFps: number): number {
+  return EXPORT_FRAME_RATE_VALUE[frameRate] ?? canvasFps
+}
+
 // Export settings are sent with the job so Rust renders the settings shown by the UI.
 // `encoder` selects hardware acceleration: auto prefers the best detected
 // hardware encoder (NVENC/QSV/AMF/Media Foundation) and falls back to software.
@@ -727,12 +824,26 @@ export const renderPlanChapterSchema = z.object({
 })
 export type RenderPlanChapter = z.infer<typeof renderPlanChapterSchema>
 
+// Delivery codec/container pairs. ProRes is MOV-only; GIF/WebP are the
+// animated containers their presets pick.
+export const exportCodecSchema = z.enum(["h264", "hevc", "gif", "webp", "prores"])
+export type ExportCodec = z.infer<typeof exportCodecSchema>
+
+export const exportContainerSchema = z.enum(["mp4", "gif", "webp", "mov"])
+export type ExportContainer = z.infer<typeof exportContainerSchema>
+
 export const exportSettingsSchema = z.object({
   preset: exportPresetSchema.default("default-mp4"),
-  codec: z.enum(["h264", "hevc", "gif", "webp"]).default("h264"),
+  codec: exportCodecSchema.default("h264"),
   encoder: exportEncoderSchema.default("auto"),
   renderer: exportRendererSchema.default("auto"),
-  container: z.enum(["mp4", "gif", "webp"]).default("mp4"),
+  container: exportContainerSchema.default("mp4"),
+  // ProRes mastering profile (only meaningful with codec `prores`).
+  proresProfile: proresProfileSchema.default("hq"),
+  // Output format. Both default to the project canvas; presets prefill them
+  // (`exportPresetFormat`) but never override the stored values.
+  resolution: exportResolutionSchema.default("canvas"),
+  frameRate: exportFrameRateSchema.default("project"),
   captionMode: renderCaptionModeSchema.default("burn-in"),
   chapterMode: renderChapterModeSchema.default("embed"),
   range: exportRangeSchema.nullish(),
@@ -811,6 +922,8 @@ export const renderPlanOverlaySchema = z.object({
   borderWidth: z.number().min(0).optional(),
   borderColor: z.string().optional(),
   borderOpacity: z.number().min(0).max(1).optional(),
+  borderStyle: borderStyleSchema.optional(),
+  borderGradient: borderGradientSchema.optional(),
   shadowEnabled: z.boolean().optional(),
   shadowColor: z.string().optional(),
   shadowBlur: z.number().min(0).optional(),

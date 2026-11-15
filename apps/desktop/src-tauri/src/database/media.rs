@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::errors::{InternalError, Result};
+use crate::exports::EffectDowngrade;
 
 /// Media job status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -190,6 +191,10 @@ pub struct MediaJobOutputs {
     pub captions_path: Option<String>,
     #[serde(default)]
     pub deliveries: Vec<JobDelivery>,
+    /// Effects the finished export rendered below full quality (ADR 020).
+    /// Empty for a full-quality render.
+    #[serde(default)]
+    pub render_notes: Vec<EffectDowngrade>,
 }
 
 /// Media job record persisted in SQLite.
@@ -983,5 +988,31 @@ mod tests {
         complete_job(&conn, &job.id, &MediaJobOutputs::default()).expect("complete export job");
         let cancelled = cancel_job(&conn, &job.id).expect("cancel completed export");
         assert_eq!(cancelled.status, MediaJobStatus::Completed);
+    }
+
+    #[test]
+    fn export_render_notes_survive_the_job_round_trip() {
+        let mut conn = Connection::open_in_memory().expect("open in-memory database");
+        run_migrations(&mut conn).expect("run migrations");
+        let job =
+            insert_job(&conn, "recording-1", MediaJobKind::Export).expect("insert export job");
+        start_job(&conn, &job.id).expect("start export job");
+        let notes = vec![crate::exports::EffectDowngrade {
+            effect: "motion-blur".into(),
+            reason: "Rendered without motion blur: GPU unavailable".into(),
+        }];
+        complete_job(
+            &conn,
+            &job.id,
+            &MediaJobOutputs {
+                output_path: Some("C:/exports/demo.mp4".into()),
+                render_notes: notes.clone(),
+                ..Default::default()
+            },
+        )
+        .expect("complete export job");
+
+        let stored = get_job(&conn, &job.id).expect("reload export job");
+        assert_eq!(stored.outputs.render_notes, notes);
     }
 }

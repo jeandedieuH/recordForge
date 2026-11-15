@@ -165,6 +165,7 @@ export interface TimelineLanesProps {
   onDuplicateClip: (clip: TimelineClip) => void
   onSplitClip: (clip: TimelineClip, splitTimeMs?: number) => void
   onDeleteClip: (clip: TimelineClip, ripple?: boolean) => void
+  onSetClipSpeed?: (clip: TimelineClip, speed: number) => void
   onAddAssetAtTime?: (assetId: string, timeMs: number) => void
   onCursorRangeAction?: (action: CursorRangeAction) => void
   onZoomSegmentAction?: (action: ZoomSegmentAction) => void
@@ -239,6 +240,7 @@ export function TimelineLanes({
   onDuplicateClip,
   onSplitClip,
   onDeleteClip,
+  onSetClipSpeed,
   onAddAssetAtTime,
   onCursorRangeAction,
   onZoomSegmentAction,
@@ -1275,6 +1277,7 @@ export function TimelineLanes({
                       onDuplicateClip={onDuplicateClip}
                       onSplitClip={onSplitClip}
                       onDeleteClip={onDeleteClip}
+                      onSetClipSpeed={onSetClipSpeed}
                       onCursorRangeAction={onCursorRangeAction}
                       onUpdateClipAudio={onUpdateClipAudio}
                       onRippleDeleteRange={onRippleDeleteRange}

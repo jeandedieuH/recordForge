@@ -32,6 +32,9 @@ function createMockProject(): recordForgeProject {
       codec: "h264",
       encoder: "auto",
       renderer: "auto",
+      resolution: "canvas",
+      frameRate: "project",
+      proresProfile: "hq",
       captionMode: "burn-in",
       chapterMode: "embed",
       keystrokeOverlay: { ...defaultKeystrokeOverlaySettings },
@@ -77,6 +80,9 @@ describe("TimelineStore Export Settings Actions", () => {
         codec: "gif",
         encoder: "auto",
         renderer: "auto",
+        resolution: "canvas",
+        frameRate: "project",
+        proresProfile: "hq",
         captionMode: "burn-in",
         chapterMode: "none",
         keystrokeOverlay: { ...defaultKeystrokeOverlaySettings },
@@ -96,6 +102,42 @@ describe("TimelineStore Export Settings Actions", () => {
     const updated = useTimelineStore.getState().project
     expect(updated?.exportSettings.container).toBe("mp4")
     expect(updated?.exportSettings.preset).toBe("balanced")
+    expect(updated?.exportSettings.codec).toBe("h264")
+  })
+
+  it("prefills the output format when a preset is picked", () => {
+    useTimelineStore.setState({ project: createMockProject() })
+
+    const { setExportPreset, setExportResolution, setExportFrameRate } = useTimelineStore.getState()
+    setExportPreset("smooth-60fps")
+    let updated = useTimelineStore.getState().project
+    expect(updated?.exportSettings.frameRate).toBe("60")
+    expect(updated?.exportSettings.resolution).toBe("canvas")
+
+    // The selects stay editable after the prefill.
+    setExportResolution("720p")
+    setExportFrameRate("24")
+    updated = useTimelineStore.getState().project
+    expect(updated?.exportSettings.resolution).toBe("720p")
+    expect(updated?.exportSettings.frameRate).toBe("24")
+  })
+
+  it("switches to a ProRes MOV export and back", () => {
+    useTimelineStore.setState({ project: createMockProject() })
+
+    const { setExportContainer, setExportProresProfile } = useTimelineStore.getState()
+    setExportContainer("mov")
+    let updated = useTimelineStore.getState().project
+    expect(updated?.exportSettings.container).toBe("mov")
+    expect(updated?.exportSettings.codec).toBe("prores")
+
+    setExportProresProfile("lt")
+    updated = useTimelineStore.getState().project
+    expect(updated?.exportSettings.proresProfile).toBe("lt")
+
+    setExportContainer("mp4")
+    updated = useTimelineStore.getState().project
+    expect(updated?.exportSettings.container).toBe("mp4")
     expect(updated?.exportSettings.codec).toBe("h264")
   })
 
@@ -121,6 +163,9 @@ describe("TimelineStore Export Settings Actions", () => {
         codec: "gif",
         encoder: "auto",
         renderer: "auto",
+        resolution: "canvas",
+        frameRate: "project",
+        proresProfile: "hq",
         captionMode: "burn-in",
         chapterMode: "none",
         keystrokeOverlay: { ...defaultKeystrokeOverlaySettings },
@@ -166,6 +211,9 @@ describe("TimelineStore Export Settings Actions", () => {
         codec: "webp",
         encoder: "auto",
         renderer: "auto",
+        resolution: "canvas",
+        frameRate: "project",
+        proresProfile: "hq",
         captionMode: "burn-in",
         chapterMode: "none",
         keystrokeOverlay: { ...defaultKeystrokeOverlaySettings },
@@ -210,6 +258,9 @@ describe("TimelineStore Export Settings Actions", () => {
         codec: "webp",
         encoder: "auto",
         renderer: "auto",
+        resolution: "canvas",
+        frameRate: "project",
+        proresProfile: "hq",
         captionMode: "burn-in",
         chapterMode: "none",
         keystrokeOverlay: { ...defaultKeystrokeOverlaySettings },

@@ -11,9 +11,10 @@
  * `encoder` field for the harness to resolve; non-software runs get a
  * `_<encoder>` suffix on spec and render file stems so matrices coexist.
  * `--renderer` (default `compatibility`) sets `settings.renderer`. Every
- * ablation is gate-compatible with the G3 GPU compositor (canvas framing, zoom,
- * cursor, items, keystroke badges, privacy masks, camera, captions), so
- * `--renderer gpu` emits the whole matrix; stems get a `_<renderer>` suffix.
+ * ablation is gate-compatible with the G3 GPU compositor (canvas framing and
+ * frame border, zoom, cursor, items, keystroke badges, privacy masks, camera,
+ * captions), so `--renderer gpu` emits the whole matrix; stems get a
+ * `_<renderer>` suffix.
  * The all-features `synth` spec is always emitted too, so the automatic
  * fallback keeps being exercised. `--single-pass` forces every spec
  * through one encoder pass; use it — with its own outDir — for the compatibility
@@ -447,6 +448,52 @@ const plainCanvas = {
   shadow: false,
 }
 
+// A 1.5× hold for the whole clip: every frame samples the cropped region, so
+// zoom quality and the frame border are measured on every frame rather than on
+// transition frames only. Kept at 10 s (like the blur and gap rows) so the
+// matrix stays cheap; M2's source-resolution detail plane re-baselines it.
+const BORDER_ZOOM_MS = 10_000
+const zoom15HoldSegments = [
+  {
+    id: "zoom-1.5-hold",
+    startMs: 0,
+    endMs: BORDER_ZOOM_MS,
+    target: { x: 480, y: 270, width: 960, height: 540 },
+    scale: 1.5,
+    mode: "manual",
+  },
+]
+
+// Frame border over a padded, rounded, fully zoomed canvas: the compatibility
+// path composites one static tiny-skia ring plate, the GPU paints the same band
+// with the composite pass's analytic SDF, so the pair is held to the renderer
+// parity profile instead of being a fallback row.
+const borderZoomPlan = {
+  ...plainPlan({
+    padding: 48,
+    borderRadius: 24,
+    borderWidth: 12,
+    borderColor: "#ffffff",
+    borderOpacity: 1,
+    borderStyle: "solid",
+  }),
+  durationMs: BORDER_ZOOM_MS,
+  segments: [screenSegment(5_000, 5_000 + BORDER_ZOOM_MS, 0)],
+  zoomSegments: zoom15HoldSegments,
+  audioTracks: [
+    {
+      ...audioTracks[0],
+      segments: [
+        {
+          ...audioTracks[0].segments[0],
+          sourceOutMs: 5_000 + BORDER_ZOOM_MS,
+          outputEndMs: BORDER_ZOOM_MS,
+        },
+      ],
+    },
+  ],
+}
+
 function plainPlan(canvas: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     projectId: "bench-synth",
@@ -474,6 +521,7 @@ const ablations: Array<{
   { name: "radius", plan: plainPlan({ padding: 48, borderRadius: 24 }) },
   { name: "shadow", plan: plainPlan({ padding: 48, shadow: true }) },
   { name: "zoom", plan: { ...plainPlan(), zoomSegments } },
+  { name: "zoom-border", plan: borderZoomPlan },
   { name: "cursor", plan: { ...plainPlan(), cursorEffects } },
   { name: "items", plan: { ...plainPlan(), texts, annotations } },
   { name: "masks", plan: { ...plainPlan(), masks } },
@@ -585,6 +633,7 @@ const gpuCompatible = new Set([
   "radius",
   "shadow",
   "zoom",
+  "zoom-border",
   "cursor",
   "items",
   "masks",

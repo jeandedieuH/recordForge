@@ -64,6 +64,8 @@ import {
 } from "./captions/caption-transcript"
 import { getClipGroupId } from "./grouping"
 import { clipDurationFromSourceRange, timelineToSource } from "./time-mapping"
+import { snapRangeEdgeToFrame } from "./smart-cut"
+import { warpTimeline } from "./time-warp"
 import type {
   AddAnnotationClipCommand,
   AddCaptionClipCommand,
@@ -99,6 +101,7 @@ import type {
   ResyncCaptionTrackCommand,
   ResizeCursorRangeCommand,
   ResizeZoomSegmentCommand,
+  SetClipSpeedCommand,
   RippleDeleteClipCommand,
   RippleDeleteClipsCommand,
   RippleDeleteRangeCommand,
@@ -437,6 +440,24 @@ export function canApplyCommand(state: TimelineState, command: CommandRecord): C
           return {
             ok: false,
             error: editorError("invalid_move", "Clip kind does not match target track"),
+          }
+        }
+      }
+      return { ok: true, value: undefined }
+    }
+    case "set-clip-speed": {
+      for (const clipId of command.clipIds) {
+        const found = findClip(state, clipId)
+        if (!found) return { ok: false, error: editorError("clip_not_found", "Clip not found") }
+        const trackResult = checkTrackLocked(found.track)
+        if (!trackResult.ok) return trackResult
+        if (isClipLocked(found.clip)) {
+          return { ok: false, error: editorError("clip_locked", "Clip is locked") }
+        }
+        if (!RETIMABLE_TRACK_KINDS.has(found.track.kind)) {
+          return {
+            ok: false,
+            error: editorError("clip_speed_unsupported", "Speed applies to video and audio clips"),
           }
         }
       }
@@ -950,6 +971,8 @@ export function applyCommand(
       return applyReorderTracks(state, command)
     case "trim-clip":
       return applyTrimClip(state, command)
+    case "set-clip-speed":
+      return applySetClipSpeed(state, command)
     case "split-clip":
       return applySplitClip(state, command)
     case "split-all-clips":
@@ -1312,6 +1335,133 @@ function applyTrimClip(
  * Envelope fields for an audio piece created by a split or range delete.
  * Audio only: video clips have no fade/volume envelope to partition.
  */
+/** Track kinds whose clips carry a playable source that can be retimed. */
+const RETIMABLE_TRACK_KINDS = new Set<TimelineTrack["kind"]>(["screen", "camera", "audio"])
+
+/**
+ * Retime a clip selection: duration becomes `(sourceOut − sourceIn) / speed`,
+ * the whole retime unit (grouped members + span-aligned screen/camera/mic
+ * siblings) moves together, and later timeline content is remapped through the
+ * time warp (clip speed #9 / F5). Non-ripple mode leaves later clips in place
+ * and fails if the changed clip would overlap them.
+ */
+function applySetClipSpeed(
+  state: TimelineState,
+  command: SetClipSpeedCommand,
+): CommandResult<TimelineState> {
+  const selected = new Map<string, TimelineClip>()
+  let spanStartMs = 0
+  let spanEndMs = 0
+  for (const clipId of command.clipIds) {
+    const found = findClip(state, clipId)
+    if (!found) {
+      return { ok: false, error: editorError("clip_not_found", "Clip not found") }
+    }
+    if (found.track.locked) {
+      return {
+        ok: false,
+        error: editorError("track_locked", `Track "${found.track.name}" is locked`),
+      }
+    }
+    if (selected.size === 0) {
+      spanStartMs = found.clip.startMs
+      spanEndMs = found.clip.startMs + found.clip.durationMs
+    }
+    selected.set(clipId, found.clip)
+  }
+
+  // Recorded siblings share the span (screen + camera + mic) and always follow
+  // the retime; grouped members follow their group even when their span
+  // differs (each gets its own `sourceSpan / speed` duration).
+  const retime = new Map(selected)
+  const groupIds = new Set(
+    [...selected.values()]
+      .map((clip) => getClipGroupId(clip))
+      .filter((groupId): groupId is string => groupId !== undefined),
+  )
+  for (const track of state.tracks) {
+    if (track.locked || !RETIMABLE_TRACK_KINDS.has(track.kind)) continue
+    for (const clip of track.clips) {
+      if (retime.has(clip.id)) continue
+      const groupId = getClipGroupId(clip)
+      const sameSpan = clip.startMs === spanStartMs && clip.startMs + clip.durationMs === spanEndMs
+      if (sameSpan || (groupId !== undefined && groupIds.has(groupId))) {
+        retime.set(clip.id, clip)
+      }
+    }
+  }
+  // Explicit multi-selections must be span-aligned; group members may differ
+  // because each one is retimed against its own source span.
+  for (const clip of selected.values()) {
+    if (clip.startMs !== spanStartMs || clip.startMs + clip.durationMs !== spanEndMs) {
+      return {
+        ok: false,
+        error: editorError("clip_speed_span", "Speed requires clips that share the same span"),
+      }
+    }
+  }
+
+  const primary = retime.get(command.clipIds[0])
+  if (!primary) {
+    return { ok: false, error: editorError("clip_not_found", "Clip not found") }
+  }
+  const sourceSpanMs = primary.sourceOutMs - primary.sourceInMs
+  if (sourceSpanMs <= 0) {
+    return { ok: false, error: editorError("invalid_clip", "Clip has no source range") }
+  }
+
+  const fps = state.canvas.fps
+  // Frame-snapped duration for one clip at the requested rate. Group members
+  // with a different span keep their own placement and get their own length.
+  const retimedDurationMs = (clip: TimelineClip): number =>
+    Math.max(
+      1,
+      snapRangeEdgeToFrame(
+        clip.startMs + Math.round((clip.sourceOutMs - clip.sourceInMs) / command.speed),
+        fps,
+      ) - clip.startMs,
+    )
+  const nextDurationMs = retimedDurationMs(primary)
+  if (
+    retime.size === 1 &&
+    nextDurationMs === spanEndMs - spanStartMs &&
+    primary.speed === command.speed
+  ) {
+    return { ok: true, value: state }
+  }
+
+  const retimeIds = new Set(retime.keys())
+  const withSpeed: TimelineState = {
+    ...state,
+    tracks: state.tracks.map((track) =>
+      track.clips.some((clip) => retimeIds.has(clip.id))
+        ? {
+            ...track,
+            clips: track.clips.map((clip) =>
+              retimeIds.has(clip.id)
+                ? { ...clip, speed: command.speed, durationMs: retimedDurationMs(clip) }
+                : clip,
+            ),
+          }
+        : track,
+    ),
+    updatedAt: now(),
+  }
+
+  let next = warpTimeline(withSpeed, spanStartMs, spanEndMs, nextDurationMs, {
+    ripple: command.ripple,
+    excludeClipIds: retimeIds,
+  })
+  // Every lane changed by the warp is re-sorted and overlap-checked; single-lane
+  // media tracks reject a non-ripple speed change that would cover the next clip.
+  for (const track of next.tracks) {
+    const result = sortAndValidateTrack(next, track.id)
+    if (!result.ok) return result
+    next = updateTrackInState(next, track.id, result.value)
+  }
+  return { ok: true, value: next }
+}
+
 function audioPieceEnvelope(
   clip: TimelineClip,
   piece: {
@@ -4068,6 +4218,21 @@ export function createTrimClipCommand(
     sourceOutMs,
     coalesce: true,
     coalesceKey: options.coalesceKey ?? `trim:${clipId}`,
+  }
+}
+
+/** Retime one or more span-aligned clips (video/audio) with the F5 time warp. */
+export function createSetClipSpeedCommand(
+  clipIds: string[],
+  speed: number,
+  options: { ripple?: boolean } = {},
+): CommandRecord {
+  return {
+    kind: "set-clip-speed",
+    name: `Set speed ${speed}×`,
+    clipIds,
+    speed,
+    ripple: options.ripple ?? true,
   }
 }
 

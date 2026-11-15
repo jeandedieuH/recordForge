@@ -30,8 +30,8 @@ use tracing::{info, warn};
 use super::camera::{self, ZoomTransformState};
 use super::encoding::ExportEncoder;
 use super::{
-    common_screen_source, CompositionShared, CompositionWindow, ExportSettings, RenderOutcome,
-    RenderPlan,
+    common_screen_source, CompositionShared, CompositionWindow, EffectDowngrade, ExportSettings,
+    RenderOutcome, RenderPlan,
 };
 
 /// Which compositor renders an export.
@@ -207,6 +207,54 @@ fn plan_is_passthrough_only(plan: &RenderPlan, settings: &ExportSettings) -> boo
         && canvas.padding == 0
         && canvas.border_radius == 0
         && !canvas.shadow
+        && canvas.border_width.is_none_or(|width| width <= 0.0)
+}
+
+/// Effects present in the plan that the renderer that actually runs cannot
+/// deliver at full quality (ADR 020). An empty list means every effect present
+/// rendered at spec; the caller persists the result on the job so an export
+/// never silently differs from what the editor showed.
+///
+/// This sits next to [`plan_limitations`], which decides the renderer in the
+/// first place. An effect without a row here may not ship.
+pub(crate) fn effect_support(
+    plan: &RenderPlan,
+    settings: &ExportSettings,
+    renderer: ExportRenderer,
+) -> Vec<EffectDowngrade> {
+    let _ = settings;
+    let mut downgrades = Vec::new();
+    if renderer == ExportRenderer::Compatibility {
+        // The compatibility graph composites the canvas border as one static
+        // plate. A side-by-side layout that changes the screen rect per frame
+        // cannot reuse that plate, so the ring is dropped and reported here
+        // instead of silently disappearing.
+        if let Some(canvas) = plan.canvas.as_ref() {
+            let has_border = canvas.border_width.is_some_and(|width| width > 0.0);
+            if has_border && screen_rect_varies(plan, canvas) {
+                downgrades.push(EffectDowngrade {
+                    effect: "canvas-border".into(),
+                    reason: "Rendered without the canvas border: the animated camera layout moves the frame every frame"
+                        .into(),
+                });
+            }
+        }
+    }
+    downgrades
+}
+
+/// True when a side-by-side camera window moves the screen rect mid-timeline,
+/// so a static per-window plate cannot follow it.
+fn screen_rect_varies(plan: &RenderPlan, canvas: &super::cursor::RenderCanvas) -> bool {
+    let windows = super::merge_ms_windows(
+        plan.overlays
+            .iter()
+            .filter(|overlay| super::overlay_is_side_by_side(overlay, canvas))
+            .map(|overlay| (overlay.output_start_ms, overlay.output_end_ms))
+            .collect(),
+    );
+    let uniform = windows.len() == 1 && windows[0].0 == 0 && windows[0].1 >= plan.duration_ms;
+    !windows.is_empty() && !uniform
 }
 
 /// Every reason this plan cannot render on the GPU compositor. An empty list
@@ -231,13 +279,14 @@ pub(crate) fn plan_limitations(
         return vec!["plan has no render canvas".into()];
     };
 
-    // Delivery format: the encode sidecar muxes MP4 and tags `hvc1`. Animated
-    // containers stay on FFmpeg by design (ADR 018).
-    if settings.container != "mp4" {
-        reasons.push(format!("container {} is not mp4", settings.container));
+    // Delivery format: the encode sidecar muxes MP4/MOV and tags `hvc1`. Animated
+    // containers stay on FFmpeg by design (ADR 018). ProRes runs on the
+    // compositor too (`prores_ks` in the encode sidecar).
+    if !matches!(settings.container.as_str(), "mp4" | "mov") {
+        reasons.push(format!("container {} is not mp4/mov", settings.container));
     }
-    if !matches!(settings.codec.as_str(), "h264" | "hevc") {
-        reasons.push(format!("codec {} is not h264/hevc", settings.codec));
+    if !matches!(settings.codec.as_str(), "h264" | "hevc" | "prores") {
+        reasons.push(format!("codec {} is not h264/hevc/prores", settings.codec));
     }
     if canvas.width % 4 != 0 || canvas.height % 2 != 0 {
         reasons.push(format!(
@@ -419,7 +468,8 @@ pub(crate) fn render_timeline_on_gpu(
     let width = canvas.width;
     let height = canvas.height;
     let fps = canvas.fps.max(1);
-    let (out_width, out_height) = super::capped_output_dimensions(width, height, output_cap);
+    let (out_width, out_height) =
+        super::export_output_dimensions(width, height, settings, output_cap);
     let window = CompositionWindow::full(plan);
 
     // Same input validation the compatibility renderer performs; catching a
@@ -938,7 +988,10 @@ pub(crate) fn render_timeline_on_gpu(
         ),
     }
     result?;
-    Ok(RenderOutcome { has_audio })
+    Ok(RenderOutcome {
+        has_audio,
+        ..Default::default()
+    })
 }
 
 /// Generated plates for one output frame, produced by a plate worker.
@@ -1299,6 +1352,28 @@ fn canvas_frame(
         background: solid_background(&canvas.background),
         plate,
         sbs_plate,
+        border: canvas_border(canvas),
+    })
+}
+
+/// Canvas border in compositor form. `None` when the frame has no border, which
+/// keeps the identity/passthrough path and the plate-free fast path untouched.
+fn canvas_border(canvas: &super::cursor::RenderCanvas) -> Option<compositor::BorderFrame> {
+    let width = canvas.border_width.filter(|value| *value > 0.0)?;
+    let style = super::BorderStyle::from_name(canvas.border_style.as_deref());
+    let from = canvas.border_color.as_deref().unwrap_or("#ffffff");
+    let gradient = canvas.border_gradient.as_ref();
+    let to = gradient
+        .map(|gradient| gradient.to.as_str())
+        .unwrap_or(from);
+    let angle = gradient.map(|gradient| gradient.angle).unwrap_or(135.0);
+    Some(compositor::BorderFrame {
+        width: width as f32,
+        style: style.id(),
+        opacity: canvas.border_opacity.unwrap_or(1.0).clamp(0.0, 1.0) as f32,
+        from: solid_background(from),
+        to: solid_background(to),
+        angle: (angle as f32).to_radians(),
     })
 }
 
@@ -1352,6 +1427,8 @@ fn compositor_spec(
                     border_width,
                     overlay.border_color.as_deref(),
                     overlay.border_opacity,
+                    overlay.border_style.as_deref(),
+                    overlay.border_gradient.as_ref(),
                 )
                 .map_err(InternalError::Media)
             })
@@ -1919,6 +1996,37 @@ mod tests {
     }
 
     #[test]
+    fn compat_reports_the_canvas_border_it_cannot_follow() {
+        let mut plan = plan_with_canvas(gated_canvas());
+        plan.canvas.as_mut().expect("canvas").border_width = Some(8.0);
+        // No moving layout: the compat plate and the GPU ring are both exact.
+        assert!(effect_support(&plan, &settings(), ExportRenderer::Compatibility).is_empty());
+        assert!(effect_support(&plan, &settings(), ExportRenderer::Gpu).is_empty());
+
+        // A mid-timeline side-by-side window moves the screen rect per frame, so
+        // the static compat plate cannot follow it. The GPU ring can.
+        plan.overlays.push(
+            serde_json::from_value(serde_json::json!({
+                "assetId": "cam",
+                "sourceInMs": 0,
+                "sourceOutMs": 1_000,
+                "outputStartMs": 500,
+                "outputEndMs": 1_500,
+                "x": 0.0,
+                "y": 0.0,
+                "width": 320.0,
+                "height": 240.0,
+                "preset": "side-by-side"
+            }))
+            .expect("camera overlay"),
+        );
+        let downgrades = effect_support(&plan, &settings(), ExportRenderer::Compatibility);
+        assert_eq!(downgrades.len(), 1);
+        assert_eq!(downgrades[0].effect, "canvas-border");
+        assert!(effect_support(&plan, &settings(), ExportRenderer::Gpu).is_empty());
+    }
+
+    #[test]
     fn auto_keeps_passthrough_only_exports_on_ffmpeg() {
         // A plain full-canvas plan has nothing to composite, so the GPU adds
         // only the cross-process copy. Any layer/zoom/canvas treatment flips it.
@@ -1941,6 +2049,11 @@ mod tests {
         let mut padded = plan.clone();
         padded.canvas.as_mut().expect("canvas").padding = 24;
         assert!(!plan_is_passthrough_only(&padded, &settings()));
+
+        // A frame border needs the composite pass to paint the ring.
+        let mut framed = plan.clone();
+        framed.canvas.as_mut().expect("canvas").border_width = Some(8.0);
+        assert!(!plan_is_passthrough_only(&framed, &settings()));
 
         let mut masked = plan;
         masked.masks.push(crate::exports::RenderPlanMask {

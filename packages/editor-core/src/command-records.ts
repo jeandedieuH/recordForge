@@ -121,6 +121,20 @@ export const trimClipCommandSchema = commandMetaSchema.extend({
 
 export type TrimClipCommand = z.infer<typeof trimClipCommandSchema>
 
+// Retime a clip (or a selection of span-aligned clips) without re-cutting the
+// source: duration becomes `(sourceOut − sourceIn) / speed` and everything
+// downstream is remapped by the F5 time warp.
+export const setClipSpeedCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("set-clip-speed"),
+  clipIds: z.array(z.string()).min(1),
+  /** Playback rate: 2 = twice as fast, 0.5 = half speed. */
+  speed: z.number().min(0.1).max(16),
+  /** Shift later timeline content so the edit stays gapless (default true). */
+  ripple: z.boolean().default(true),
+})
+
+export type SetClipSpeedCommand = z.infer<typeof setClipSpeedCommandSchema>
+
 export const splitClipCommandSchema = commandMetaSchema.extend({
   kind: z.literal("split-clip"),
   clipId: z.string(),
@@ -659,6 +673,7 @@ export const commandRecordSchema = z.discriminatedUnion("kind", [
   moveTrackCommandSchema,
   reorderTracksCommandSchema,
   trimClipCommandSchema,
+  setClipSpeedCommandSchema,
   splitClipCommandSchema,
   splitAllClipsCommandSchema,
   moveClipCommandSchema,
