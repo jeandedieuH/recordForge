@@ -6,7 +6,7 @@ import { AnnotationPresetControls } from "./annotation-preset-controls"
 import { AnnotationStyleTab } from "./annotation-style-tab"
 import type { AnnotationInspectorProps } from "./annotation-inspector-helpers"
 
-export function AnnotationClipInspector({ clip, onChange }: AnnotationInspectorProps) {
+export function AnnotationClipInspector({ clip, onChange, canvas }: AnnotationInspectorProps) {
   const hidden = clip.enabled === false
   return (
     <div className="flex min-w-0 flex-col gap-3 p-3 text-xs">
@@ -52,7 +52,7 @@ export function AnnotationClipInspector({ clip, onChange }: AnnotationInspectorP
           </IconButton>
         </div>
       </div>
-      <AnnotationPresetControls key={clip.id} clip={clip} onChange={onChange} />
+      <AnnotationPresetControls key={clip.id} clip={clip} onChange={onChange} canvas={canvas} />
       <Tabs defaultValue="style" className="flex min-w-0 flex-col gap-4">
         <TabsList aria-label="Annotation settings" className="grid w-full grid-cols-3">
           <TabsTrigger value="style" className="px-2 text-xs">

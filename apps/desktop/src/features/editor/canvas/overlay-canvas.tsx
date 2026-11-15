@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import type { AnnotationClip, OverlayDisplayList, OverlayRenderPlan } from "@recordforge/contracts"
 import {
   createOverlayWasmEngine,
+  diffOverlayPlanGeometry,
   renderOverlayDisplayList,
   type OverlayEngine,
 } from "@recordforge/overlay-core"
@@ -40,6 +41,7 @@ export function OverlayCanvas({
   const playheadMs = usePlayheadMs()
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const engineRef = useRef<OverlayEngine | null>(null)
+  const planRef = useRef<OverlayRenderPlan | null>(null)
   const imageCacheRef = useRef(new Map<string, HTMLImageElement>())
   const renderFrameRef = useRef<() => void>(() => undefined)
   // The engine's JSON-string cache returns the same display-list object on
@@ -61,16 +63,40 @@ export function OverlayCanvas({
   const drawing = drawingRef.current
 
   useEffect(() => {
+    // Drags and endpoint handles change only transforms. Patch the retained
+    // scene in place instead of re-validating/re-building a whole WASM engine
+    // on every draft frame; anything else still takes the rebuild path.
+    const engine = engineRef.current
+    const previousPlan = planRef.current
+    if (engine && previousPlan) {
+      const patches = diffOverlayPlanGeometry(previousPlan, renderPlan)
+      if (patches) {
+        try {
+          engine.updateGeometry(patches)
+          planRef.current = renderPlan
+          if (patches.length > 0) {
+            lastRenderedRef.current = null
+            forceRedrawRef.current = true
+            renderFrameRef.current()
+          }
+          return
+        } catch (error) {
+          console.warn("Failed to patch overlay engine geometry:", error)
+        }
+      }
+    }
+
     let isCancelled = false
 
     void createOverlayWasmEngine(renderPlan).then(
-      (engine) => {
+      (nextEngine) => {
         if (isCancelled) {
-          engine.dispose()
+          nextEngine.dispose()
           return
         }
         const previousEngine = engineRef.current
-        engineRef.current = engine
+        engineRef.current = nextEngine
+        planRef.current = renderPlan
         previousEngine?.dispose()
         setEngineVersion((version) => version + 1)
       },
@@ -89,6 +115,7 @@ export function OverlayCanvas({
       drawing.dispose()
       const engine = engineRef.current
       engineRef.current = null
+      planRef.current = null
       engine?.dispose()
     }
   }, [drawing])

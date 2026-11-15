@@ -39,7 +39,8 @@ pub(crate) fn render_to_pixmap_at(
     for item in &display_list.items {
         match item {
             DisplayItem::Annotation { item } => {
-                render_annotation(pixmap, item, origin)?;
+                let canvas = engine.canvas();
+                render_annotation(pixmap, item, origin, (canvas.width, canvas.height))?;
             }
             DisplayItem::Text { item } => {
                 render_text(engine, pixmap, item, origin)?;
@@ -198,6 +199,37 @@ fn build_ellipse_path(cx: f32, cy: f32, rx: f32, ry: f32) -> Option<Path> {
     pb.finish()
 }
 
+/// Append an ellipse rotated about its own center. Used by spotlight, whose
+/// dimming rectangle stays axis-aligned while only the cutout rotates.
+fn push_rotated_ellipse(pb: &mut PathBuilder, cx: f32, cy: f32, rx: f32, ry: f32, angle: f32) {
+    let k = 0.552_284_8;
+    let kx = rx * k;
+    let ky = ry * k;
+    let cos = angle.cos();
+    let sin = angle.sin();
+    let point = |x: f32, y: f32| (cx + x * cos - y * sin, cy + x * sin + y * cos);
+
+    let (top_x, top_y) = point(0.0, -ry);
+    let (right_x, right_y) = point(rx, 0.0);
+    let (bottom_x, bottom_y) = point(0.0, ry);
+    let (left_x, left_y) = point(-rx, 0.0);
+    let (c1x, c1y) = point(kx, -ry);
+    let (c2x, c2y) = point(rx, -ky);
+    let (c3x, c3y) = point(rx, ky);
+    let (c4x, c4y) = point(kx, ry);
+    let (c5x, c5y) = point(-kx, ry);
+    let (c6x, c6y) = point(-rx, ky);
+    let (c7x, c7y) = point(-rx, -ky);
+    let (c8x, c8y) = point(-kx, -ry);
+
+    pb.move_to(top_x, top_y);
+    pb.cubic_to(c1x, c1y, c2x, c2y, right_x, right_y);
+    pb.cubic_to(c3x, c3y, c4x, c4y, bottom_x, bottom_y);
+    pb.cubic_to(c5x, c5y, c6x, c6y, left_x, left_y);
+    pb.cubic_to(c7x, c7y, c8x, c8y, top_x, top_y);
+    pb.close();
+}
+
 fn stroke_for_style(style: &str, width: f32) -> Stroke {
     let dash = match style {
         "dashed" => StrokeDash::new(vec![width * 4.0, width * 3.0], 0.0),
@@ -256,14 +288,7 @@ fn stroke_connector(
 
     let mut pb = PathBuilder::new();
     push_connector_path(&mut pb, &trimmed);
-    if let Some(line_path) = pb.finish() {
-        let stroke_color = parse_color(&item.stroke_color, opacity);
-        let mut stroke_paint = Paint::default();
-        stroke_paint.set_color(stroke_color);
-        stroke_paint.anti_alias = true;
-        let stroke = stroke_for_style(&item.stroke_style, stroke_width);
-        pixmap.stroke_path(&line_path, &stroke_paint, &stroke, ts, None);
-    }
+    let line_path = pb.finish();
 
     let start = path.start();
     let end = path.end();
@@ -288,12 +313,50 @@ fn stroke_connector(
         end_toward.1,
         stroke_width,
     );
-    if let Some(head_path) = head_pb.finish() {
-        let stroke_color = parse_color(&item.stroke_color, opacity);
+    let head_path = head_pb.finish();
+
+    let stroke_color = parse_color(&item.stroke_color, opacity);
+    let stroke = stroke_for_style(&item.stroke_style, stroke_width);
+
+    // The browser preview applies its canvas shadow to both the connector
+    // stroke and the filled heads. Mirror that here by blurring a stroked /
+    // filled copy of the same geometry before the foreground pass.
+    if item.shadow_enabled {
+        if let Some(line_path) = &line_path {
+            draw_shadow_shape(
+                pixmap,
+                line_path,
+                ts,
+                &item.shadow_color,
+                item.shadow_blur,
+                opacity,
+                ShadowShape::Stroke(&stroke),
+            );
+        }
+        if let Some(head_path) = &head_path {
+            draw_shadow_path(
+                pixmap,
+                head_path,
+                ts,
+                &item.shadow_color,
+                item.shadow_blur,
+                opacity,
+            );
+        }
+    }
+
+    if let Some(line_path) = &line_path {
+        let mut stroke_paint = Paint::default();
+        stroke_paint.set_color(stroke_color);
+        stroke_paint.anti_alias = true;
+        pixmap.stroke_path(line_path, &stroke_paint, &stroke, ts, None);
+    }
+
+    if let Some(head_path) = &head_path {
         let mut fill_paint = Paint::default();
         fill_paint.set_color(stroke_color);
         fill_paint.anti_alias = true;
-        pixmap.fill_path(&head_path, &fill_paint, FillRule::Winding, ts, None);
+        pixmap.fill_path(head_path, &fill_paint, FillRule::Winding, ts, None);
     }
 }
 
@@ -310,7 +373,8 @@ fn draw_arrow_head(
         return;
     }
     let angle = (toward_y - y).atan2(toward_x - x);
-    let size = (stroke_width * 3.0).max(8.0);
+    // Match the browser renderer's head geometry (and the shaft trim above).
+    let size = (stroke_width * 3.5).max(10.0);
 
     let cos = angle.cos();
     let sin = angle.sin();
@@ -352,6 +416,13 @@ fn draw_arrow_head(
     }
 }
 
+/// How a shadow silhouette is produced from a path: fill it (shapes/heads) or
+/// stroke it (connector shafts, whose shadow must follow the same trim/dash).
+enum ShadowShape<'a> {
+    Fill,
+    Stroke(&'a Stroke),
+}
+
 fn draw_shadow_path(
     pixmap: &mut Pixmap,
     path: &Path,
@@ -359,6 +430,26 @@ fn draw_shadow_path(
     shadow_color: &str,
     shadow_blur: f64,
     opacity: f64,
+) {
+    draw_shadow_shape(
+        pixmap,
+        path,
+        transform,
+        shadow_color,
+        shadow_blur,
+        opacity,
+        ShadowShape::Fill,
+    );
+}
+
+fn draw_shadow_shape(
+    pixmap: &mut Pixmap,
+    path: &Path,
+    transform: Transform,
+    shadow_color: &str,
+    shadow_blur: f64,
+    opacity: f64,
+    shape: ShadowShape<'_>,
 ) {
     if shadow_blur <= 0.0 {
         return;
@@ -373,6 +464,13 @@ fn draw_shadow_path(
 
     let blur_radius = (shadow_blur / 2.0).clamp(1.0, 32.0) as f32;
     let pad = (blur_radius * 3.0).ceil() as i32;
+    // A stroked silhouette extends past the path bounds by half the line width
+    // (rounded joins/caps add the rest); without this the blur gets clipped at
+    // the shadow pixmap edge and the connector shadow loses its outer fringe.
+    let stroke_pad = match shape {
+        ShadowShape::Fill => 0.0,
+        ShadowShape::Stroke(stroke) => stroke.width * 0.75,
+    };
 
     let bounds = path.bounds();
     let pts = [
@@ -394,10 +492,11 @@ fn draw_shadow_path(
         max_y = max_y.max(pt.y);
     }
 
-    let sub_x0 = (min_x.floor() as i32 - pad).max(0);
-    let sub_y0 = (min_y.floor() as i32 - pad).max(0);
-    let sub_x1 = (max_x.ceil() as i32 + pad).min(pixmap.width() as i32);
-    let sub_y1 = (max_y.ceil() as i32 + pad).min(pixmap.height() as i32);
+    let edge_pad = pad + stroke_pad.ceil() as i32;
+    let sub_x0 = (min_x.floor() as i32 - edge_pad).max(0);
+    let sub_y0 = (min_y.floor() as i32 - edge_pad).max(0);
+    let sub_x1 = (max_x.ceil() as i32 + edge_pad).min(pixmap.width() as i32);
+    let sub_y1 = (max_y.ceil() as i32 + edge_pad).min(pixmap.height() as i32);
 
     let sub_w = (sub_x1 - sub_x0).max(0) as u32;
     let sub_h = (sub_y1 - sub_y0).max(0) as u32;
@@ -411,7 +510,14 @@ fn draw_shadow_path(
         paint.set_color(color);
         paint.anti_alias = true;
         let local_transform = shadow_transform.post_translate(-(sub_x0 as f32), -(sub_y0 as f32));
-        sub_pix.fill_path(path, &paint, FillRule::Winding, local_transform, None);
+        match shape {
+            ShadowShape::Fill => {
+                sub_pix.fill_path(path, &paint, FillRule::Winding, local_transform, None);
+            }
+            ShadowShape::Stroke(stroke) => {
+                sub_pix.stroke_path(path, &paint, stroke, local_transform, None);
+            }
+        }
         fast_blur(&mut sub_pix, blur_radius);
         pixmap.draw_pixmap(
             sub_x0,
@@ -489,6 +595,7 @@ fn render_annotation(
     pixmap: &mut Pixmap,
     item: &DisplayAnnotation,
     origin: (f32, f32),
+    canvas: (u32, u32),
 ) -> Result<(), OverlayError> {
     let t = &item.transform;
     let ts = item_transform(
@@ -499,50 +606,58 @@ fn render_annotation(
     let stroke_width = item.stroke_width.max(1.0) as f32;
 
     if item.annotation_type == "spotlight" {
-        // Spotlight mask: darkened canvas with cleared cutout
-        let bg_color = parse_color(&item.fill_color, opacity * item.fill_opacity.max(0.5));
+        // Darken the full canvas, cutting the spotlight hole with an even-odd
+        // path. The rectangle stays axis-aligned; only the cutout rotates, so
+        // rotated spotlights cannot leave undimmed corners.
+        let bg_color = parse_color(&item.fill_color, opacity * item.fill_opacity);
         let mut paint = Paint::default();
         paint.set_color(bg_color);
         paint.anti_alias = true;
 
-        let cw = pixmap.width() as f32;
-        let ch = pixmap.height() as f32;
-        let mut pb = PathBuilder::new();
-        // Outer canvas
-        pb.move_to(0.0, 0.0);
-        pb.line_to(cw, 0.0);
-        pb.line_to(cw, ch);
-        pb.line_to(0.0, ch);
-        pb.close();
-
-        // Inner cutout ellipse/rect
-        let cx = (t.x + t.width / 2.0) as f32;
-        let cy = (t.y + t.height / 2.0) as f32;
+        let (canvas_w, canvas_h) = (canvas.0 as f32, canvas.1 as f32);
+        let center_x = (t.x + t.width / 2.0) as f32;
+        let center_y = (t.y + t.height / 2.0) as f32;
+        let anchor_x = (t.x + t.width * t.anchor_x) as f32;
+        let anchor_y = (t.y + t.height * t.anchor_y) as f32;
+        let angle = (t.rotation as f32).to_radians();
+        let (sin, cos) = angle.sin_cos();
+        let dx = center_x - anchor_x;
+        let dy = center_y - anchor_y;
+        let rotated_center_x = anchor_x + dx * cos - dy * sin;
+        let rotated_center_y = anchor_y + dx * sin + dy * cos;
         let rx = (t.width / 2.0).max(1.0) as f32;
         let ry = (t.height / 2.0).max(1.0) as f32;
-        let k = 0.552_284_8;
-        let kx = rx * k;
-        let ky = ry * k;
-        pb.move_to(cx, cy - ry);
-        pb.cubic_to(cx + kx, cy - ry, cx + rx, cy - ky, cx + rx, cy);
-        pb.cubic_to(cx + rx, cy + ky, cx + kx, cy + ry, cx, cy + ry);
-        pb.cubic_to(cx - kx, cy + ry, cx - rx, cy + ky, cx - rx, cy);
-        pb.cubic_to(cx - rx, cy - ky, cx - kx, cy - ry, cx, cy - ry);
-        pb.close();
+        let translate = Transform::from_translate(-origin.0, -origin.1);
 
+        let mut pb = PathBuilder::new();
+        pb.move_to(0.0, 0.0);
+        pb.line_to(canvas_w, 0.0);
+        pb.line_to(canvas_w, canvas_h);
+        pb.line_to(0.0, canvas_h);
+        pb.close();
+        push_rotated_ellipse(&mut pb, rotated_center_x, rotated_center_y, rx, ry, angle);
         if let Some(path) = pb.finish() {
-            pixmap.fill_path(&path, &paint, FillRule::EvenOdd, ts, None);
+            pixmap.fill_path(&path, &paint, FillRule::EvenOdd, translate, None);
         }
 
-        // Draw border around spotlight cutout if stroke width > 0
+        // Draw border around the spotlight cutout if stroke width > 0
         if item.stroke_width > 0.0 {
-            if let Some(cutout_path) = build_ellipse_path(cx, cy, rx, ry) {
+            let mut cutout = PathBuilder::new();
+            push_rotated_ellipse(
+                &mut cutout,
+                rotated_center_x,
+                rotated_center_y,
+                rx,
+                ry,
+                angle,
+            );
+            if let Some(cutout_path) = cutout.finish() {
                 let stroke_color = parse_color(&item.stroke_color, opacity);
                 let mut stroke_paint = Paint::default();
                 stroke_paint.set_color(stroke_color);
                 stroke_paint.anti_alias = true;
                 let stroke = stroke_for_style(&item.stroke_style, stroke_width);
-                pixmap.stroke_path(&cutout_path, &stroke_paint, &stroke, ts, None);
+                pixmap.stroke_path(&cutout_path, &stroke_paint, &stroke, translate, None);
             }
         }
         return Ok(());
@@ -644,6 +759,16 @@ fn render_annotation(
                 tail_pb.line_to(x + 16.0, y + h + 18.0);
                 tail_pb.close();
                 if let Some(tail_path) = tail_pb.finish() {
+                    if item.shadow_enabled {
+                        draw_shadow_path(
+                            pixmap,
+                            &tail_path,
+                            ts,
+                            &item.shadow_color,
+                            item.shadow_blur,
+                            opacity,
+                        );
+                    }
                     let fill_color =
                         parse_color(&item.fill_color, opacity * item.fill_opacity.max(0.85));
                     let mut tail_paint = Paint::default();
@@ -660,14 +785,20 @@ fn render_annotation(
         && item.text.as_ref().is_some_and(|text| !text.is_empty())
     {
         if let Some(text) = &item.text {
-            let fs = item.font_size.clamp(10.0, 72.0) as f32;
+            let fs = item.font_size.max(8.0) as f32;
             let padding = if item.annotation_type == "badge" {
                 24.0
             } else {
                 fs * 1.5
             };
-            let max_chars = ((w - padding).max(20.0) / (fs * 0.58)).max(3.0) as usize;
-            let lines = wrap_text_to_lines(text, max_chars);
+            let usable_w = (w - padding).max(20.0);
+            let lines = crate::titles::wrap_text_for_render(
+                "sans",
+                "700",
+                text,
+                f64::from(usable_w),
+                f64::from(fs),
+            );
             if !lines.is_empty() {
                 let line_h = fs * 1.25;
                 let total_h = (lines.len().saturating_sub(1) as f32) * line_h;
@@ -782,7 +913,7 @@ fn render_text(
             }
 
             if item.backdrop_style == "accent-bar" {
-                let bar_w = (padding_x / 2.0).max(3.0).min(8.0);
+                let bar_w = (padding_x / 2.0).clamp(3.0, 8.0);
                 if let Some(bar_path) = build_rounded_rect_path(x, y, bar_w, h, 2.0) {
                     let bar_color = parse_color(&item.accent_color, opacity);
                     let mut bar_paint = Paint::default();
@@ -816,8 +947,13 @@ fn render_text(
     // Initial base font sizes & metrics
     let base_primary_fs = (item.font_size as f32).clamp(12.0, 120.0);
     let base_primary_line_h = base_primary_fs * 1.25;
-    let base_max_primary_chars = (usable_w / (base_primary_fs * 0.58)).max(3.0) as usize;
-    let base_primary_lines = wrap_text_to_lines(&primary_text, base_max_primary_chars);
+    let base_primary_lines = crate::titles::wrap_text_for_render(
+        &item.font_family,
+        &item.font_weight,
+        &primary_text,
+        f64::from(usable_w),
+        f64::from(base_primary_fs),
+    );
     let base_primary_h = (base_primary_lines.len() as f32) * base_primary_line_h;
 
     // Optional tag / badge above title
@@ -844,10 +980,15 @@ fn render_text(
     let base_sub_fs = (base_primary_fs * 0.55).clamp(11.0, 48.0);
     let base_sub_line_h = base_sub_fs * 1.3;
     let base_subtitle_gap = 5.0;
-    let base_max_sub_chars = (usable_w / (base_sub_fs * 0.58)).max(3.0) as usize;
     let base_sub_lines = if let Some(subtitle) = &item.secondary_text {
         if !subtitle.trim().is_empty() {
-            wrap_text_to_lines(subtitle, base_max_sub_chars)
+            crate::titles::wrap_text_for_render(
+                &item.font_family,
+                "500",
+                subtitle,
+                f64::from(usable_w),
+                f64::from(base_sub_fs),
+            )
         } else {
             Vec::new()
         }
@@ -888,8 +1029,13 @@ fn render_text(
     ) = if (scale - 1.0).abs() > 0.001 {
         let p_fs = (base_primary_fs * scale).clamp(10.0, 120.0);
         let p_line_h = p_fs * 1.25;
-        let p_max_chars = (usable_w / (p_fs * 0.58)).max(3.0) as usize;
-        let p_lines = wrap_text_to_lines(&primary_text, p_max_chars);
+        let p_lines = crate::titles::wrap_text_for_render(
+            &item.font_family,
+            &item.font_weight,
+            &primary_text,
+            f64::from(usable_w),
+            f64::from(p_fs),
+        );
         let p_h = (p_lines.len() as f32) * p_line_h;
 
         let t_fs = (p_fs * 0.35).clamp(9.0, 18.0);
@@ -899,10 +1045,15 @@ fn render_text(
         let s_fs = (p_fs * 0.55).clamp(9.0, 48.0);
         let s_line_h = s_fs * 1.3;
         let s_gap = base_subtitle_gap * scale;
-        let s_max_chars = (usable_w / (s_fs * 0.58)).max(3.0) as usize;
         let s_lines = if let Some(subtitle) = &item.secondary_text {
             if !subtitle.trim().is_empty() {
-                wrap_text_to_lines(subtitle, s_max_chars)
+                crate::titles::wrap_text_for_render(
+                    &item.font_family,
+                    "500",
+                    subtitle,
+                    f64::from(usable_w),
+                    f64::from(s_fs),
+                )
             } else {
                 Vec::new()
             }
@@ -957,7 +1108,7 @@ fn render_text(
             let tag_str = tag.trim().to_uppercase();
             let tag_base_y = cursor_y + tag_fs * 0.85;
             content_markup.push_str(&format!(
-                r##"<text x="{tx}" y="{ty}" fill="{accent}" font-family="{ff}" font-size="{fs}" font-weight="700" letter-spacing="1.2" text-anchor="{anchor}">{tag_esc}</text>"##,
+                r##"<text x="{tx}" y="{ty}" fill="{accent}" font-family="{ff}" font-size="{fs}" font-weight="700" text-anchor="{anchor}">{tag_esc}</text>"##,
                 tx = text_x,
                 ty = tag_base_y,
                 accent = item.accent_color,
@@ -993,7 +1144,7 @@ fn render_text(
         for line in &sub_lines {
             let baseline = cursor_y + sub_fs * 0.82;
             content_markup.push_str(&format!(
-                r##"<text x="{tx}" y="{ty}" fill="{color}" font-family="{ff}" font-size="{fs}" font-weight="500" text-anchor="{anchor}" opacity="0.88">{txt}</text>"##,
+                r##"<text x="{tx}" y="{ty}" fill="{color}" font-family="{ff}" font-size="{fs}" font-weight="500" text-anchor="{anchor}">{txt}</text>"##,
                 tx = text_x,
                 ty = baseline,
                 color = item.secondary_text_color,
@@ -1219,8 +1370,10 @@ fn build_title_scene_svg(
 }
 
 fn render_svg_markup(svg: &str, transform: Transform, pixmap: &mut Pixmap) -> Result<(), String> {
-    let mut options = resvg::usvg::Options::default();
-    options.fontdb = crate::fonts::get_shared_font_database();
+    let options = resvg::usvg::Options {
+        fontdb: crate::fonts::get_shared_font_database(),
+        ..Default::default()
+    };
     let tree = resvg::usvg::Tree::from_str(svg, &options).map_err(|e| format!("parse SVG: {e}"))?;
     resvg::render(&tree, transform, &mut pixmap.as_mut());
     Ok(())
@@ -1247,45 +1400,105 @@ fn escape_xml(input: &str) -> String {
         .replace('\'', "&apos;")
 }
 
-fn wrap_text_to_lines(text: &str, max_chars: usize) -> Vec<String> {
-    let mut lines = Vec::new();
-    let max_len = max_chars.max(1);
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        AnnotationDetails, OverlayAnimation, OverlayCanvas, OverlayItem, OverlayItemBase,
+        OverlayRenderPlan, OverlayTransform,
+    };
+    use tiny_skia::Point;
 
-    for raw_line in text.lines() {
-        let trimmed = raw_line.trim_end_matches('\r');
-        if trimmed.is_empty() {
-            lines.push(String::new());
-            continue;
-        }
-
-        let words: Vec<&str> = trimmed.split_whitespace().collect();
-        if words.is_empty() {
-            lines.push(String::new());
-            continue;
-        }
-
-        let mut current = String::new();
-        for word in words {
-            if current.is_empty() {
-                current = word.to_string();
-                continue;
-            }
-            if current.chars().count() + 1 + word.chars().count() <= max_len {
-                current.push(' ');
-                current.push_str(word);
-            } else {
-                lines.push(current);
-                current = word.to_string();
-            }
-        }
-        if !current.is_empty() {
-            lines.push(current);
+    fn arrow_plan(shadow_enabled: bool) -> OverlayRenderPlan {
+        OverlayRenderPlan {
+            version: 1,
+            canvas: OverlayCanvas {
+                width: 400,
+                height: 200,
+            },
+            items: vec![OverlayItem::Annotation {
+                base: OverlayItemBase {
+                    id: "arrow".to_string(),
+                    start_ms: 0,
+                    end_ms: 10_000,
+                    transform: OverlayTransform {
+                        x: 50.0,
+                        y: 50.0,
+                        width: 300.0,
+                        height: 0.0,
+                        ..Default::default()
+                    },
+                    animation: OverlayAnimation {
+                        in_type: crate::OverlayAnimationType::None,
+                        out_type: crate::OverlayAnimationOutType::None,
+                        ..Default::default()
+                    },
+                    enabled: true,
+                },
+                details: AnnotationDetails {
+                    annotation_type: "arrow".to_string(),
+                    end_x: Some(350.0),
+                    end_y: Some(50.0),
+                    stroke_color: "#ffffff".to_string(),
+                    stroke_width: 4.0,
+                    stroke_style: "solid".to_string(),
+                    fill_color: "#ffffff".to_string(),
+                    fill_opacity: 0.0,
+                    corner_radius: 0.0,
+                    arrow_end_head: "none".to_string(),
+                    arrow_start_head: "none".to_string(),
+                    arrow_style: "straight".to_string(),
+                    shadow_enabled,
+                    shadow_color: "#000000".to_string(),
+                    shadow_blur: 10.0,
+                    text: None,
+                    text_color: "#ffffff".to_string(),
+                    font_size: 14.0,
+                },
+            }],
+            assets: Vec::new(),
+            fonts: Vec::new(),
         }
     }
 
-    if lines.is_empty() {
-        vec![text.to_string()]
-    } else {
-        lines
+    fn alpha_at(pixmap: &Pixmap, x: u32, y: u32) -> u8 {
+        pixmap.data()[((y * pixmap.width() + x) * 4 + 3) as usize]
+    }
+
+    fn has_alpha_below(pixmap: &Pixmap, x0: u32, x1: u32, y0: u32, y1: u32) -> bool {
+        (y0..y1).any(|y| (x0..x1).any(|x| alpha_at(pixmap, x, y) > 0))
+    }
+
+    #[test]
+    fn strokes_connector_shadows_below_the_shaft() {
+        let with_shadow =
+            crate::OverlayEngine::from_render_plan(arrow_plan(true)).expect("shadow plan is valid");
+        let without_shadow =
+            crate::OverlayEngine::from_render_plan(arrow_plan(false)).expect("plain plan is valid");
+        let mut shadow_pix = Pixmap::new(400, 200).expect("pixmap");
+        let mut plain_pix = Pixmap::new(400, 200).expect("pixmap");
+        with_shadow
+            .render_to_pixmap(500, &mut shadow_pix)
+            .expect("shadow render");
+        without_shadow
+            .render_to_pixmap(500, &mut plain_pix)
+            .expect("plain render");
+
+        // The shaft is 4px tall around y=50 and the shadow is offset ~5px down.
+        // No foreground geometry reaches this band, so alpha here can only be
+        // the blurred connector shadow.
+        assert!(!has_alpha_below(&plain_pix, 150, 250, 56, 66));
+        assert!(has_alpha_below(&shadow_pix, 150, 250, 56, 66));
+    }
+
+    #[test]
+    fn item_transform_rotates_in_degrees() {
+        // Anchor is the box center (200, 150); the point directly above it
+        // rotates 90 degrees clockwise to its right.
+        let ts = item_transform(100.0, 100.0, 200.0, 100.0, 90.0, 0.5, 0.5);
+        let mut point = Point::from_xy(200.0, 100.0);
+        ts.map_point(&mut point);
+        assert!((point.x - 250.0).abs() < 0.01, "x = {}", point.x);
+        assert!((point.y - 150.0).abs() < 0.01, "y = {}", point.y);
     }
 }

@@ -4,6 +4,7 @@ import {
   applyTextPresetToClip,
   textPresetFromClip,
   textPresetToDefinition,
+  titleCanvasDesignScale,
   type TextPresetRecord,
 } from "@recordforge/editor-core"
 import {
@@ -21,6 +22,7 @@ import { Eye, FolderOpen, Lock, Save, Type } from "lucide-react"
 import { useTextPresetRegistry } from "../presets/preset-store"
 import { SavePresetDialog, type SavePresetFormData } from "../presets/save-preset-dialog"
 import { TitlePresetBrowser } from "../titles/title-preset-browser"
+import { getTitleEditTime } from "../titles/title-preview-plan"
 import { useTimelineStore } from "../../../stores/timeline-store"
 import { TitleContentSection } from "./text/title-content-section"
 import { TitleDesignSection } from "./text/title-design-section"
@@ -58,8 +60,17 @@ function TitleInspectorSession({ clip, onChange }: TextClipInspectorProps) {
     preset: TextPresetRecord,
     options?: { preserveLayout?: boolean; preserveStyle?: boolean },
   ) {
-    const updated = applyTextPresetToClip(clip, textPresetToDefinition(preset), options)
-    onChange({ ...updated, ...(!options?.preserveLayout ? fitTitleLayout(updated, canvas) : {}) })
+    const updated = applyTextPresetToClip(clip, textPresetToDefinition(preset), {
+      ...options,
+      canvasWidth,
+      canvasHeight,
+    })
+    const next = {
+      ...updated,
+      ...(!options?.preserveLayout ? fitTitleLayout(updated, canvas) : {}),
+    }
+    onChange(next)
+    useTimelineStore.getState().seek(getTitleEditTime({ ...clip, ...next }))
     setBrowserOpen(false)
     toast({
       title: "Title design replaced",
@@ -94,8 +105,9 @@ function TitleInspectorSession({ clip, onChange }: TextClipInspectorProps) {
           .split(",")
           .map((tag) => tag.trim())
           .filter(Boolean),
+        designScale: titleCanvasDesignScale(canvasWidth, canvasHeight),
       })
-      await registry.saveCustomPreset(record)
+      await registry.saveCustomPreset({ ...record, id: undefined })
       toast({ title: "Preset saved", description: `${data.name} is now in your library.` })
     } catch (error) {
       toast({

@@ -60,6 +60,35 @@ function isActive(clip: OverlayClip, playheadMs: number): boolean {
   )
 }
 
+interface OverlayRect {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+/**
+ * Lines store their start in `x`/`y` and may point up or left, so the drawn
+ * endpoints only span a positive rect after normalizing. The selection box and
+ * its hit area must cover the real line, not the quadrant right/below it.
+ */
+function overlayDisplayRect(clip: OverlayClip): OverlayRect {
+  if (
+    clip.kind === "annotation" &&
+    (clip.annotationType === "arrow" || clip.annotationType === "line")
+  ) {
+    const endX = clip.endX ?? clip.x + clip.width
+    const endY = clip.endY ?? clip.y + clip.height
+    return {
+      x: Math.min(clip.x, endX),
+      y: Math.min(clip.y, endY),
+      width: Math.max(1, Math.abs(endX - clip.x)),
+      height: Math.max(1, Math.abs(endY - clip.y)),
+    }
+  }
+  return { x: clip.x, y: clip.y, width: clip.width, height: clip.height }
+}
+
 export function OverlaySelectionLayer({
   clips,
   canvasWidth,
@@ -112,6 +141,12 @@ export function OverlaySelectionLayer({
 
     const step = event.shiftKey ? 10 : 1
     const isModifier = event.ctrlKey || event.metaKey
+    const isLine =
+      clip.kind === "annotation" &&
+      (clip.annotationType === "arrow" || clip.annotationType === "line")
+    // Line endpoints are edited with their handles; a box resize has no visual
+    // effect on a connector, so do not create a misleading history entry.
+    if (isLine && isModifier) return
 
     if (event.key === "ArrowLeft") {
       event.preventDefault()
@@ -153,10 +188,17 @@ export function OverlaySelectionLayer({
         ? null
         : visibleClips.map((clip) => {
             const isSelected = selectedClipId === clip.id
-            const leftPercent = (clip.x / Math.max(1, canvasWidth)) * 100
-            const topPercent = (clip.y / Math.max(1, canvasHeight)) * 100
-            const widthPercent = (clip.width / Math.max(1, canvasWidth)) * 100
-            const heightPercent = (clip.height / Math.max(1, canvasHeight)) * 100
+            const rect = overlayDisplayRect(clip)
+            const leftPercent = (rect.x / Math.max(1, canvasWidth)) * 100
+            const topPercent = (rect.y / Math.max(1, canvasHeight)) * 100
+            const widthPercent = (rect.width / Math.max(1, canvasWidth)) * 100
+            const heightPercent = (rect.height / Math.max(1, canvasHeight)) * 100
+            // The normalized line rect differs from the stored start-relative
+            // box, so derive the anchor from the real clip, not the rect.
+            const originXPercent =
+              ((clip.x + clip.width * clip.anchorX - rect.x) / Math.max(1, rect.width)) * 100
+            const originYPercent =
+              ((clip.y + clip.height * clip.anchorY - rect.y) / Math.max(1, rect.height)) * 100
 
             return (
               <div
@@ -177,7 +219,7 @@ export function OverlaySelectionLayer({
                   width: `${widthPercent}%`,
                   height: `${heightPercent}%`,
                   transform: `rotate(${clip.rotation}deg)`,
-                  transformOrigin: `${clip.anchorX * 100}% ${clip.anchorY * 100}%`,
+                  transformOrigin: `${originXPercent}% ${originYPercent}%`,
                 }}
                 onClick={(event) => {
                   event.stopPropagation()
@@ -195,7 +237,9 @@ export function OverlaySelectionLayer({
                 onPointerCancel={interaction.finishGesture}
                 onLostPointerCapture={interaction.handleLostPointerCapture}
               >
-                {isSelected ? <SelectionControls clip={clip} interaction={interaction} /> : null}
+                {isSelected ? (
+                  <SelectionControls clip={clip} rect={rect} interaction={interaction} />
+                ) : null}
               </div>
             )
           })}
@@ -205,34 +249,41 @@ export function OverlaySelectionLayer({
 
 function SelectionControls({
   clip,
+  rect,
   interaction,
 }: {
   clip: OverlayClip
+  rect: OverlayRect
   interaction: OverlayInteraction
 }) {
   if (clip.locked) {
     return <div className="pointer-events-none absolute inset-0 rounded-sm ring-2 ring-muted" />
   }
 
+  const isLine =
+    clip.kind === "annotation" &&
+    (clip.annotationType === "arrow" || clip.annotationType === "line")
+
   return (
     <>
       <div className="pointer-events-none absolute inset-0 rounded-sm border-2 border-dashed border-warning ring-2 ring-warning/20" />
-      {RESIZE_HANDLES.map(({ handle, left, top, cursor, label }) => (
-        <Handle
-          key={handle}
-          label={`${label} ${overlayKindLabel(clip)}`}
-          className={cursor}
-          style={{ left, top }}
-          onPointerDown={(event) => beginHandleGesture(event, clip, handle, interaction)}
-          onPointerMove={interaction.moveGesture}
-          onPointerUp={interaction.finishGesture}
-          onPointerCancel={interaction.finishGesture}
-          onLostPointerCapture={interaction.handleLostPointerCapture}
-        />
-      ))}
-      {clip.kind === "annotation" &&
-      (clip.annotationType === "arrow" || clip.annotationType === "line") ? (
-        <ArrowEndpointHandles clip={clip} interaction={interaction} />
+      {!isLine
+        ? RESIZE_HANDLES.map(({ handle, left, top, cursor, label }) => (
+            <Handle
+              key={handle}
+              label={`${label} ${overlayKindLabel(clip)}`}
+              className={cursor}
+              style={{ left, top }}
+              onPointerDown={(event) => beginHandleGesture(event, clip, handle, interaction)}
+              onPointerMove={interaction.moveGesture}
+              onPointerUp={interaction.finishGesture}
+              onPointerCancel={interaction.finishGesture}
+              onLostPointerCapture={interaction.handleLostPointerCapture}
+            />
+          ))
+        : null}
+      {clip.kind === "annotation" && isLine ? (
+        <ArrowEndpointHandles clip={clip} rect={rect} interaction={interaction} />
       ) : (
         <RotationHandle clip={clip} interaction={interaction} />
       )}
@@ -302,22 +353,27 @@ function RotationHandle({
 
 function ArrowEndpointHandles({
   clip,
+  rect,
   interaction,
 }: {
   clip: Extract<OverlayClip, { kind: "annotation" }>
+  rect: OverlayRect
   interaction: OverlayInteraction
 }) {
   const endX = clip.endX ?? clip.x + clip.width
   const endY = clip.endY ?? clip.y + clip.height
-  const width = Math.max(1, clip.width)
-  const height = Math.max(1, clip.height)
+  const width = Math.max(1, rect.width)
+  const height = Math.max(1, rect.height)
 
   return (
     <>
       <Handle
         label="Move annotation start point"
         className="cursor-grab rounded-full bg-primary"
-        style={{ left: "0%", top: "0%" }}
+        style={{
+          left: `${((clip.x - rect.x) / width) * 100}%`,
+          top: `${((clip.y - rect.y) / height) * 100}%`,
+        }}
         onPointerDown={(event) => beginHandleGesture(event, clip, "arrow-start", interaction)}
         onPointerMove={interaction.moveGesture}
         onPointerUp={interaction.finishGesture}
@@ -328,8 +384,8 @@ function ArrowEndpointHandles({
         label="Move annotation end point"
         className="cursor-grab rounded-full bg-warning"
         style={{
-          left: `${((endX - clip.x) / width) * 100}%`,
-          top: `${((endY - clip.y) / height) * 100}%`,
+          left: `${((endX - rect.x) / width) * 100}%`,
+          top: `${((endY - rect.y) / height) * 100}%`,
         }}
         onPointerDown={(event) => beginHandleGesture(event, clip, "arrow-end", interaction)}
         onPointerMove={interaction.moveGesture}

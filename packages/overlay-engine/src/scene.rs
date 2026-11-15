@@ -46,6 +46,22 @@ impl Default for OverlayTransform {
     }
 }
 
+/// In-place geometry update for an existing overlay item. Used by the preview
+/// when a drag/resize changes only a transform (or a connector endpoint): the
+/// retained WASM scene is patched instead of being rebuilt from a full plan
+/// every pointer frame.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OverlayItemGeometryPatch {
+    pub id: String,
+    pub transform: OverlayTransform,
+    /// Set only for annotation items; absent leaves the endpoint unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_x: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_y: Option<f64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OverlayAsset {
@@ -219,6 +235,9 @@ pub struct ImageDetails {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
+// Transport items are short-lived and validated once; boxing the text details
+// would churn every match site for no measurable memory benefit.
+#[allow(clippy::large_enum_variant)]
 pub enum OverlayItem {
     Annotation {
         #[serde(flatten)]
@@ -267,6 +286,14 @@ impl OverlayItem {
     }
 
     fn base(&self) -> &OverlayItemBase {
+        match self {
+            Self::Annotation { base, .. } | Self::Text { base, .. } | Self::Image { base, .. } => {
+                base
+            }
+        }
+    }
+
+    fn base_mut(&mut self) -> &mut OverlayItemBase {
         match self {
             Self::Annotation { base, .. } | Self::Text { base, .. } | Self::Image { base, .. } => {
                 base
@@ -484,6 +511,41 @@ impl Scene {
 
     pub(crate) fn images_mut(&mut self) -> &mut ImageCache {
         &mut self.images
+    }
+
+    /// Patch transforms (and connector endpoints) on retained items without
+    /// rebuilding fonts, assets or the rest of the validated plan. Unknown ids
+    /// are rejected so a stale preview patch cannot silently no-op.
+    pub(crate) fn apply_geometry_patches(
+        &mut self,
+        patches: Vec<OverlayItemGeometryPatch>,
+    ) -> Result<(), OverlayError> {
+        for patch in patches {
+            validate_transform(&patch.transform, &patch.id)?;
+            validate_optional_finite(patch.end_x, "endX", &patch.id)?;
+            validate_optional_finite(patch.end_y, "endY", &patch.id)?;
+            let position = self
+                .items
+                .iter()
+                .position(|item| item.id() == patch.id)
+                .ok_or_else(|| {
+                    OverlayError::InvalidPlan(format!("unknown overlay item {}", patch.id))
+                })?;
+            let item = &mut self.items[position];
+            item.base_mut().transform = patch.transform;
+            if let OverlayItem::Annotation { details, .. } = item {
+                if let Some(end_x) = patch.end_x {
+                    details.end_x = Some(end_x);
+                }
+                if let Some(end_y) = patch.end_y {
+                    details.end_y = Some(end_y);
+                }
+            }
+        }
+        // z-order is retained by construction, but keep the invariant even if
+        // a caller patches a zIndex (stable sort preserves tied input order).
+        self.items.sort_by_key(|item| item.transform().z_index);
+        Ok(())
     }
 }
 

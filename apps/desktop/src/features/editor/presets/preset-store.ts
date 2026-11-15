@@ -2,6 +2,8 @@ import { useEffect, useState, useSyncExternalStore } from "react"
 import {
   ANNOTATION_PRESET_CATALOG,
   annotationPresetValuesSchema,
+  migrateAnnotationPresetDesignScale,
+  migrateTextPresetDesignScale,
   TEXT_PRESET_CATALOG,
   textPresetValuesSchema,
   PresetRegistry,
@@ -16,12 +18,14 @@ const annotationPresetRegistry = new PresetRegistry<AnnotationPresetValues>(
   {
     definitionSchema: annotationPresetValuesSchema,
     storage: createPresetStorage<AnnotationPresetValues>("annotation"),
+    migrateDefinition: migrateAnnotationPresetDesignScale,
   },
 )
 
 const textPresetRegistry = new PresetRegistry<TextPresetValues>(TEXT_PRESET_CATALOG, {
   definitionSchema: textPresetValuesSchema,
   storage: createPresetStorage<TextPresetValues>("text"),
+  migrateDefinition: migrateTextPresetDesignScale,
 })
 
 export function getAnnotationPresetRegistry(): PresetRegistry<AnnotationPresetValues> {

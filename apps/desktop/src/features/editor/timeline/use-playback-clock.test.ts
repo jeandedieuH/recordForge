@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest"
 import { type TimelineState, defaultCursorSettings } from "@recordforge/contracts"
 import {
+  buildPreviewSegments,
   createPlaybackClock,
   computePreviewMediaSync,
   findNextTimelineClip,
+  getTimelineContentEndMs,
 } from "@recordforge/editor-core"
+import { resolveFreezeTailFrame } from "./playback/freeze-tail"
 
 function createMockTimeline(): TimelineState {
   return {
@@ -85,7 +88,76 @@ function createMockTimeline(): TimelineState {
   }
 }
 
+function createTailTimeline(): TimelineState {
+  const timeline = createMockTimeline()
+  timeline.tracks = [timeline.tracks[0]!]
+  timeline.tracks[0]!.clips = [
+    {
+      id: "clip-1",
+      kind: "screen",
+      assetId: "rec-1",
+      startMs: 0,
+      durationMs: 5000,
+      sourceInMs: 0,
+      sourceOutMs: 5000,
+      speed: 1,
+    },
+  ]
+  timeline.tracks.push({
+    id: "titles",
+    kind: "titles",
+    name: "Titles",
+    muted: false,
+    locked: false,
+    solo: false,
+    volume: 1,
+    clips: [
+      {
+        id: "end-card",
+        kind: "text",
+        assetId: "synthetic:text:end-card",
+        startMs: 6000,
+        durationMs: 2000,
+        sourceInMs: 0,
+        sourceOutMs: 2000,
+        speed: 1,
+        primaryText: "End card",
+      } as TimelineState["tracks"][number]["clips"][number],
+    ],
+  })
+  return timeline
+}
+
 describe("usePlaybackClock - Playback Synchronization & Audio Unmute Verification", () => {
+  it("holds the final screen frame while an overlay-only tail plays", () => {
+    const timeline = createTailTimeline()
+    const segments = buildPreviewSegments(timeline.tracks[0]!.clips, () => "rec-1.mp4")
+    const contentEndMs = getTimelineContentEndMs(timeline)
+    expect(contentEndMs).toBe(8000)
+
+    // Before the last frame the normal video path owns playback.
+    expect(resolveFreezeTailFrame(4999, segments, contentEndMs)).toBeNull()
+    // The last frame is held through the whole tail, ending just before the
+    // source end so the browser paints the final decoded picture.
+    expect(resolveFreezeTailFrame(5000, segments, contentEndMs)).toEqual({ sourceMs: 4999 })
+    expect(resolveFreezeTailFrame(6500, segments, contentEndMs)).toEqual({ sourceMs: 4999 })
+    expect(resolveFreezeTailFrame(8000, segments, contentEndMs)).toEqual({ sourceMs: 4999 })
+    expect(resolveFreezeTailFrame(8001, segments, contentEndMs)).toBeNull()
+
+    // The virtual clock reaches the tail from the last screen frame.
+    const clock = createPlaybackClock(timeline, { fps: 30 })
+    expect(clock.advanceFrame(4900, 1600, 1)).toBe(6500)
+    expect(resolveFreezeTailFrame(6500, segments, contentEndMs)).not.toBeNull()
+  })
+
+  it("does not invent a freeze tail when the screen covers the whole timeline", () => {
+    const timeline = createMockTimeline()
+    const segments = buildPreviewSegments(timeline.tracks[0]!.clips, () => "rec-1.mp4")
+    const contentEndMs = getTimelineContentEndMs(timeline)
+    expect(contentEndMs).toBe(10000)
+    expect(resolveFreezeTailFrame(10000, segments, contentEndMs)).toBeNull()
+  })
+
   it("does not return null for frames near clip boundaries (sub-zero or boundary jitter)", () => {
     const timeline = createMockTimeline()
     const clock = createPlaybackClock(timeline, { fps: 30 })

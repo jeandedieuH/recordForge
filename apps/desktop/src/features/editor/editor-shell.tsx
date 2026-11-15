@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { X } from "lucide-react"
 import { Button, Kbd, Sheet, SheetContent, SheetTitle } from "@recordforge/ui"
+import { annotationCanvasScale } from "@recordforge/editor-core"
 import {
   DEFAULT_ANNOTATION_DRAW_SETTINGS,
   type AnnotationDrawSettings,
@@ -72,6 +73,12 @@ export function EditorShell({ recordingId, onClose, onOpenExport }: EditorShellP
   const recording = useTimelineStore((state) => state.recording)
   const metadata = useTimelineStore((state) => state.metadata)
   const timeline = useTimelineStore((state) => state.engine?.history.present ?? null)
+  const canvasWidth = timeline?.canvas.width
+  const canvasHeight = timeline?.canvas.height
+  // Draw settings are stored in project pixels. When the canvas resolution
+  // changes, preserve the chosen stroke's relative weight (4px at 1080p is
+  // 8px at 4K) instead of leaving a hairline on high-resolution projects.
+  const annotationScaleRef = useRef(1)
   // Selection-only subscription — the wholesale view object would re-render
   // this shell on every playback frame via playheadMs.
   const selection = useTimelineStore((state) => state.view.selection)
@@ -113,6 +120,19 @@ export function EditorShell({ recordingId, onClose, onOpenExport }: EditorShellP
       // Ignore storage errors.
     }
   }, [activeTask])
+
+  useEffect(() => {
+    if (!canvasWidth || !canvasHeight) return
+    const nextScale = annotationCanvasScale(canvasWidth, canvasHeight)
+    const previousScale = annotationScaleRef.current
+    annotationScaleRef.current = nextScale
+    if (Math.abs(nextScale - previousScale) < 1e-6) return
+    const factor = nextScale / previousScale
+    setDrawSettings((settings) => ({
+      ...settings,
+      strokeWidth: Math.min(64, Math.max(0, settings.strokeWidth * factor)),
+    }))
+  }, [canvasWidth, canvasHeight])
 
   // Close the mobile inspector when a selection is made so the user can see the workspace.
   useEffect(() => {

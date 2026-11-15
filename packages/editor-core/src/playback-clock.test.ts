@@ -57,6 +57,33 @@ function makeState(): TimelineState {
   }
 }
 
+function makeEndCardState(): TimelineState {
+  const state = makeState()
+  state.tracks.push({
+    id: "titles",
+    kind: "titles",
+    name: "Titles",
+    muted: false,
+    locked: false,
+    solo: false,
+    volume: 1,
+    clips: [
+      {
+        id: "end-card",
+        kind: "text",
+        assetId: "synthetic:text:end-card",
+        startMs: 21_000,
+        durationMs: 4_000,
+        sourceInMs: 0,
+        sourceOutMs: 4_000,
+        speed: 1,
+        primaryText: "End card",
+      } as TimelineState["tracks"][number]["clips"][number],
+    ],
+  })
+  return state
+}
+
 function makeSpeedState(): TimelineState {
   return {
     ...makeState(),
@@ -176,6 +203,12 @@ describe("PlaybackClock", () => {
   it("stops at the end of the last clip", () => {
     const clock = createPlaybackClock(makeState(), { fps: 30 })
     expect(clock.advanceFrame(19_000, 2_000, 1)).toBe(20_000)
+  })
+
+  it("keeps advancing through an overlay-only freeze-frame tail", () => {
+    const clock = createPlaybackClock(makeEndCardState(), { fps: 30 })
+    expect(clock.advanceFrame(19_000, 2_000, 1)).toBe(21_000)
+    expect(clock.advanceFrame(24_000, 2_000, 1)).toBe(25_000)
   })
 
   it("reports and aggregates drift metrics", () => {

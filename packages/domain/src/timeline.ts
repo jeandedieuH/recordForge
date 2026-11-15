@@ -49,6 +49,62 @@ export function getTotalDuration(state: TimelineState): number {
   return duration
 }
 
+/**
+ * End of the rendered video (the screen track's last frame). Overlay-only
+ * content past this point extends the editor ruler but cannot be exported, so
+ * placement guards and the export summary use this instead of total duration.
+ */
+export function getScreenContentEndMs(state: TimelineState): number {
+  let duration = 0
+  for (const track of state.tracks) {
+    if (track.kind !== "screen") continue
+    for (const clip of track.clips) {
+      duration = Math.max(duration, clip.startMs + clip.durationMs)
+    }
+  }
+  return duration
+}
+
+/**
+ * End of the last renderable overlay (title, annotation or image). Content past
+ * the screen's last frame is exported over a freeze-frame tail, so the preview
+ * clock and the export plan both extend to this point.
+ */
+export function getOverlayContentEndMs(state: TimelineState): number {
+  let duration = 0
+  for (const track of state.tracks) {
+    if (track.muted) continue
+    for (const clip of track.clips) {
+      if (clip.kind !== "annotation" && clip.kind !== "text" && clip.kind !== "image") continue
+      if (clip.enabled === false) continue
+      duration = Math.max(duration, clip.startMs + clip.durationMs)
+    }
+  }
+  return duration
+}
+
+/** End of everything the preview can show: screen frames or freeze-frame tail. */
+export function getTimelineContentEndMs(state: TimelineState): number {
+  return Math.max(getScreenContentEndMs(state), getOverlayContentEndMs(state))
+}
+
+/**
+ * Legacy placement guard: shift an overlay back so it ends at the last screen
+ * frame. New placements allow the freeze-frame tail instead; kept for callers
+ * that still need a strictly screen-bounded start.
+ */
+export function clampOverlayStartMs(
+  startMs: number,
+  durationMs: number,
+  contentEndMs: number,
+): number {
+  const start = Math.max(0, Math.round(startMs))
+  const duration = Math.max(0, Math.round(durationMs))
+  const contentEnd = Math.max(0, Math.round(contentEndMs))
+  if (contentEnd <= 0 || start < contentEnd) return start
+  return Math.max(0, contentEnd - duration)
+}
+
 export function findTrack(state: TimelineState, trackId: string): TimelineTrack | undefined {
   return state.tracks.find((t) => t.id === trackId)
 }

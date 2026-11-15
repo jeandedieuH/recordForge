@@ -91,6 +91,42 @@ describe("render-plan", () => {
     expect(plan.value.durationMs).toBe(27_500)
   })
 
+  it("extends the plan with a freeze-frame tail for overlay-only end cards", () => {
+    const state = makeTimeline()
+    const endCard = textClipSchema.parse({
+      id: "end-card",
+      kind: "text",
+      assetId: "synthetic:text:end-card",
+      startMs: 22_000,
+      durationMs: 4_000,
+      sourceInMs: 0,
+      sourceOutMs: 4_000,
+      speed: 1,
+      primaryText: "Thanks for watching",
+      titleDesign: { version: 1, template: "clean-text" },
+    })
+    state.tracks.push({
+      id: "titles",
+      kind: "titles",
+      name: "Titles",
+      muted: false,
+      locked: false,
+      solo: false,
+      volume: 1,
+      clips: [endCard],
+    })
+
+    const plan = buildRenderPlan({ state, projectId: "project-1" })
+    expect(plan.ok).toBe(true)
+    if (!plan.ok) return
+    expect(plan.value.durationMs).toBe(26_000)
+    expect(plan.value.gaps).toEqual([{ startMs: 20_000, endMs: 26_000 }])
+    // The encoder clones the last screen frame across the tail; the overlay
+    // plane still carries the end card.
+    expect(plan.value.overlayRenderPlan?.items).toHaveLength(1)
+    expect(plan.value.texts[0]).toMatchObject({ id: "end-card", endMs: 26_000 })
+  })
+
   it("maps a selected range into zero-based output time", () => {
     const state = makeTimeline()
     state.tracks[0].clips.push({
@@ -2088,6 +2124,16 @@ describe("render-plan", () => {
       const validated = renderPlanSchema.safeParse(plan.value)
       expect(validated.success).toBe(true)
     })
+  })
+})
+
+describe("overlay render plan", () => {
+  it("is omitted when no overlay items exist so passthrough exports stay eligible", () => {
+    const state = makeTimeline()
+    const plan = buildRenderPlan({ state, projectId: "project-1" })
+    expect(plan.ok).toBe(true)
+    if (!plan.ok) return
+    expect(plan.value.overlayRenderPlan).toBeUndefined()
   })
 })
 

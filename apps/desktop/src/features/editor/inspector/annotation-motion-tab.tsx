@@ -13,11 +13,15 @@ import {
 
 export function AnnotationMotionTab({ clip, onChange }: AnnotationInspectorProps) {
   const motion = clip.overlayAnimation
-  // Typewriter is a text-engine effect; retain imported values without offering it for new shapes.
+  // Typewriter is a text-engine effect and "draw" is an opacity fade (no path
+  // trim in either renderer). Retain imported values without offering them for
+  // new shapes, and label the legacy draw value for what it actually does.
   const introOptions =
     motion.inType === "typewriter"
       ? [...INTRO_OPTIONS, { value: "typewriter" as const, label: "Typewriter (preset)" }]
-      : INTRO_OPTIONS
+      : motion.inType === "draw"
+        ? [...INTRO_OPTIONS, { value: "draw" as const, label: "Fade (legacy draw)" }]
+        : INTRO_OPTIONS
   function updateMotion(update: Partial<OverlayAnimation>) {
     onChange(changeAnnotationAnimation(clip, update))
   }
@@ -85,7 +89,6 @@ const INTRO_OPTIONS: { value: OverlayAnimationType; label: string }[] = [
   { value: "none", label: "None" },
   { value: "fade", label: "Fade" },
   { value: "scale-up", label: "Pop scale" },
-  { value: "draw", label: "Vector draw" },
   { value: "slide-up", label: "Slide up" },
   { value: "scale-down", label: "Scale down" },
   { value: "slide-down", label: "Slide down" },

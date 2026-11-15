@@ -70,10 +70,17 @@ pub fn get_shared_font_database() -> Arc<resvg::usvg::fontdb::Database> {
     SHARED_FONT_DB
         .get_or_init(|| {
             let mut db = resvg::usvg::fontdb::Database::new();
+            // Use the same bundled OFL fonts the preview loads from CSS so
+            // annotation and legacy-title text metrics match the editor even
+            // on machines without Inter/Outfit installed.
+            db.load_font_data(include_bytes!("../fonts/inter.ttf").to_vec());
+            db.load_font_data(include_bytes!("../fonts/sourceserif4.ttf").to_vec());
+            db.load_font_data(include_bytes!("../fonts/jetbrainsmono.ttf").to_vec());
+            db.load_font_data(include_bytes!("../fonts/outfit.ttf").to_vec());
             db.load_system_fonts();
-            db.set_sans_serif_family("Arial");
-            db.set_serif_family("Times New Roman");
-            db.set_monospace_family("Courier New");
+            db.set_sans_serif_family("Inter");
+            db.set_serif_family("Source Serif 4");
+            db.set_monospace_family("JetBrains Mono");
             Arc::new(db)
         })
         .clone()

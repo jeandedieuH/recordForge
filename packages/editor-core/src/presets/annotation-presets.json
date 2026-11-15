@@ -188,7 +188,7 @@
         "defaultHeight": 200,
         "defaultStrokeWidth": 2,
         "defaultStrokeColor": "rgba(255, 255, 255, 0.4)",
-        "defaultFillColor": "rgba(0, 0, 0, 0.6)",
+        "defaultFillColor": "#000000",
         "defaultFillOpacity": 0.6,
         "defaultCornerRadius": 16,
         "defaultArrowStartHead": "none",

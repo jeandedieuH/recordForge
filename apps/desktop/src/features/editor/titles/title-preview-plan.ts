@@ -15,6 +15,20 @@ export interface TitleReplaceOptions {
 export const TITLE_PREVIEW_DURATION_MS = 4000
 export const TITLE_PREVIEW_STILL_MS = 1600
 
+/**
+ * A point inside the clip where the title is actually visible. Designed titles
+ * choreograph their entrance from zero opacity, so adding or replacing one at
+ * the playhead's exact start can otherwise look like nothing happened.
+ */
+export function getTitleEditTime(clip: TextClip): number {
+  const design = clip.titleDesign
+  const designIntro = design && design.motion !== "none" ? 720 / design.tempo : 0
+  const overlayIntro =
+    clip.overlayAnimation.inType === "none" ? 0 : clip.overlayAnimation.inDurationMs
+  const intro = Math.max(designIntro, overlayIntro)
+  return clip.startMs + Math.min(Math.ceil(intro), Math.floor(clip.durationMs / 2))
+}
+
 /** Keep the full project coordinate space; only the output canvas is downsampled. */
 export function createTitlePreviewPlan({
   preset,
@@ -31,7 +45,11 @@ export function createTitlePreviewPlan({
 }): OverlayRenderPlan {
   const definition = textPresetToDefinition(preset)
   const clip = previewClip
-    ? applyTextPresetToClip(previewClip, definition, options)
+    ? applyTextPresetToClip(previewClip, definition, {
+        ...options,
+        canvasWidth,
+        canvasHeight,
+      })
     : createTextClipFromDefinition(definition, {
         id: `preview-${preset.id}`,
         canvasWidth,

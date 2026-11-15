@@ -2581,7 +2581,13 @@ fn render_composition_window(
         video_labels.push(format!("[{label}]"));
         filled_frames = end_frame;
     }
-    if filled_frames < window.frame_count {
+    if filled_frames < window.frame_count && video_labels.is_empty() {
+        // A window with no screen frames still needs a source. Mid-timeline
+        // gaps are already covered by the `start_frame > filled_frames` color
+        // segments above; a *trailing* shortfall is either encoder tail lag or
+        // an overlay-only end-card tail, both of which must hold the last
+        // picture instead of painting the background. Leaving the gap out lets
+        // the `tpad=stop_mode=clone` pin below extend the final frame.
         let gap_label = "gap_trailing";
         let gap_color = if bg_input_index.is_some() {
             "black@0".to_string()
@@ -4693,6 +4699,49 @@ fn zoom_chunk_snapping_enabled() -> bool {
 /// stage. A boundary may move at most half a chunk length from its nominal
 /// position, and chunks never shrink below one second (or the target length,
 /// whichever is smaller), so the worker queue stays balanced.
+/// First output frame after the last screen segment, when an overlay-only tail
+/// follows it. `0` means the screen covers the whole plan.
+fn freeze_tail_start_frame(plan: &RenderPlan, fps: u64) -> u64 {
+    let last_screen_ms = plan
+        .segments
+        .iter()
+        .map(|segment| segment.output_end_ms)
+        .max()
+        .unwrap_or(0);
+    if last_screen_ms >= plan.duration_ms {
+        return 0;
+    }
+    last_screen_ms
+        .saturating_mul(fps)
+        .saturating_add(999)
+        .checked_div(1000)
+        .unwrap_or(0)
+}
+
+/// A freeze-frame tail can only be produced by a window that also decodes the
+/// last screen segment (the graph holds the final frame with `tpad=clone`).
+/// Pure-tail chunks have no segment, so they would paint the background.
+/// Merge the chunk holding the last screen frame with every later chunk.
+fn merge_freeze_tail_boundaries(
+    boundaries: Vec<(u64, u64)>,
+    freeze_start_frame: u64,
+    total_frames: u64,
+) -> Vec<(u64, u64)> {
+    if boundaries.len() < 2 || freeze_start_frame == 0 || freeze_start_frame >= total_frames {
+        return boundaries;
+    }
+    let last_screen_frame = freeze_start_frame.saturating_sub(1);
+    let Some(index) = boundaries
+        .iter()
+        .position(|(start, end)| *start <= last_screen_frame && last_screen_frame < *end)
+    else {
+        return boundaries;
+    };
+    let mut merged = boundaries[..=index].to_vec();
+    merged[index].1 = total_frames;
+    merged
+}
+
 fn chunk_boundaries_with_zoom(
     total_frames: u64,
     chunk_frames: u64,
@@ -4846,7 +4895,11 @@ fn render_timeline_chunked(
     } else {
         Vec::new()
     };
-    let boundaries = chunk_boundaries_with_zoom(total_frames, chunk_frames, fps, &zoom_edges);
+    let boundaries = merge_freeze_tail_boundaries(
+        chunk_boundaries_with_zoom(total_frames, chunk_frames, fps, &zoom_edges),
+        freeze_tail_start_frame(plan, fps),
+        total_frames,
+    );
     if boundaries.len() <= 1 {
         return render_composition_window(
             ffmpeg_path,
@@ -9830,6 +9883,39 @@ mod tests {
     }
 
     #[test]
+    fn freeze_tail_merges_pure_tail_chunks_into_the_last_screen_chunk() {
+        // 30 s at 30 fps, 2.5 s chunks; the screen ends at 3 s (frame 90).
+        let boundaries = merge_freeze_tail_boundaries(chunk_boundaries(900, 75), 90, 900);
+        assert_eq!(boundaries, vec![(0, 75), (75, 900)]);
+    }
+
+    #[test]
+    fn freeze_tail_boundary_on_an_exact_chunk_edge_extends_the_previous_chunk() {
+        // 3 s screen, 1 s chunks: frame 90 starts a pure-tail chunk, so the
+        // chunk ending at 90 must absorb it.
+        let boundaries = merge_freeze_tail_boundaries(chunk_boundaries(300, 30), 90, 300);
+        assert_eq!(boundaries, vec![(0, 30), (30, 60), (60, 300)]);
+    }
+
+    #[test]
+    fn freeze_tail_does_nothing_without_a_tail() {
+        let boundaries = chunk_boundaries(300, 75);
+        assert_eq!(
+            merge_freeze_tail_boundaries(boundaries.clone(), 0, 300),
+            boundaries
+        );
+    }
+
+    #[test]
+    fn freeze_tail_start_frame_tracks_the_last_segment_end() {
+        let mut plan = valid_plan();
+        plan.duration_ms = 6_000;
+        assert_eq!(freeze_tail_start_frame(&plan, 30), 90);
+        plan.duration_ms = 3_000;
+        assert_eq!(freeze_tail_start_frame(&plan, 30), 0);
+    }
+
+    #[test]
     fn composition_window_from_frames_maps_to_absolute_seconds() {
         let window = CompositionWindow::from_frames(180, 180, 30);
         assert_eq!(window.first_frame, 180);
@@ -10623,6 +10709,20 @@ mod tests {
         let mut invalid = valid_plan();
         invalid.gaps[0].end_ms = 2_500;
         assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn accepts_a_trailing_gap_for_an_overlay_end_card_tail() {
+        let mut plan = valid_plan();
+        // The compatibility graph holds the last screen frame across a
+        // trailing gap instead of painting the background, so the plan is
+        // valid even when overlays outlive the screen segments.
+        plan.duration_ms = 6_000;
+        plan.gaps.push(RenderPlanGap {
+            start_ms: 3_000,
+            end_ms: 6_000,
+        });
+        assert!(plan.validate().is_ok());
     }
 
     #[test]

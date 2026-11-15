@@ -217,9 +217,25 @@ pub(super) fn plan(
 
     // Pin the stream to the exact frame count, then normalise to NV12 for the
     // compositor. `trim=end_frame` is what keeps a GPU pass and the FFmpeg
-    // graph frame-for-frame equal.
+    // graph frame-for-frame equal. When an overlay-only tail follows the last
+    // screen segment, clone the final frame across it before the trim; a pure
+    // trailing gap is admitted by the GPU gate only for this case.
+    let screen_end_ms = plan
+        .segments
+        .iter()
+        .map(|segment| segment.output_end_ms)
+        .max()
+        .unwrap_or(0);
+    let hold = if window.end_ms() > screen_end_ms as f64 {
+        format!(
+            "tpad=stop_mode=clone:stop_duration={},",
+            fmt_secs(window.frame_count as f64 / fps.max(1) as f64)
+        )
+    } else {
+        String::new()
+    };
     filters.push(format!(
-        "{video_input}trim=end_frame={},setsar=1,format=nv12[vout]",
+        "{video_input}{hold}trim=end_frame={},setsar=1,format=nv12[vout]",
         window.frame_count
     ));
 

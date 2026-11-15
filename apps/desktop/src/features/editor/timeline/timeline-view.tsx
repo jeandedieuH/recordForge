@@ -2261,7 +2261,7 @@ export function TimelineView({
                 />
               ) : null}
 
-              {overlayRenderPlan ? (
+              {overlayRenderPlan && (overlayRenderPlan.items.length > 0 || drawMode) ? (
                 <>
                   <OverlayCanvas
                     renderPlan={overlayRenderPlan}
@@ -2274,16 +2274,26 @@ export function TimelineView({
                       const track = timeline.tracks.find(
                         (candidate) => candidate.kind === "annotations" && !candidate.locked,
                       )
-                      const ok = execute(createAddAnnotationClipCommand(clip, track?.id))
+                      // Drawing past the last screen frame is allowed; export
+                      // holds the final frame for overlay-only tails.
+                      const nextClip = clip
+                      const ok = execute(createAddAnnotationClipCommand(nextClip, track?.id))
                       if (ok) {
                         pause()
                         setSelection({
                           kind: "clip",
-                          clipIds: [clip.id],
-                          primaryClipId: clip.id,
+                          clipIds: [nextClip.id],
+                          primaryClipId: nextClip.id,
                         })
-                        seek(getAnnotationEditTime(clip))
+                        seek(getAnnotationEditTime(nextClip))
                         onFinishDrawing?.()
+                        if (track?.muted) {
+                          toast({
+                            title: "Annotation added to a muted track",
+                            description:
+                              "Unmute the Annotations track to see it in the preview and export.",
+                          })
+                        }
                       }
                     }}
                     className="z-35"

@@ -1,5 +1,10 @@
 import { useState } from "react"
-import { formatYouTubeChapters, getTotalDuration } from "@recordforge/editor-core"
+import type { TimelineState } from "@recordforge/contracts"
+import {
+  formatYouTubeChapters,
+  getScreenContentEndMs,
+  getTimelineContentEndMs,
+} from "@recordforge/editor-core"
 import { Bookmark, Check, Copy, FileOutput } from "lucide-react"
 import { Badge, Button, EmptyState } from "@recordforge/ui"
 import { useTimelineStore } from "../../../stores/timeline-store"
@@ -24,7 +29,10 @@ export function ExportPanel({ onOpenExport }: ExportPanelProps) {
   const openUpgradeDialog = useLicenseStore((state) => state.openUpgradeDialog)
   const [copiedTimestamps, setCopiedTimestamps] = useState(false)
 
-  const durationMs = timeline ? getTotalDuration(timeline) : 0
+  const screenEndMs = timeline ? getScreenContentEndMs(timeline) : 0
+  const durationMs = timeline ? getTimelineContentEndMs(timeline) : 0
+  const tailMs = Math.max(0, durationMs - screenEndMs)
+  const extendingOverlays = timeline ? countExtendingOverlays(timeline, screenEndMs) : 0
   const isExporting = activeExportJob?.status === "running" || activeExportJob?.status === "pending"
   const markerCount = timeline?.markers?.length ?? 0
 
@@ -150,6 +158,18 @@ export function ExportPanel({ onOpenExport }: ExportPanelProps) {
         </div>
       ) : null}
 
+      {extendingOverlays > 0 ? (
+        <div
+          className="rounded-lg border border-primary/30 bg-primary/10 p-3 text-[11px] text-foreground"
+          role="status"
+        >
+          <span>
+            {extendingOverlays} overlay{extendingOverlays === 1 ? "" : "s"} extend past the video.
+            Export holds the last frame for {formatDuration(tailMs)} so they remain visible.
+          </span>
+        </div>
+      ) : null}
+
       {activeExportJob ? (
         <div
           className="rounded-lg border border-primary/30 bg-primary/10 p-3 text-[11px] text-foreground"
@@ -197,4 +217,17 @@ function formatDuration(ms: number): string {
   const minutes = Math.floor(totalSeconds / 60)
   const seconds = totalSeconds % 60
   return `${minutes}:${seconds.toString().padStart(2, "0")}`
+}
+
+function countExtendingOverlays(timeline: TimelineState, screenEndMs: number): number {
+  let count = 0
+  for (const track of timeline.tracks) {
+    if (track.muted) continue
+    for (const clip of track.clips) {
+      if (clip.kind !== "annotation" && clip.kind !== "text" && clip.kind !== "image") continue
+      if (clip.enabled === false) continue
+      if (clip.startMs + clip.durationMs > screenEndMs) count += 1
+    }
+  }
+  return count
 }

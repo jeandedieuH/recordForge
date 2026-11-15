@@ -5,6 +5,7 @@ import type {
   ImageClip,
   MediaMetadata,
   TextClip,
+  TimelineState,
 } from "@recordforge/contracts"
 import {
   findClip,
@@ -78,6 +79,7 @@ export function InspectorShell({ metadata }: InspectorShellProps) {
     selectedZoom,
     metadata,
     onClear,
+    timeline?.canvas,
   )
 
   return (
@@ -110,6 +112,7 @@ function buildContent(
   selectedZoom: ReturnType<typeof getManualZoomSegments>[number] | null,
   metadata: MediaMetadata | null,
   onClear: () => void,
+  canvas?: TimelineState["canvas"],
 ): { title: string; canClear: boolean; content: ReactNode } {
   if (selectedMarker) {
     return {
@@ -214,6 +217,7 @@ function buildContent(
         content: (
           <AnnotationClipInspector
             clip={clip as AnnotationClip}
+            canvas={canvas}
             onChange={(update) => {
               const state = useTimelineStore.getState()
               state.execute(createUpdateAnnotationClipCommand(clip.id, update))

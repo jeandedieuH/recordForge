@@ -107,6 +107,9 @@ function createAnnotationDisplayItem(preset: AnnotationPreset): OverlayDisplayAn
     durationMs: 2_000,
     canvasWidth: THUMBNAIL_WIDTH,
     canvasHeight: THUMBNAIL_HEIGHT,
+    // Style previews intentionally stay legible instead of shrinking to the
+    // exact 1080p-relative size on a small thumbnail canvas.
+    scaleToCanvas: false,
   })
 
   return {

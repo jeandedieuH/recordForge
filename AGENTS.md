@@ -163,6 +163,22 @@ Export parity gate (GPU/compositor changes): generate both sides with the same e
 bun run tooling/benchmarks/parity.ts <refDir> <gpuDir> --suffix _gpu --profile renderer --skip-missing
 ```
 
+Overlay drag update benchmark (full scene rebuild vs in-place geometry patch):
+
+```bash
+bun run --cwd tooling/benchmarks benchmark:overlay-drag [items] [iterations]
+```
+
+Golden-frame export parity (checked-in PNGs of real exported frames, compared with PSNR/SSIM; see `docs/benchmarks/golden-frames.md`):
+
+```bash
+bun run --cwd tooling/benchmarks benchmark:golden:spec -- --long-tail --gpu                   # fixtures (compat + chunked tail + GPU)
+bun run --cwd tooling/benchmarks benchmark:golden out/golden/render_golden.mp4 golden/items          # verify
+bun run --cwd tooling/benchmarks benchmark:golden out/golden/render_golden.mp4 golden/items --update # refresh
+bun run --cwd tooling/benchmarks benchmark:golden out/golden/render_longtail.mp4 golden/long-tail --times 10000,18000
+bun run --cwd tooling/benchmarks benchmark:golden out/golden/render_gpu_golden.mp4 golden/items --min-psnr 28 --min-ssim 0.9
+```
+
 Stage timings land in `bench-*.log` + `bench-results-*.json` next to the specs; `RECORDFORGE_EXPORT_CHUNK_WORKERS`/`RECORDFORGE_EXPORT_CHUNK_FRAMES` env knobs control chunk parallelism/size during measurement, `RECORDFORGE_EXPORT_NVENC_CHUNK_WORKERS` caps NVENC passes, `RECORDFORGE_EXPORT_ZOOM_SNAP`/`RECORDFORGE_EXPORT_CORNER_PATCHES` opt into the Phase 1 zoom-snapping and rounded-corner fast paths, `RECORDFORGE_EXPORT_ZOOM_PIECES=0` restores the single-`zoompan` pass for A/B checks (piecewise zoom is on by default), and `RECORDFORGE_EXPORT_CURSOR_TILE=union|sendcmd|full` selects the Phase 2 cursor plate layout (default `union`; see `docs/benchmarks/phase-1-results.md` and `phase-2-results.md`). `renderer: "auto"` uses the Phase 5 native wgpu compositor by default (G5) and falls back to FFmpeg per plan, per runtime failure and after three consecutive GPU failures in one process; a plan that would bypass the compositor on every frame stays on the in-process FFmpeg pipeline. `RECORDFORGE_EXPORT_GPU=0` forces `auto` onto the compatibility renderer (and `--require-gpu` on `export-bench.ts` fails a run that asked for the GPU but silently rendered on FFmpeg). `RECORDFORGE_EXPORT_GPU_PLATE_WORKERS` overrides the plate-producer thread count (default `min(producer_worker_count, 4)`), `RECORDFORGE_EXPORT_GPU_PLATE_QUEUE` its per-worker frame queue (default 2), `RECORDFORGE_EXPORT_GPU_DECODE_HWACCEL=1` opts the GPU decode sidecar into hardware decode, `RECORDFORGE_EXPORT_GPU_CACHE=0` disables the process-wide device/pipeline cache, and `RECORDFORGE_EXPORT_GPU_DECODE_QUEUE`/`_ENCODE_QUEUE` override its 8/6 frame sidecar queues (ADR 018, `docs/benchmarks/phase-5-results.md`). `RECORDFORGE_EXPORT_GPU_CAMERA_QUEUE` sets each camera decoder's read-ahead depth (default 2 frames).
 
 Official desktop releases are published by `.github/workflows/release-desktop.yml` from `app-v*` tags. The workflow builds signed NSIS/MSI artifacts and uploads `latest.json` to the GitHub Release.

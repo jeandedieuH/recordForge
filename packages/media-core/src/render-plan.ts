@@ -28,6 +28,7 @@ import type {
 import {
   applyCaptionContinuity,
   buildFollowCursorMotionPlan,
+  getOverlayContentEndMs,
   resolveCameraShots,
   resolveCaptionLayout,
   resolveClipDesign,
@@ -319,7 +320,11 @@ function toCaptions(
   return captions
 }
 
-function toMasks(state: TimelineState, range: ExportRange | undefined): RenderPlanMask[] {
+function toMasks(
+  state: TimelineState,
+  range: ExportRange | undefined,
+  videoDurationMs: number,
+): RenderPlanMask[] {
   return state.tracks
     .filter((track) => track.kind === "effects" && !track.muted)
     .flatMap((track) =>
@@ -328,13 +333,17 @@ function toMasks(state: TimelineState, range: ExportRange | undefined): RenderPl
         .flatMap((clip) => {
           const window = windowTimeRange(clip.startMs, clip.startMs + clip.durationMs, range)
           if (!window) return []
+          // Masks composite over screen frames only; a freeze-frame overlay
+          // tail cannot carry them, so clamp exactly like captions.
+          const endMs = Math.min(window.endMs, videoDurationMs)
+          if (window.startMs >= endMs) return []
           const width = Math.min(Math.max(1, clip.rect.width), state.canvas.width)
           const height = Math.min(Math.max(1, clip.rect.height), state.canvas.height)
           return [
             {
               id: clip.id,
               startMs: window.startMs,
-              endMs: window.endMs,
+              endMs,
               mode: clip.mode,
               rect: {
                 x: Math.min(Math.max(0, clip.rect.x), Math.max(0, state.canvas.width - width)),
@@ -1084,7 +1093,18 @@ function buildAudioTracks(state: TimelineState, range: ExportRange | undefined):
  */
 function cleanTextDesign(design: TitleDesign | undefined): TitleDesign {
   const base = design ?? titleDesignSchema.parse({ version: 1, template: "clean-text" })
-  return { ...base, template: "clean-text" }
+  // Keep the shared look controls, but drop template-specific sizing and content
+  // (metric overrides, emphasis phrase, element sizes) that do not apply to the
+  // clean-text layout.
+  return titleDesignSchema.parse({
+    version: 1,
+    template: "clean-text",
+    appearance: base.appearance,
+    motion: base.motion,
+    tempo: base.tempo,
+    letterSpacing: base.letterSpacing,
+    lineHeight: base.lineHeight,
+  })
 }
 
 /**
@@ -1204,8 +1224,14 @@ export function buildRenderPlan(
     (duration, segment) => Math.max(duration, segment.outputEndMs),
     0,
   )
-  const durationMs = Math.round(range ? range.endMs - range.startMs : screenDurationMs)
-  const effectiveRange: ExportRange = range ?? { startMs: 0, endMs: screenDurationMs }
+  // Titles, annotations and images past the last screen frame are exported
+  // over a freeze-frame tail: the encoder pads the screen stream with its last
+  // frame (tpad=clone) while the overlay plane keeps animating.
+  const contentEndMs = range
+    ? screenDurationMs
+    : Math.max(screenDurationMs, getOverlayContentEndMs(state))
+  const durationMs = Math.round(range ? range.endMs - range.startMs : contentEndMs)
+  const effectiveRange: ExportRange = range ?? { startMs: 0, endMs: contentEndMs }
 
   const cameraTrack = state.tracks.find((track) => track.kind === "camera")
   const audioTracks = buildAudioTracks(state, effectiveRange)
@@ -1217,8 +1243,8 @@ export function buildRenderPlan(
     cursorEngine,
   })
   const cursorEffects = toCursorEffects(state, effectiveRange, input.assets)
-  const captions = toCaptions(state, effectiveRange, durationMs)
-  const masks = toMasks(state, effectiveRange)
+  const captions = toCaptions(state, effectiveRange, screenDurationMs)
+  const masks = toMasks(state, effectiveRange, screenDurationMs)
   const annotations = toAnnotations(state, effectiveRange)
   const texts = toTexts(state, effectiveRange)
   const images = toImages(state, effectiveRange)
@@ -1298,7 +1324,9 @@ export function buildRenderPlan(
       masks,
       zoomSegments,
       cursorEffects,
-      overlayRenderPlan,
+      // An empty plan would disable the GPU passthrough check without drawing
+      // anything, so only ship the unified overlay plane when it has items.
+      overlayRenderPlan: overlayRenderPlan.items.length > 0 ? overlayRenderPlan : undefined,
       annotations,
       texts,
       images,

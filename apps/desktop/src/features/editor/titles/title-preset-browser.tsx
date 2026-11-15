@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { getTitlePresetGroup, type TextClip, type TextPresetRecord } from "@recordforge/editor-core"
 import {
   AlertDialog,
@@ -63,6 +63,11 @@ export function TitlePresetBrowser({
   const openUpgradeDialog = useLicenseStore((state) => state.openUpgradeDialog)
   const [previewId, setPreviewId] = useState<string | undefined>(selectedPresetId)
   const [activePreviewId, setActivePreviewId] = useState<string | null>(null)
+  // Follow the selected timeline clip when it changes; an explicit card click
+  // inside the same clip still owns the preview until the next selection.
+  useEffect(() => {
+    setPreviewId(selectedPresetId)
+  }, [selectedPresetId])
   const [deleteTarget, setDeleteTarget] = useState<TextPresetRecord | null>(null)
   const [deleting, setDeleting] = useState(false)
   const [page, setPage] = useState(1)
@@ -77,7 +82,7 @@ export function TitlePresetBrowser({
     [snapshot, query, group, collection, recentIds],
   )
   const selected =
-    snapshot.presets.find((preset) => preset.id === (previewId ?? selectedPresetId)) ?? presets[0]
+    presets.find((preset) => preset.id === (previewId ?? selectedPresetId)) ?? presets[0]
   const displayed = presets.slice(0, page * 24)
 
   function clearFilters() {

@@ -8,11 +8,13 @@
 ## Context
 
 RecordForge supports a rich set of visual overlays:
+
 - **Vector annotations**: Rectangles, rounded-rectangles, circles, arrows, lines, callouts, spotlights, and badges.
 - **Titles and typography**: Categorized title styles and lower-thirds with custom typography, backdrops, and animations.
 - **External media**: Imported raster/vector graphics and images.
 
 Prior to this architecture, overlays suffered from significant parity and performance bottlenecks:
+
 1. **Divergent preview and export**: Preview was rendered via dynamic React DOM and SVG components, while export generated ad-hoc SVG strings per frame parsed by `resvg`. Font metrics, line breaks, easing curves, and coordinate spaces drifted.
 2. **Performance thrashing**: React re-rendered entire SVG DOM trees on every playhead tick (at 60 fps), producing main-thread latency and high garbage collection pressure.
 3. **Export overhead**: Parsing XML SVG strings on every exported video frame incurred substantial CPU penalties during FFmpeg encoding.
@@ -20,6 +22,7 @@ Prior to this architecture, overlays suffered from significant parity and perfor
 ## Decision
 
 Implement a **single canonical overlay evaluation crate** in Rust (`packages/overlay-engine`) with dual compilation targets:
+
 1. **WebAssembly (`wasm32-unknown-unknown`)**: Used in the React frontend via `@recordforge/overlay-core`. The engine evaluates time-windowed display lists and paints directly to an HTML5 Canvas, bypassing React component reconciliation during playback.
 2. **Native (`x86_64-pc-windows-msvc`)**: Linked directly by the Tauri backend (`apps/desktop/src-tauri`). The engine renders frames into a `tiny-skia` pixmap buffer that is piped as raw video frames to FFmpeg.
 
@@ -28,12 +31,13 @@ Implement a **single canonical overlay evaluation crate** in Rust (`packages/ove
 - **Unified Overlay Render Plan Contract**: A shared JSON specification (`OverlayRenderPlan`) containing all active annotation, text, and image items, their transforms (`OverlayTransform`), easing animations (`OverlayAnimation`), and visual styles.
 - **Retained Scene Graph**: `OverlayEngine::from_render_plan` parses and validates the plan once upon project or clip changes, building an indexed scene with pre-sorted layer groups and font/image caches.
 - **Pure Time-Based Evaluation**: `OverlayEngine::evaluate(time_ms)` is a pure, seek-safe function returning a sorted `DisplayList` based on absolute project timestamps.
+- **In-Place Geometry Updates**: `OverlayEngine::update_item_geometry` patches transforms and connector endpoints on the retained WASM scene. The preview diffs plans and uses this fast path for drag/resize gestures instead of rebuilding the scene per pointer frame; any style, timing, animation, item-set or z-order change still rebuilds through full validation.
 - **Shared Animation & Easing Table**: Easing curves (`linear`, `ease-in`, `ease-out`, `ease-in-out`, `expo-out`) and transition progress (fade, scale, slide, draw, typewriter) are evaluated mathematically with identical millisecond resolution across preview and export.
 - **Zero React DOM Overhead During Playback**: Playhead updates reach the overlay canvas via transient subscriptions (`usePlayheadMs`), keeping React rendering purely transactional (handling selection handles, bounding boxes, and drag gestures).
 
 ## Consequences
 
-- **Guaranteed Parity**: Identical geometry, stroke styles, shadows, backdrop blurs, and animation states between desktop canvas preview and final MP4 export.
+- **Guaranteed Parity (for the shared display list)**: Identical geometry, stroke styles, spotlight cutouts, arrow heads, connector and filled-shape shadows, backdrop styling, grapheme-level wrapping of unbroken words, and animation states between desktop canvas preview and final MP4 export. The `draw` intro is an opacity fade in both renderers (the UI no longer offers it for new clips and labels imported values "Fade (legacy draw)"); overlay-drag scene patching and legacy preset design-scale inference are covered by unit tests (see `editor-capability-matrix.md`).
 - **60 FPS Playback**: Frame evaluation takes < 0.3 ms per frame for 30+ simultaneous overlay items.
 - **Elimination of Per-Frame XML Parsing**: Native export uses direct rasterization via `tiny-skia`, reducing export overhead.
 - **Font & Asset Caching**: Image decoding and SVG rasterization are cached across seek ticks and frames.

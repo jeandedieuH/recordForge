@@ -1,5 +1,5 @@
 import type { TimelineClip, TimelineState } from "@recordforge/domain"
-import { findClip } from "@recordforge/domain"
+import { findClip, getTimelineContentEndMs } from "@recordforge/domain"
 import {
   findNextTimelineClip,
   findTimelineClipAt,
@@ -255,12 +255,9 @@ export function createPlaybackClock(
   }
 
   function stateDuration(): number {
-    const track = screenTrack(state)
-    if (!track) return 0
-    return track.clips.reduce(
-      (duration, clip) => Math.max(duration, clip.startMs + clip.durationMs),
-      0,
-    )
+    // Screen frames plus any freeze-frame overlay tail; the virtual clock keeps
+    // advancing past the last video frame so end cards preview correctly.
+    return getTimelineContentEndMs(state)
   }
 
   function advanceFrame(timelineMs: number, elapsedMs: number, userPlaybackRate = 1): number {

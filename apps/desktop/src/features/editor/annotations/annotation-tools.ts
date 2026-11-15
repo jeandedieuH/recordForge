@@ -9,6 +9,7 @@ import {
   calloutDefaultTarget,
   createAnnotationClipFromPreset,
   getAnnotationShapePreset,
+  scaleAnnotationPresetForCanvas,
   type AnnotationShapePreset,
 } from "@recordforge/editor-core"
 
@@ -30,13 +31,18 @@ export const DEFAULT_ANNOTATION_DRAW_SETTINGS: AnnotationDrawSettings = {
 
 export function annotationSettingsFromPreset(
   preset: AnnotationShapePreset,
+  canvasWidth?: number,
+  canvasHeight?: number,
 ): AnnotationDrawSettings {
+  // The picked preset's defaults are authored for 1080p; show and use their
+  // project-pixel equivalents so a 4K canvas does not produce hairline strokes.
+  const scaled = scaleAnnotationPresetForCanvas(preset, canvasWidth, canvasHeight)
   return {
     preset,
-    strokeColor: preset.defaultStrokeColor,
-    strokeWidth: preset.defaultStrokeWidth,
-    strokeStyle: preset.defaultStrokeStyle,
-    arrowStyle: preset.defaultArrowStyle ?? "straight",
+    strokeColor: scaled.defaultStrokeColor,
+    strokeWidth: scaled.defaultStrokeWidth,
+    strokeStyle: scaled.defaultStrokeStyle,
+    arrowStyle: scaled.defaultArrowStyle ?? "straight",
   }
 }
 
@@ -51,8 +57,9 @@ export function createAnnotationFromTool({
   canvasWidth: number
   canvasHeight: number
 }): AnnotationClip {
-  const width = Math.min(settings.preset.defaultWidth, canvasWidth)
-  const height = Math.min(settings.preset.defaultHeight, canvasHeight)
+  const scaledPreset = scaleAnnotationPresetForCanvas(settings.preset, canvasWidth, canvasHeight)
+  const width = Math.min(scaledPreset.defaultWidth, canvasWidth)
+  const height = Math.min(scaledPreset.defaultHeight, canvasHeight)
   return {
     ...createAnnotationClipFromPreset(settings.preset, {
       startMs: Math.round(startMs),
@@ -74,11 +81,18 @@ export function createAnnotationFromTool({
 export function applyAnnotationToolToClip({
   clip,
   settings,
+  canvasWidth,
+  canvasHeight,
 }: {
   clip: AnnotationClip
   settings: AnnotationDrawSettings
+  canvasWidth?: number
+  canvasHeight?: number
 }): AnnotationClip {
-  const updated = applyPresetToAnnotationClip(clip, settings.preset)
+  const updated = applyPresetToAnnotationClip(clip, settings.preset, {
+    canvasWidth,
+    canvasHeight,
+  })
   const isLine = updated.annotationType === "arrow" || updated.annotationType === "line"
   const isCallout = updated.annotationType === "callout"
   const wasLine = clip.annotationType === "arrow" || clip.annotationType === "line"

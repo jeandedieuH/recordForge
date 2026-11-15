@@ -69,10 +69,91 @@ export interface AnnotationShapePreset {
   anchorY?: number
   zIndex?: number
   opacity?: number
+  /**
+   * Canvas scale the preset's absolute geometry was authored at (1 = 1080p).
+   * Custom presets saved from 1440p/4K clips use this to avoid double scaling.
+   */
+  designScale?: number
 }
 
 export type AnnotationPresetValues = Omit<AnnotationShapePreset, "name" | "description">
 export type AnnotationPresetRecord = PresetDefinition<AnnotationPresetValues>
+
+/** Annotation presets are authored against the same 1920x1080 design canvas as titles. */
+export const ANNOTATION_DESIGN_CANVAS_WIDTH = 1920
+export const ANNOTATION_DESIGN_CANVAS_HEIGHT = 1080
+
+/**
+ * Uniform design scale for a project canvas. Using the short-edge ratio keeps
+ * a preset's relative size identical on 4K, 1440p, 1080p and portrait canvases.
+ */
+export function annotationCanvasScale(
+  canvasWidth: number = ANNOTATION_DESIGN_CANVAS_WIDTH,
+  canvasHeight: number = ANNOTATION_DESIGN_CANVAS_HEIGHT,
+): number {
+  const width = Math.max(1, canvasWidth)
+  const height = Math.max(1, canvasHeight)
+  return Math.min(width / ANNOTATION_DESIGN_CANVAS_WIDTH, height / ANNOTATION_DESIGN_CANVAS_HEIGHT)
+}
+
+function clampNumber(value: number, minimum: number, maximum: number): number {
+  return Math.min(maximum, Math.max(minimum, value))
+}
+
+function snapLegacyDesignScale(ratio: number): number {
+  if (!Number.isFinite(ratio) || ratio < 0.9) return 1
+  return Math.min(4, Math.max(1, Math.round(ratio * 4) / 4))
+}
+
+/**
+ * One-time migration for custom presets saved before `designScale` existed.
+ * The original canvas is not recorded, so infer it from the built-in preset's
+ * 1080p authored box (an unmodified preset saved at 4K yields ~2x). The
+ * inferred value is persisted by the registry so reusing the preset no longer
+ * compounds the scale.
+ */
+export function migrateAnnotationPresetDesignScale(
+  preset: AnnotationPresetValues,
+  presetId: string,
+): AnnotationPresetValues {
+  if (preset.designScale && preset.designScale > 0) return preset
+  const isLegacyCustom =
+    presetId.startsWith("custom-") || (preset.presetId?.startsWith("custom-") ?? false)
+  if (!isLegacyCustom) return preset
+  const basis = getAnnotationShapePreset(preset.type)
+  const ratio = Math.max(
+    preset.defaultWidth / Math.max(1, basis.defaultWidth),
+    preset.defaultHeight / Math.max(1, basis.defaultHeight),
+    (preset.fontSize ?? 16) / Math.max(1, basis.fontSize ?? 16),
+  )
+  const designScale = snapLegacyDesignScale(ratio)
+  return designScale > 1 ? { ...preset, designScale } : preset
+}
+
+/**
+ * Scale a preset's authored geometry, stroke width, and typography to the
+ * project canvas. Explicit user values (a drawn width, an edited stroke) are
+ * project pixels and must not pass through this helper.
+ */
+export function scaleAnnotationPresetForCanvas(
+  preset: AnnotationShapePreset,
+  canvasWidth?: number,
+  canvasHeight?: number,
+): AnnotationShapePreset {
+  const targetScale = annotationCanvasScale(canvasWidth, canvasHeight)
+  const sourceScale = preset.designScale && preset.designScale > 0 ? preset.designScale : 1
+  const scale = targetScale / sourceScale
+  if (Math.abs(scale - 1) < 1e-6) return preset
+  return {
+    ...preset,
+    defaultWidth: Math.max(1, preset.defaultWidth * scale),
+    defaultHeight: Math.max(1, preset.defaultHeight * scale),
+    defaultStrokeWidth: clampNumber(preset.defaultStrokeWidth * scale, 0, 64),
+    defaultCornerRadius: clampNumber(preset.defaultCornerRadius * scale, 0, 100),
+    fontSize: clampNumber((preset.fontSize ?? 16) * scale, 8, 120),
+    shadowBlur: clampNumber((preset.shadowBlur ?? 10) * scale, 0, 100),
+  }
+}
 
 export const annotationPresetValuesSchema = z.object({
   presetId: z.string().optional(),
@@ -102,6 +183,7 @@ export const annotationPresetValuesSchema = z.object({
   anchorY: z.number().min(0).max(1).optional(),
   zIndex: z.number().int().optional(),
   opacity: z.number().min(0).max(1).optional(),
+  designScale: z.number().positive().max(16).optional(),
 })
 
 export const ANNOTATION_PRESET_CATALOG: PresetCatalog<AnnotationPresetValues> = parsePresetCatalog(
@@ -200,29 +282,49 @@ export function createAnnotationClipFromPreset(
     text?: string
     canvasWidth?: number
     canvasHeight?: number
+    /**
+     * Scale preset-authored values to the canvas. Thumbnails deliberately opt
+     * out so a small style preview stays legible instead of shrinking to the
+     * exact 1080p-relative size.
+     */
+    scaleToCanvas?: boolean
   },
 ): AnnotationClip {
   const id = options?.id ?? `annot-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
   const startMs = options?.startMs ?? 0
   const durationMs = options?.durationMs ?? 3000
-  const canvasWidth = options?.canvasWidth ?? 1920
-  const canvasHeight = options?.canvasHeight ?? 1080
-  const width = options?.width ?? preset.defaultWidth
-  const height = options?.height ?? preset.defaultHeight
+  const canvasWidth = options?.canvasWidth ?? ANNOTATION_DESIGN_CANVAS_WIDTH
+  const canvasHeight = options?.canvasHeight ?? ANNOTATION_DESIGN_CANVAS_HEIGHT
+  let scaled = preset
+  if (options?.scaleToCanvas === false) {
+    // Style thumbnails stay at their design size, but custom presets saved
+    // from a high-resolution canvas are still normalized to 1080p units.
+    if (preset.designScale) {
+      scaled = scaleAnnotationPresetForCanvas(
+        preset,
+        ANNOTATION_DESIGN_CANVAS_WIDTH,
+        ANNOTATION_DESIGN_CANVAS_HEIGHT,
+      )
+    }
+  } else {
+    scaled = scaleAnnotationPresetForCanvas(preset, canvasWidth, canvasHeight)
+  }
+  const width = options?.width ?? scaled.defaultWidth
+  const height = options?.height ?? scaled.defaultHeight
   const x = options?.x ?? Math.max(40, Math.round((canvasWidth - width) / 2))
   const y = options?.y ?? Math.max(40, Math.round((canvasHeight - height) / 2))
-  const animationIn = preset.animationIn ?? "fade"
-  const animationOut = preset.animationOut ?? "fade"
-  const isLine = preset.type === "arrow" || preset.type === "line"
+  const animationIn = scaled.animationIn ?? "fade"
+  const animationOut = scaled.animationOut ?? "fade"
+  const isLine = scaled.type === "arrow" || scaled.type === "line"
   const calloutTarget =
-    preset.type === "callout" ? calloutDefaultTarget(x, y, width, height) : undefined
+    scaled.type === "callout" ? calloutDefaultTarget(x, y, width, height) : undefined
 
   return {
     id,
     assetId: `synthetic:annotation:${id}`,
     kind: "annotation",
-    annotationType: preset.type,
-    presetId: preset.presetId ?? "",
+    annotationType: scaled.type,
+    presetId: scaled.presetId ?? "",
     startMs,
     durationMs,
     sourceInMs: 0,
@@ -232,37 +334,37 @@ export function createAnnotationClipFromPreset(
     y,
     width,
     height,
-    rotation: preset.rotation ?? 0,
-    anchorX: preset.anchorX ?? 0.5,
-    anchorY: preset.anchorY ?? 0.5,
-    zIndex: preset.zIndex ?? 0,
-    opacity: preset.opacity ?? 1,
+    rotation: scaled.rotation ?? 0,
+    anchorX: scaled.anchorX ?? 0.5,
+    anchorY: scaled.anchorY ?? 0.5,
+    zIndex: scaled.zIndex ?? 0,
+    opacity: scaled.opacity ?? 1,
     endX: options?.endX ?? (isLine ? x + width : calloutTarget?.x),
     endY: options?.endY ?? (isLine ? y + height : calloutTarget?.y),
-    strokeColor: options?.strokeColor ?? preset.defaultStrokeColor,
-    strokeWidth: options?.strokeWidth ?? preset.defaultStrokeWidth,
-    strokeStyle: preset.defaultStrokeStyle,
-    fillColor: preset.defaultFillColor,
-    fillOpacity: preset.defaultFillOpacity,
-    cornerRadius: preset.defaultCornerRadius,
-    arrowStartHead: preset.defaultArrowStartHead,
-    arrowEndHead: preset.defaultArrowEndHead,
-    arrowStyle: options?.arrowStyle ?? preset.defaultArrowStyle ?? "straight",
-    shadowEnabled: preset.shadowEnabled ?? true,
-    shadowColor: preset.shadowColor ?? "rgba(0, 0, 0, 0.5)",
-    shadowBlur: preset.shadowBlur ?? 10,
+    strokeColor: options?.strokeColor ?? scaled.defaultStrokeColor,
+    strokeWidth: options?.strokeWidth ?? scaled.defaultStrokeWidth,
+    strokeStyle: scaled.defaultStrokeStyle,
+    fillColor: scaled.defaultFillColor,
+    fillOpacity: scaled.defaultFillOpacity,
+    cornerRadius: scaled.defaultCornerRadius,
+    arrowStartHead: scaled.defaultArrowStartHead,
+    arrowEndHead: scaled.defaultArrowEndHead,
+    arrowStyle: options?.arrowStyle ?? scaled.defaultArrowStyle ?? "straight",
+    shadowEnabled: scaled.shadowEnabled ?? true,
+    shadowColor: scaled.shadowColor ?? "rgba(0, 0, 0, 0.5)",
+    shadowBlur: scaled.shadowBlur ?? 10,
     text:
-      options?.text ?? preset.text ?? (preset.type === "callout" ? "Add note here..." : undefined),
-    textColor: preset.textColor ?? "#ffffff",
-    fontSize: preset.fontSize ?? 16,
+      options?.text ?? scaled.text ?? (scaled.type === "callout" ? "Add note here..." : undefined),
+    textColor: scaled.textColor ?? "#ffffff",
+    fontSize: scaled.fontSize ?? 16,
     animationIn,
     animationOut,
     overlayAnimation: {
-      inType: preset.overlayAnimation?.inType ?? animationIn,
-      outType: preset.overlayAnimation?.outType ?? toOverlayAnimationOut(animationOut),
-      inDurationMs: preset.overlayAnimation?.inDurationMs ?? 350,
-      outDurationMs: preset.overlayAnimation?.outDurationMs ?? 350,
-      easing: preset.overlayAnimation?.easing ?? "expo-out",
+      inType: scaled.overlayAnimation?.inType ?? animationIn,
+      outType: scaled.overlayAnimation?.outType ?? toOverlayAnimationOut(animationOut),
+      inDurationMs: scaled.overlayAnimation?.inDurationMs ?? 350,
+      outDurationMs: scaled.overlayAnimation?.outDurationMs ?? 350,
+      easing: scaled.overlayAnimation?.easing ?? "expo-out",
     },
     enabled: true,
     locked: false,
@@ -272,10 +374,12 @@ export function createAnnotationClipFromPreset(
 export function applyPresetToAnnotationClip(
   clip: AnnotationClip,
   preset: AnnotationShapePreset | AnnotationPresetRecord,
+  options?: { canvasWidth?: number; canvasHeight?: number },
 ): AnnotationClip {
-  const shape = "definition" in preset ? annotationPresetToShapePreset(preset) : preset
-  const nextWidth = shape.defaultWidth
-  const nextHeight = shape.defaultHeight
+  const source = "definition" in preset ? annotationPresetToShapePreset(preset) : preset
+  const shape = scaleAnnotationPresetForCanvas(source, options?.canvasWidth, options?.canvasHeight)
+  const nextWidth = Math.min(shape.defaultWidth, options?.canvasWidth ?? shape.defaultWidth)
+  const nextHeight = Math.min(shape.defaultHeight, options?.canvasHeight ?? shape.defaultHeight)
   const isLine = shape.type === "arrow" || shape.type === "line"
   const isCallout = shape.type === "callout"
   const calloutTarget = isCallout
@@ -322,7 +426,13 @@ export function applyPresetToAnnotationClip(
 
 export function annotationPresetFromClip(
   clip: AnnotationClip,
-  metadata: { name: string; description: string; category?: string; tags?: string[] },
+  metadata: {
+    name: string
+    description: string
+    category?: string
+    tags?: string[]
+    designScale?: number
+  },
 ): AnnotationPresetRecord {
   const id = `custom-${clip.id}`
   return {
@@ -359,11 +469,14 @@ export function annotationPresetFromClip(
       anchorY: clip.anchorY,
       zIndex: clip.zIndex,
       opacity: clip.opacity,
+      ...(metadata.designScale && metadata.designScale > 0
+        ? { designScale: metadata.designScale }
+        : {}),
     },
   }
 }
 
-function annotationCategoryForType(type: AnnotationType): string {
+export function annotationCategoryForType(type: AnnotationType): string {
   if (type === "rectangle" || type === "rounded-rect") return "frame"
   if (type === "circle") return "highlight"
   if (type === "arrow" || type === "line") return "pointer"

@@ -127,13 +127,21 @@ export class PresetRegistry<T> {
   private loaded = false
   private snapshot: PresetRegistrySnapshot<T>
 
+  private readonly migrateDefinition?: (definition: T, presetId: string) => T
+
   constructor(
     catalog: PresetCatalog<T>,
-    options: { definitionSchema?: PresetDefinitionSchema<T>; storage?: PresetStorage<T> } = {},
+    options: {
+      definitionSchema?: PresetDefinitionSchema<T>
+      storage?: PresetStorage<T>
+      /** Optional one-time migration applied to stored custom presets on load. */
+      migrateDefinition?: (definition: T, presetId: string) => T
+    } = {},
   ) {
     this.builtinCatalog = parsePresetCatalog(catalog, options.definitionSchema)
     this.definitionSchema = options.definitionSchema
     this.storage = options.storage
+    this.migrateDefinition = options.migrateDefinition
     this.snapshot = this.createSnapshot()
   }
 
@@ -221,10 +229,16 @@ export class PresetRegistry<T> {
 
     this.loadPromise = (async () => {
       const stored = this.storage ? await this.storage.load() : null
+      let migrated = false
       if (stored) {
         for (const rawPreset of stored.presets) {
           const preset = parseStoredPreset(rawPreset, this.definitionSchema)
           if (!preset || this.hasBuiltInId(preset.id)) continue
+          const definition = this.migrateDefinition?.(preset.definition, preset.id)
+          if (definition !== undefined && definition !== preset.definition) {
+            preset.definition = definition
+            migrated = true
+          }
           this.customPresets.set(preset.id, preset)
         }
 
@@ -235,6 +249,9 @@ export class PresetRegistry<T> {
       }
       this.loaded = true
       this.refreshSnapshot()
+      // Persist the normalized definitions so a legacy preset is inferred once,
+      // not on every app launch. Failures surface through the caller's load error.
+      if (migrated) await this.persist()
     })()
 
     try {

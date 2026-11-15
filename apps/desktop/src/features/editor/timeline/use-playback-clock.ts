@@ -4,6 +4,7 @@ import {
   buildPreviewSegments,
   classifyPreviewFrame,
   createPlaybackClock,
+  getTimelineContentEndMs,
   nextPreviewSegment,
   previewSegmentAt,
   previewSegmentSourceMs,
@@ -14,6 +15,7 @@ import {
 import { useTimelineStore } from "../../../stores/timeline-store"
 import { getPlayheadSnapshot, subscribeToPlayhead } from "./use-playback-state"
 import { planCutTransition, planSegmentFrameTick } from "./playback/cut-transition"
+import { resolveFreezeTailFrame } from "./playback/freeze-tail"
 
 type ScreenSlot = 0 | 1
 type SlotRefs = [React.RefObject<HTMLVideoElement | null>, React.RefObject<HTMLVideoElement | null>]
@@ -73,6 +75,12 @@ export function usePlaybackClock({
     if (!track) return []
     return buildPreviewSegments(track.clips, () => mediaUrl ?? "")
   }, [timeline, mediaUrl])
+
+  // End of the freeze-frame tail: overlays past the last screen frame keep the
+  // preview clock running with the video parked on its final frame.
+  const contentEndMs = useMemo(() => (timeline ? getTimelineContentEndMs(timeline) : 0), [timeline])
+  const contentEndRef = useRef(contentEndMs)
+  contentEndRef.current = contentEndMs
 
   const [isReady, setIsReady] = useState(false)
   const [isSeeking, setIsSeeking] = useState(false)
@@ -345,11 +353,14 @@ export function usePlaybackClock({
       switch (plan.kind) {
         case "end": {
           pendingCutRef.current = null
+          // Park the video on its final frame. If an overlay tail follows, the
+          // virtual gap clock keeps the playhead running over that still frame
+          // instead of stopping playback at the last screen frame.
           active?.pause()
           slotSegmentsRef.current[activeSlotRef.current] = index
           driveTo(segment.endMs)
           preRollStandby(segment.endMs)
-          onPauseRef.current?.()
+          if (contentEndRef.current <= segment.endMs) onPauseRef.current?.()
           return true
         }
         case "gap": {
@@ -409,6 +420,23 @@ export function usePlaybackClock({
     }
     const index = previewSegmentAt(segments, playheadRef.current)
     if (index < 0) {
+      const tail = resolveFreezeTailFrame(playheadRef.current, segments, contentEndRef.current)
+      if (tail) {
+        // Freeze-frame tail: keep the last picture on screen while overlays
+        // continue over it. The virtual clock owns the playhead here.
+        video.pause()
+        video.style.visibility = "visible"
+        const tailSourceSeconds = tail.sourceMs / 1000
+        if (!video.seeking && Math.abs(video.currentTime - tailSourceSeconds) > 0.05) {
+          video.currentTime = tailSourceSeconds
+        }
+        if (isSeekingRef.current && !pendingCutRef.current) {
+          isSeekingRef.current = false
+          setIsSeeking(false)
+        }
+        preRollStandby(playheadRef.current)
+        return
+      }
       video.pause()
       video.style.visibility = "hidden"
       if (isSeekingRef.current && !pendingCutRef.current) {
@@ -703,11 +731,21 @@ export function usePlaybackClock({
           playbackRateRef.current,
         )
         if (!position) {
+          const end = contentEndRef.current
+          if (drivenPlayheadRef.current >= end) {
+            onPauseRef.current?.()
+            return
+          }
           const next = clock.advanceFrame(
             drivenPlayheadRef.current,
             elapsed,
             playbackRateRef.current,
           )
+          if (next >= end) {
+            if (next !== drivenPlayheadRef.current) driveTo(end)
+            onPauseRef.current?.()
+            return
+          }
           if (next !== drivenPlayheadRef.current) {
             driveTo(next)
           }

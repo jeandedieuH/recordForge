@@ -98,6 +98,33 @@ describe("overlay WASM adapter", () => {
     })
   })
 
+  it("patches retained item geometry without rebuilding the scene", () => {
+    const wasm = new WasmOverlayEngine(JSON.stringify(phase2Plan))
+    wasm.update_geometry(
+      JSON.stringify([
+        {
+          id: "first",
+          transform: {
+            x: 240,
+            y: 120,
+            width: 200,
+            height: 100,
+            rotation: 0,
+            anchorX: 0.5,
+            anchorY: 0.5,
+            zIndex: 4,
+            opacity: 1,
+          },
+        },
+      ]),
+    )
+    const displayList = overlayDisplayListSchema.parse(JSON.parse(wasm.evaluate(50)))
+    wasm.free()
+    // The slide-up animation still contributes its 50px y offset; the patched
+    // x is the proof that the retained item, not a rebuilt plan, was updated.
+    expect(displayList.items[0]).toMatchObject({ transform: { x: 240, y: 170 } })
+  })
+
   it("keeps browser-only initialization out of the node test environment", async () => {
     await expect(createOverlayWasmEngine(emptyPlan)).rejects.toThrow(
       "WASM overlay engine is only available in the browser",

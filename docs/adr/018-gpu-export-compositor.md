@@ -97,7 +97,7 @@ A successful GPU render resets the failure counter; an explicit `gpu` request
 still tries (the user asked for it).
 
 `gpu::plan_limitations` is the single source of truth for what the compositor
-supports. Anything outside it keeps the FFmpeg renderer: timeline gaps and
+supports. Anything outside it keeps the FFmpeg renderer: mid-timeline gaps and
 coverage holes, mixed or unknown source dimensions, animated containers
 (GIF/WebP), canvases that are not a 4×2 NV12 grid, and the one stack-order pair
 the hybrid cannot express (keystroke badges must sit above burned-in captions,
@@ -108,10 +108,24 @@ scale), `avgblur`'s radius semantics and the final bilinear upscale in
 dedicated GPU passes, so they are in scope too. Canvas framing, letterboxed
 fits, zoom, cursor/items, camera and side-by-side, privacy masks
 (redact/pixelate/blur), keystrokes, burned-in captions, chapters, HEVC, the
-license output cap, and selected-range plans are in scope. Explicit `gpu`
+license output cap, and selected-range plans are in scope. A trailing
+overlay-only gap is also in scope: the decode pass clones the final screen frame
+across it (`tpad=stop_mode=clone`) before the frame-count trim, so end cards
+stay on the GPU rather than falling back for a held frame. Explicit `gpu`
 requests that fall outside the gate render on FFmpeg with the reason logged —
 failing an export over a renderer preference would be worse than rendering it
 on the path that works.
+
+Mid-timeline gaps stay out of the GPU gate: they reveal the canvas background
+(for example an image or gradient), which the decode pass cannot synthesise
+without a per-frame "no screen layer" signal. Holding the previous frame there
+would be wrong, and generating background-coloured gap frames would not honour
+image/gradient backgrounds or layer order. A trailing overlay-only gap is
+different — there is nothing to reveal _after_ the last frame, so holding is
+both correct and simple. If very long end-card tails become common, a generated
+still-frame source per pure-tail chunk can restore chunk parallelism; the
+current merge into the last screen chunk is preferred while tails stay short
+because it needs no extra input, cache or platform-specific image handling.
 
 Runtime failures (no qualifying adapter, device loss, sidecar failure) also
 fall back once to the compatibility renderer, mirroring the existing
@@ -136,14 +150,14 @@ slower software path.
 
 ### Milestones
 
-| Gate | Scope |
-|---|---|
-| G0 | Passthrough + zoom at canvas size (implemented) |
-| G1 | Background plate, canvas frame/corners/shadow, cursor tile, overlay items (implemented) |
-| G2 | Camera mask/border/shadow, privacy masks, keystrokes, side-by-side (implemented) |
-| G3 | Captions (libass burn-in in the encode sidecar), chapters, HEVC, output cap, selected range (implemented) |
-| G4 | Parity suite across the ablation matrix; ships behind the setting (implemented) |
-| G5 | `auto` turns GPU on by default once parity and failure gates hold (implemented) |
+| Gate | Scope                                                                                                     |
+| ---- | --------------------------------------------------------------------------------------------------------- |
+| G0   | Passthrough + zoom at canvas size (implemented)                                                           |
+| G1   | Background plate, canvas frame/corners/shadow, cursor tile, overlay items (implemented)                   |
+| G2   | Camera mask/border/shadow, privacy masks, keystrokes, side-by-side (implemented)                          |
+| G3   | Captions (libass burn-in in the encode sidecar), chapters, HEVC, output cap, selected range (implemented) |
+| G4   | Parity suite across the ablation matrix; ships behind the setting (implemented)                           |
+| G5   | `auto` turns GPU on by default once parity and failure gates hold (implemented)                           |
 
 G4 ran the full 14-spec matrix (11 ablations — plain, padding, radius, shadow,
 zoom, cursor, items, masks, keystrokes, captions, camera — plus the all-features
@@ -153,7 +167,7 @@ frame counts and audio, and both fallback rows are bit-identical. G5 then flippe
 `auto`, added the three-strike failure gate and the passthrough-only guard.
 Evidence: `docs/benchmarks/phase-5-results.md`.
 
-G0 closed its parity question in favour of a *methodology* fix rather than a
+G0 closed its parity question in favour of a _methodology_ fix rather than a
 pixel fix: the renderer's encode input is bit-exact, and the residual gap is the
 resampler kernel. Two real shader bugs were found while proving it (RGB→YUV
 chroma matrix, half-width chroma packing) plus a one-texel bicubic tap offset;

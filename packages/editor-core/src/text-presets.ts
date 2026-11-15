@@ -74,6 +74,11 @@ export interface TextPresetDefinition {
   anchorY?: number
   zIndex?: number
   opacity?: number
+  /**
+   * Canvas scale the preset's absolute geometry was authored at (1 = 1080p).
+   * Custom presets saved from 1440p/4K clips use this to avoid double scaling.
+   */
+  designScale?: number
 }
 
 export type TextPresetValues = Omit<
@@ -116,6 +121,7 @@ export const textPresetValuesSchema = z.object({
   anchorY: z.number().min(0).max(1).optional(),
   zIndex: z.number().int().optional(),
   opacity: z.number().min(0).max(1).optional(),
+  designScale: z.number().positive().max(16).optional(),
 })
 
 export const LEGACY_TEXT_PRESET_CATALOG: PresetCatalog<TextPresetValues> = parsePresetCatalog(
@@ -188,6 +194,89 @@ function scaleTitleFontSizes(
   }
 }
 
+/** Uniform design scale for a project canvas (1 = 1920x1080). */
+export function titleCanvasDesignScale(canvasWidth: number, canvasHeight: number): number {
+  return Math.min(canvasWidth / 1920, canvasHeight / 1080)
+}
+
+function snapLegacyDesignScale(ratio: number): number {
+  if (!Number.isFinite(ratio) || ratio < 0.9) return 1
+  return Math.min(4, Math.max(1, Math.round(ratio * 4) / 4))
+}
+
+/**
+ * One-time migration for custom presets saved before `designScale` existed.
+ * Their geometry is in the canvas pixels of the source clip, so a 4K preset
+ * would otherwise be scaled by 2 again on every reuse. The source canvas is
+ * unknowable from the preset alone; infer it from the template's 1080p design
+ * box (unmodified preset geometry gives an exact 2x/1.5x signal) and persist
+ * the result so the inference never compounds.
+ */
+export function migrateTextPresetDesignScale(
+  preset: TextPresetValues,
+  presetId: string,
+): TextPresetValues {
+  if (preset.designScale && preset.designScale > 0) return preset
+  if (!presetId.startsWith("custom-") || !preset.titleDesign) return preset
+  const template = preset.titleDesign.template
+  const basis = TEXT_PRESET_CATALOG.presets.find(
+    (candidate) => candidate.definition.titleDesign?.template === template,
+  )
+  if (!basis) return preset
+  const ratio = Math.max(
+    preset.width / Math.max(1, basis.definition.width),
+    preset.height / Math.max(1, basis.definition.height),
+  )
+  const designScale = snapLegacyDesignScale(ratio)
+  return designScale > 1 ? { ...preset, designScale } : preset
+}
+
+/**
+ * Scale a designed title preset to a project canvas. Legacy presets retain
+ * their authored pixel geometry; only versioned templates opt into scaling.
+ */
+export function scaleTextPresetForCanvas(
+  preset: TextPresetDefinition,
+  canvasWidth: number,
+  canvasHeight: number,
+): TextPresetDefinition {
+  if (!preset.titleDesign) return preset
+  const basisScale = titleCanvasDesignScale(canvasWidth, canvasHeight)
+  const sourceScale = preset.designScale && preset.designScale > 0 ? preset.designScale : 1
+  // Compare the available canvas against the preset's design-space box so a
+  // custom preset saved from a high-resolution canvas is not fitted twice.
+  const baseWidth = preset.width / sourceScale
+  const baseHeight = preset.height / sourceScale
+  const margin = 80 * basisScale
+  const targetScale = Math.min(
+    basisScale,
+    (canvasWidth - margin * 2) / baseWidth,
+    (canvasHeight - margin * 2) / baseHeight,
+  )
+  return scaleTextPresetValues(preset, targetScale / sourceScale)
+}
+
+function scaleTextPresetValues(preset: TextPresetDefinition, scale: number): TextPresetDefinition {
+  if (!Number.isFinite(scale) || Math.abs(scale - 1) < 1e-6) return preset
+  return {
+    ...preset,
+    width: preset.width * scale,
+    height: preset.height * scale,
+    fontSize: Math.min(200, Math.max(8, preset.fontSize * scale)),
+    backdropBlur: Math.min(64, preset.backdropBlur * scale),
+    backdropBorderRadius: Math.min(100, preset.backdropBorderRadius * scale),
+    backdropPaddingX: Math.min(200, preset.backdropPaddingX * scale),
+    backdropPaddingY: Math.min(200, preset.backdropPaddingY * scale),
+    shadowBlur: Math.min(100, preset.shadowBlur * scale),
+    titleDesign: preset.titleDesign
+      ? {
+          ...preset.titleDesign,
+          fontSizes: scaleTitleFontSizes(preset.titleDesign.fontSizes, scale),
+        }
+      : undefined,
+  }
+}
+
 export function createTextClipFromDefinition(
   preset: TextPresetDefinition,
   options?: {
@@ -203,19 +292,15 @@ export function createTextClipFromDefinition(
   const durationMs = options?.durationMs ?? 4000
   const canvasWidth = options?.canvasWidth ?? 1920
   const canvasHeight = options?.canvasHeight ?? 1080
-  const titleDesign = preset.titleDesign ? titleDesignSchema.parse(preset.titleDesign) : undefined
+  const scaledPreset = scaleTextPresetForCanvas(preset, canvasWidth, canvasHeight)
+  const titleDesign = scaledPreset.titleDesign
+    ? titleDesignSchema.parse(scaledPreset.titleDesign)
+    : undefined
   // Legacy clips retain their original pixel geometry and category-based placement.
   const basisScale = titleDesign ? Math.min(canvasWidth / 1920, canvasHeight / 1080) : 1
   const margin = 80 * basisScale
-  const scale = titleDesign
-    ? Math.min(
-        basisScale,
-        (canvasWidth - margin * 2) / preset.width,
-        (canvasHeight - margin * 2) / preset.height,
-      )
-    : 1
-  const width = preset.width * scale
-  const height = preset.height * scale
+  const width = scaledPreset.width
+  const height = scaledPreset.height
 
   let x = Math.round((canvasWidth - width) / 2)
   let y = Math.round((canvasHeight - height) / 2)
@@ -238,31 +323,32 @@ export function createTextClipFromDefinition(
     y = Math.min(Math.max(margin, y), canvasHeight - height - margin)
   } else if (preset.category === "lower-third") {
     x = 80
-    y = canvasHeight - preset.height - 90
+    y = canvasHeight - height - 90
   } else if (preset.category === "callout" || preset.category === "badge") {
     x = 80
     y = 80
   } else if (preset.category === "minimal") {
-    y = canvasHeight - preset.height - 80
+    y = canvasHeight - height - 80
   }
 
   const animation = {
-    inType: preset.overlayAnimation?.inType ?? toOverlayAnimationIn(preset.animationIn),
-    outType: preset.overlayAnimation?.outType ?? toOverlayAnimationOut(preset.animationOut),
-    inDurationMs: preset.overlayAnimation?.inDurationMs ?? 350,
-    outDurationMs: preset.overlayAnimation?.outDurationMs ?? 350,
-    easing: preset.overlayAnimation?.easing ?? "expo-out",
+    inType: scaledPreset.overlayAnimation?.inType ?? toOverlayAnimationIn(scaledPreset.animationIn),
+    outType:
+      scaledPreset.overlayAnimation?.outType ?? toOverlayAnimationOut(scaledPreset.animationOut),
+    inDurationMs: scaledPreset.overlayAnimation?.inDurationMs ?? 350,
+    outDurationMs: scaledPreset.overlayAnimation?.outDurationMs ?? 350,
+    easing: scaledPreset.overlayAnimation?.easing ?? "expo-out",
   }
 
   return {
     id,
     assetId: `synthetic:text:${id}`,
     kind: "text",
-    presetId: preset.id,
-    category: preset.category,
-    primaryText: preset.defaultPrimaryText,
-    secondaryText: preset.defaultSecondaryText,
-    tagText: preset.defaultTagText,
+    presetId: scaledPreset.id,
+    category: scaledPreset.category,
+    primaryText: scaledPreset.defaultPrimaryText,
+    secondaryText: scaledPreset.defaultSecondaryText,
+    tagText: scaledPreset.defaultTagText,
     startMs,
     durationMs,
     sourceInMs: 0,
@@ -272,40 +358,33 @@ export function createTextClipFromDefinition(
     y: Math.max(0, y),
     width,
     height,
-    rotation: preset.rotation ?? 0,
-    anchorX: preset.anchorX ?? 0.5,
-    anchorY: preset.anchorY ?? 0.5,
-    zIndex: preset.zIndex ?? 0,
-    opacity: preset.opacity ?? 1,
-    alignment: preset.alignment,
-    fontFamily: preset.fontFamily,
-    fontSize: titleDesign ? Math.min(200, Math.max(8, preset.fontSize * scale)) : preset.fontSize,
-    fontWeight: preset.fontWeight,
-    textColor: preset.textColor,
-    secondaryTextColor: preset.secondaryTextColor,
-    accentColor: preset.accentColor,
-    backdropStyle: preset.backdropStyle,
-    backdropColor: preset.backdropColor,
-    backdropOpacity: preset.backdropOpacity,
-    backdropBlur: Math.min(64, preset.backdropBlur * scale),
-    backdropBorderRadius: Math.min(100, preset.backdropBorderRadius * scale),
-    backdropPaddingX: Math.min(200, preset.backdropPaddingX * scale),
-    backdropPaddingY: Math.min(200, preset.backdropPaddingY * scale),
-    shadowEnabled: preset.shadowEnabled,
-    shadowColor: preset.shadowColor,
-    shadowBlur: Math.min(100, preset.shadowBlur * scale),
-    animationIn: preset.animationIn,
-    animationOut: preset.animationOut,
+    rotation: scaledPreset.rotation ?? 0,
+    anchorX: scaledPreset.anchorX ?? 0.5,
+    anchorY: scaledPreset.anchorY ?? 0.5,
+    zIndex: scaledPreset.zIndex ?? 0,
+    opacity: scaledPreset.opacity ?? 1,
+    alignment: scaledPreset.alignment,
+    fontFamily: scaledPreset.fontFamily,
+    fontSize: scaledPreset.fontSize,
+    fontWeight: scaledPreset.fontWeight,
+    textColor: scaledPreset.textColor,
+    secondaryTextColor: scaledPreset.secondaryTextColor,
+    accentColor: scaledPreset.accentColor,
+    backdropStyle: scaledPreset.backdropStyle,
+    backdropColor: scaledPreset.backdropColor,
+    backdropOpacity: scaledPreset.backdropOpacity,
+    backdropBlur: scaledPreset.backdropBlur,
+    backdropBorderRadius: scaledPreset.backdropBorderRadius,
+    backdropPaddingX: scaledPreset.backdropPaddingX,
+    backdropPaddingY: scaledPreset.backdropPaddingY,
+    shadowEnabled: scaledPreset.shadowEnabled,
+    shadowColor: scaledPreset.shadowColor,
+    shadowBlur: scaledPreset.shadowBlur,
+    animationIn: scaledPreset.animationIn,
+    animationOut: scaledPreset.animationOut,
     overlayAnimation: animation,
-    autoScaleText: preset.autoScaleText ?? true,
-    ...(titleDesign
-      ? {
-          titleDesign: {
-            ...titleDesign,
-            fontSizes: scaleTitleFontSizes(titleDesign.fontSizes, scale),
-          },
-        }
-      : {}),
+    autoScaleText: scaledPreset.autoScaleText ?? true,
+    ...(titleDesign ? { titleDesign } : {}),
     enabled: true,
     locked: false,
   }
@@ -315,6 +394,9 @@ export interface ApplyTextPresetOptions {
   // Omitted options retain the original reset semantics; browser swaps should opt in.
   preserveLayout?: boolean
   preserveStyle?: boolean
+  /** Scale the preset's 1080p-authored geometry to the project canvas. */
+  canvasWidth?: number
+  canvasHeight?: number
 }
 
 export function applyPresetToTextClip(
@@ -330,46 +412,52 @@ export function applyTextPresetToClip(
   preset: TextPresetDefinition,
   options?: ApplyTextPresetOptions,
 ): TextClip {
-  const overlayAnimation = preset.overlayAnimation
-    ? { ...clip.overlayAnimation, ...preset.overlayAnimation }
+  // Replacing on a 4K/portrait canvas must use the same design scale as adding
+  // the preset, otherwise the new look arrives at 1080p pixel sizes.
+  const target =
+    options?.canvasWidth && options?.canvasHeight
+      ? scaleTextPresetForCanvas(preset, options.canvasWidth, options.canvasHeight)
+      : preset
+  const overlayAnimation = target.overlayAnimation
+    ? { ...clip.overlayAnimation, ...target.overlayAnimation }
     : {
         ...clip.overlayAnimation,
-        inType: toOverlayAnimationIn(preset.animationIn),
-        outType: toOverlayAnimationOut(preset.animationOut),
+        inType: toOverlayAnimationIn(target.animationIn),
+        outType: toOverlayAnimationOut(target.animationOut),
       }
 
   return {
     ...clip,
-    presetId: preset.id,
-    category: preset.category,
-    fontFamily: preset.fontFamily,
-    fontSize: preset.fontSize,
-    fontWeight: preset.fontWeight,
-    textColor: preset.textColor,
-    secondaryTextColor: preset.secondaryTextColor,
-    accentColor: preset.accentColor,
-    backdropStyle: preset.backdropStyle,
-    backdropColor: preset.backdropColor,
-    backdropOpacity: preset.backdropOpacity,
-    backdropBlur: preset.backdropBlur,
-    backdropBorderRadius: preset.backdropBorderRadius,
-    backdropPaddingX: preset.backdropPaddingX,
-    backdropPaddingY: preset.backdropPaddingY,
-    shadowEnabled: preset.shadowEnabled,
-    shadowColor: preset.shadowColor,
-    shadowBlur: preset.shadowBlur,
-    animationIn: preset.animationIn,
-    animationOut: preset.animationOut,
+    presetId: target.id,
+    category: target.category,
+    fontFamily: target.fontFamily,
+    fontSize: target.fontSize,
+    fontWeight: target.fontWeight,
+    textColor: target.textColor,
+    secondaryTextColor: target.secondaryTextColor,
+    accentColor: target.accentColor,
+    backdropStyle: target.backdropStyle,
+    backdropColor: target.backdropColor,
+    backdropOpacity: target.backdropOpacity,
+    backdropBlur: target.backdropBlur,
+    backdropBorderRadius: target.backdropBorderRadius,
+    backdropPaddingX: target.backdropPaddingX,
+    backdropPaddingY: target.backdropPaddingY,
+    shadowEnabled: target.shadowEnabled,
+    shadowColor: target.shadowColor,
+    shadowBlur: target.shadowBlur,
+    animationIn: target.animationIn,
+    animationOut: target.animationOut,
     overlayAnimation,
-    width: preset.width,
-    height: preset.height,
-    alignment: preset.alignment,
-    ...(preset.rotation !== undefined ? { rotation: preset.rotation } : {}),
-    ...(preset.anchorX !== undefined ? { anchorX: preset.anchorX } : {}),
-    ...(preset.anchorY !== undefined ? { anchorY: preset.anchorY } : {}),
-    ...(preset.zIndex !== undefined ? { zIndex: preset.zIndex } : {}),
-    ...(preset.opacity !== undefined ? { opacity: preset.opacity } : {}),
-    ...(preset.autoScaleText !== undefined ? { autoScaleText: preset.autoScaleText } : {}),
+    width: target.width,
+    height: target.height,
+    alignment: target.alignment,
+    ...(target.rotation !== undefined ? { rotation: target.rotation } : {}),
+    ...(target.anchorX !== undefined ? { anchorX: target.anchorX } : {}),
+    ...(target.anchorY !== undefined ? { anchorY: target.anchorY } : {}),
+    ...(target.zIndex !== undefined ? { zIndex: target.zIndex } : {}),
+    ...(target.opacity !== undefined ? { opacity: target.opacity } : {}),
+    ...(target.autoScaleText !== undefined ? { autoScaleText: target.autoScaleText } : {}),
     ...(options?.preserveLayout
       ? {
           width: clip.width,
@@ -406,12 +494,12 @@ export function applyTextPresetToClip(
           autoScaleText: clip.autoScaleText,
         }
       : {}),
-    titleDesign: preset.titleDesign
+    titleDesign: target.titleDesign
       ? titleDesignSchema.parse({
-          ...preset.titleDesign,
+          ...target.titleDesign,
           ...(options?.preserveStyle ? clip.titleDesign : {}),
-          version: preset.titleDesign.version,
-          template: preset.titleDesign.template,
+          version: target.titleDesign.version,
+          template: target.titleDesign.template,
         })
       : undefined,
   }
@@ -419,7 +507,13 @@ export function applyTextPresetToClip(
 
 export function textPresetFromClip(
   clip: TextClip,
-  metadata: { name: string; description: string; category?: string; tags?: string[] },
+  metadata: {
+    name: string
+    description: string
+    category?: string
+    tags?: string[]
+    designScale?: number
+  },
 ): TextPresetRecord {
   return {
     id: `custom-${clip.id}`,
@@ -460,6 +554,9 @@ export function textPresetFromClip(
       anchorY: clip.anchorY,
       zIndex: clip.zIndex,
       opacity: clip.opacity,
+      ...(metadata.designScale && metadata.designScale > 0
+        ? { designScale: metadata.designScale }
+        : {}),
     },
   }
 }

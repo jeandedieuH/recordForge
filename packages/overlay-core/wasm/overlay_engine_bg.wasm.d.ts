@@ -4,6 +4,7 @@ export const memory: WebAssembly.Memory;
 export const __wbg_wasmoverlayengine_free: (a: number, b: number) => void;
 export const wasmoverlayengine_evaluate: (a: number, b: number) => [number, number];
 export const wasmoverlayengine_new: (a: number, b: number) => [number, number, number];
+export const wasmoverlayengine_update_geometry: (a: number, b: number, c: number) => [number, number];
 export const __wbindgen_externrefs: WebAssembly.Table;
 export const __wbindgen_free: (a: number, b: number, c: number) => void;
 export const __wbindgen_malloc: (a: number, b: number) => number;

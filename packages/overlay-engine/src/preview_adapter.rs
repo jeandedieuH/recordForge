@@ -19,6 +19,16 @@ impl WasmOverlayEngine {
         Ok(Self { inner })
     }
 
+    /// Patch item transforms/endpoints in place for interactive drags. The
+    /// caller must keep every non-geometry field identical (item set, timing,
+    /// animation, z-order); the export path still validates the full plan.
+    #[wasm_bindgen]
+    pub fn update_geometry(&mut self, patches_json: &str) -> Result<(), String> {
+        self.inner
+            .update_item_geometry_json(patches_json)
+            .map_err(|error| error.to_string())
+    }
+
     #[wasm_bindgen]
     pub fn evaluate(&self, time_ms: f64) -> String {
         let time_ms = normalize_time_ms(time_ms);

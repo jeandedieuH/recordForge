@@ -41,6 +41,20 @@ export class WasmOverlayEngine {
         WasmOverlayEngineFinalization.register(this, this.__wbg_ptr, this);
         return this;
     }
+    /**
+     * Patch item transforms/endpoints in place for interactive drags. The
+     * caller must keep every non-geometry field identical (item set, timing,
+     * animation, z-order); the export path still validates the full plan.
+     * @param {string} patches_json
+     */
+    update_geometry(patches_json) {
+        const ptr0 = passStringToWasm0(patches_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmoverlayengine_update_geometry(this.__wbg_ptr, ptr0, len0);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
 }
 if (Symbol.dispose) WasmOverlayEngine.prototype[Symbol.dispose] = WasmOverlayEngine.prototype.free;
 function __wbg_get_imports() {

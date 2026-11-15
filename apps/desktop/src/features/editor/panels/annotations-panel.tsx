@@ -1,10 +1,14 @@
 import { useMemo, useState } from "react"
 import {
+  ANNOTATION_DESIGN_CANVAS_HEIGHT,
+  ANNOTATION_DESIGN_CANVAS_WIDTH,
   ANNOTATION_PALETTES,
+  annotationCanvasScale,
   annotationPresetToShapePreset,
   createAddAnnotationClipCommand,
   createUpdateAnnotationClipCommand,
   getAnnotationShapePreset,
+  scaleAnnotationPresetForCanvas,
   type AnnotationPresetRecord,
 } from "@recordforge/editor-core"
 import { annotationPresetValuesSchema } from "@recordforge/editor-core"
@@ -17,6 +21,7 @@ import {
   NumberInputField,
   ToggleGroup,
   ToggleGroupItem,
+  useToast,
 } from "@recordforge/ui"
 import type { AnnotationArrowStyle } from "@recordforge/contracts"
 import { Check, FolderOpen, MousePointer2, Pencil, Plus, Shapes } from "lucide-react"
@@ -47,12 +52,15 @@ export function AnnotationsPanel({
   onToggleDrawMode,
 }: AnnotationsPanelProps) {
   const [browserOpen, setBrowserOpen] = useState(false)
+  const { toast } = useToast()
   const isPro = useLicenseStore((state) => state.status.tier === "pro")
   const openUpgradeDialog = useLicenseStore((state) => state.openUpgradeDialog)
   const timeline = useTimelineStore((state) => state.engine?.history.present)
   const selectedId = useTimelineStore((state) =>
     state.view.selection?.kind === "clip" ? state.view.selection.primaryClipId : null,
   )
+  const canvasWidth = timeline?.canvas.width ?? 1920
+  const canvasHeight = timeline?.canvas.height ?? 1080
   const selected = timeline?.tracks
     .flatMap((track) => track.clips)
     .find((clip) => clip.id === selectedId)
@@ -61,23 +69,30 @@ export function AnnotationsPanel({
   const usesConnector =
     preset.type === "arrow" || preset.type === "line" || preset.type === "callout"
 
-  const previewPreset = useMemo<AnnotationPresetRecord>(
-    () => ({
+  const previewPreset = useMemo<AnnotationPresetRecord>(() => {
+    const normalized = scaleAnnotationPresetForCanvas(
+      preset,
+      ANNOTATION_DESIGN_CANVAS_WIDTH,
+      ANNOTATION_DESIGN_CANVAS_HEIGHT,
+    )
+    const normalizedDefinition = { ...normalized, designScale: undefined }
+    return {
       id: preset.presetId ?? preset.type,
       name: preset.name,
       description: preset.description,
       category: preset.type,
       tags: [preset.type],
       definition: {
-        ...preset,
+        ...normalizedDefinition,
         defaultStrokeColor: strokeColor,
-        defaultStrokeWidth: strokeWidth,
+        // Style thumbnails render in design units, so normalize the project's
+        // stroke back to the 1080p basis before showing it.
+        defaultStrokeWidth: strokeWidth / annotationCanvasScale(canvasWidth, canvasHeight),
         defaultStrokeStyle: strokeStyle,
         defaultArrowStyle: arrowStyle,
       },
-    }),
-    [preset, strokeColor, strokeWidth, strokeStyle, arrowStyle],
-  )
+    }
+  }, [preset, strokeColor, strokeWidth, strokeStyle, arrowStyle, canvasWidth, canvasHeight])
 
   function updateSettings(update: Partial<AnnotationDrawSettings>) {
     onDrawSettingsChange({ ...drawSettings, ...update })
@@ -87,7 +102,7 @@ export function AnnotationsPanel({
     const result = annotationPresetValuesSchema.safeParse(candidate.definition)
     if (!result.success) return
     const shape = annotationPresetToShapePreset({ ...candidate, definition: result.data })
-    onDrawSettingsChange(annotationSettingsFromPreset(shape))
+    onDrawSettingsChange(annotationSettingsFromPreset(shape, canvasWidth, canvasHeight))
   }
 
   function handleAddAnnotation() {
@@ -99,9 +114,12 @@ export function AnnotationsPanel({
     const current = store.engine?.history.present
     if (!current) return
     store.pause()
+    // Annotations past the last screen frame are valid: export adds a
+    // freeze-frame tail so they remain visible.
+    const startMs = Math.max(0, Math.round(store.view.playheadMs))
     const clip = createAnnotationFromTool({
       settings: drawSettings,
-      startMs: store.view.playheadMs,
+      startMs,
       canvasWidth: current.canvas.width,
       canvasHeight: current.canvas.height,
     })
@@ -110,12 +128,23 @@ export function AnnotationsPanel({
     store.setSelection({ kind: "clip", clipIds: [clip.id], primaryClipId: clip.id })
     store.seek(getAnnotationEditTime(clip))
     onToggleDrawMode(false)
+    if (track?.muted) {
+      toast({
+        title: "Annotation added to a muted track",
+        description: "Unmute the Annotations track to see it in the preview and export.",
+      })
+    }
   }
 
   function handleApplyToSelected() {
     if (!selectedAnnotation || selectedAnnotation.locked) return
     const store = useTimelineStore.getState()
-    const updated = applyAnnotationToolToClip({ clip: selectedAnnotation, settings: drawSettings })
+    const updated = applyAnnotationToolToClip({
+      clip: selectedAnnotation,
+      settings: drawSettings,
+      canvasWidth,
+      canvasHeight,
+    })
     if (!store.execute(createUpdateAnnotationClipCommand(selectedAnnotation.id, updated))) return
     store.pause()
     store.seek(getAnnotationEditTime(updated))

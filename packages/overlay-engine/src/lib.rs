@@ -31,8 +31,8 @@ pub use images::{ImageAssetRef, ImageCachePolicy, ImageFit};
 pub use preview_adapter::WasmOverlayEngine;
 pub use scene::{
     AnnotationDetails, DisplayAnnotation, DisplayImage, DisplayItem, DisplayList, DisplayText,
-    ImageDetails, OverlayAsset, OverlayCanvas, OverlayItem, OverlayItemBase, OverlayRenderPlan,
-    OverlayTransform, TextDetails,
+    ImageDetails, OverlayAsset, OverlayCanvas, OverlayItem, OverlayItemBase,
+    OverlayItemGeometryPatch, OverlayRenderPlan, OverlayTransform, TextDetails,
 };
 
 #[derive(Debug, Error)]
@@ -67,6 +67,23 @@ impl OverlayEngine {
         let plan = serde_json::from_str(plan_json)
             .map_err(|error| OverlayError::InvalidPlan(error.to_string()))?;
         Self::from_render_plan(plan)
+    }
+
+    /// Patch the transform (and optional connector endpoints) of already
+    /// retained items. This is the drag/resize fast path: it avoids re-parsing
+    /// and re-validating the whole plan for every pointer frame.
+    pub fn update_item_geometry(
+        &mut self,
+        patches: Vec<OverlayItemGeometryPatch>,
+    ) -> Result<(), OverlayError> {
+        self.scene.apply_geometry_patches(patches)
+    }
+
+    /// JSON transport for [`Self::update_item_geometry`] used by the WASM adapter.
+    pub fn update_item_geometry_json(&mut self, patches_json: &str) -> Result<(), OverlayError> {
+        let patches: Vec<OverlayItemGeometryPatch> = serde_json::from_str(patches_json)
+            .map_err(|error| OverlayError::InvalidPlan(error.to_string()))?;
+        self.update_item_geometry(patches)
     }
 
     /// Canvas dimensions used by the retained scene.
@@ -358,6 +375,44 @@ mod tests {
     }
 
     #[test]
+    fn patches_item_geometry_without_rebuilding_the_plan() {
+        let mut engine = OverlayEngine::from_render_plan(plan()).expect("fixture plan is valid");
+        let mut transform = engine
+            .evaluate(200)
+            .items
+            .iter()
+            .find(|item| item.id() == "annotation")
+            .expect("annotation is active")
+            .clone();
+        let scene::DisplayItem::Annotation { item } = &mut transform else {
+            panic!("expected annotation");
+        };
+        let mut next = item.transform;
+        next.x = 400.0;
+        next.y = 240.0;
+        engine
+            .update_item_geometry(vec![OverlayItemGeometryPatch {
+                id: "annotation".to_string(),
+                transform: next,
+                end_x: None,
+                end_y: None,
+            }])
+            .expect("geometry patch applies");
+
+        let evaluated = engine.evaluate(200);
+        let scene::DisplayItem::Annotation { item } = evaluated
+            .items
+            .iter()
+            .find(|entry| entry.id() == "annotation")
+            .expect("annotation stays active")
+        else {
+            panic!("expected annotation");
+        };
+        assert_eq!(item.transform.x, 400.0);
+        assert_eq!(item.transform.y, 240.0);
+    }
+
+    #[test]
     fn rejects_duplicate_item_ids() {
         let mut invalid = plan();
         invalid.items.push(invalid.items[0].clone());
@@ -403,7 +458,7 @@ mod tests {
             .expect("render to pixmap succeeds");
 
         // The rendered frame should not be completely empty/transparent
-        let non_transparent = pixmap.data().chunks_exact(4).any(|p| p[3] > 0);
+        let non_transparent = pixmap.data().as_chunks::<4>().0.iter().any(|p| p[3] > 0);
         assert!(non_transparent, "rendered pixmap should contain pixels");
     }
 
@@ -481,7 +536,7 @@ mod tests {
             .render_to_pixmap(1000, &mut pixmap)
             .expect("render all shapes succeeds");
 
-        let non_transparent = pixmap.data().chunks_exact(4).any(|p| p[3] > 0);
+        let non_transparent = pixmap.data().as_chunks::<4>().0.iter().any(|p| p[3] > 0);
         assert!(non_transparent, "all shapes render to pixmap");
     }
 
@@ -549,7 +604,7 @@ mod tests {
             .render_to_pixmap(1500, &mut pixmap)
             .expect("render text succeeds");
 
-        let non_transparent = pixmap.data().chunks_exact(4).any(|p| p[3] > 0);
+        let non_transparent = pixmap.data().as_chunks::<4>().0.iter().any(|p| p[3] > 0);
         assert!(non_transparent, "text preset renders to pixmap");
     }
 
@@ -655,7 +710,7 @@ mod tests {
             .render_to_pixmap(1000, &mut pixmap)
             .expect("render multiline items succeeds");
 
-        let non_transparent = pixmap.data().chunks_exact(4).any(|p| p[3] > 0);
+        let non_transparent = pixmap.data().as_chunks::<4>().0.iter().any(|p| p[3] > 0);
         assert!(non_transparent, "multiline items render to pixmap");
     }
 }

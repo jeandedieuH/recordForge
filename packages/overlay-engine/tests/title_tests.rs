@@ -152,7 +152,7 @@ fn designed_title_text_is_visible_without_backdrop_in_export() {
     let mut pixmap = tiny_skia::Pixmap::new(640, 360).unwrap();
     engine.render_to_pixmap(2100, &mut pixmap).unwrap();
     assert!(
-        pixmap.data().chunks_exact(4).any(|p| p[3] > 0),
+        pixmap.data().as_chunks::<4>().0.iter().any(|p| p[3] > 0),
         "transparent clean-text should render visible text glyphs in export"
     );
 }
@@ -166,7 +166,7 @@ fn every_title_rasterizes_without_system_text_layout() {
             engine.render_to_pixmap(time, &mut pixmap).unwrap();
             if time == 2100 {
                 assert!(
-                    pixmap.data().chunks_exact(4).any(|p| p[3] > 0),
+                    pixmap.data().as_chunks::<4>().0.iter().any(|p| p[3] > 0),
                     "{template}"
                 );
             }

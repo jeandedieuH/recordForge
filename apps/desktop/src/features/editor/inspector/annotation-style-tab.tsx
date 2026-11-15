@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from "react"
 import type {
   AnnotationArrowStyle,
   AnnotationHead,
@@ -44,13 +45,7 @@ export function AnnotationStyleTab({ clip, onChange }: AnnotationInspectorProps)
         <InspectorSection title="Text content">
           <label className="flex flex-col gap-1.5 text-xs text-muted-foreground">
             <span>Label / note text</span>
-            <Textarea
-              value={clip.text ?? ""}
-              onChange={(event) => onChange({ text: event.target.value })}
-              placeholder="Enter annotation text…"
-              rows={2}
-              className="min-h-16 resize-y text-xs"
-            />
+            <DebouncedTextArea value={clip.text ?? ""} onCommit={(text) => onChange({ text })} />
           </label>
           <div className="grid grid-cols-2 items-end gap-3">
             <AnnotationNumberField
@@ -221,6 +216,71 @@ export function AnnotationStyleTab({ clip, onChange }: AnnotationInspectorProps)
         )}
       </InspectorSection>
     </div>
+  )
+}
+
+/**
+ * Annotation text edits rebuild the overlay scene through the timeline engine.
+ * Buffer keystrokes for a short window so typing stays responsive, then commit
+ * once per burst; blur and unmount flush so the durable text never lags.
+ */
+function DebouncedTextArea({
+  value,
+  onCommit,
+}: {
+  value: string
+  onCommit: (value: string) => void
+}) {
+  const [draft, setDraft] = useState(value)
+  const pendingRef = useRef<string | null>(null)
+  const timerRef = useRef<number | null>(null)
+  const commitRef = useRef(onCommit)
+  commitRef.current = onCommit
+
+  useEffect(() => {
+    // Adopt an external value (undo, preset swap) only when no keystroke is
+    // waiting to commit; otherwise the user's draft would be overwritten.
+    if (pendingRef.current === null && value !== draft) setDraft(value)
+  }, [value, draft])
+
+  useEffect(
+    () => () => {
+      if (timerRef.current !== null) window.clearTimeout(timerRef.current)
+      if (pendingRef.current !== null) commitRef.current(pendingRef.current)
+    },
+    [],
+  )
+
+  function flush(next: string) {
+    pendingRef.current = null
+    if (timerRef.current !== null) {
+      window.clearTimeout(timerRef.current)
+      timerRef.current = null
+    }
+    commitRef.current(next)
+  }
+
+  function handleChange(next: string) {
+    setDraft(next)
+    pendingRef.current = next
+    if (timerRef.current !== null) window.clearTimeout(timerRef.current)
+    timerRef.current = window.setTimeout(() => {
+      timerRef.current = null
+      if (pendingRef.current !== null) flush(pendingRef.current)
+    }, 140)
+  }
+
+  return (
+    <Textarea
+      value={draft}
+      onChange={(event) => handleChange(event.target.value)}
+      onBlur={() => {
+        if (pendingRef.current !== null) flush(pendingRef.current)
+      }}
+      placeholder="Enter annotation text…"
+      rows={2}
+      className="min-h-16 resize-y text-xs"
+    />
   )
 }
 

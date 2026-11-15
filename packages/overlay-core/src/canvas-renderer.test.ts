@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest"
 import type { OverlayDisplayAnnotation } from "@recordforge/contracts"
-import { renderOverlayDisplayList } from "./canvas-renderer"
+import { renderOverlayDisplayList, wrapTextToLines } from "./canvas-renderer"
 
 if (typeof globalThis.Path2D === "undefined") {
   const globalWithPath2D = globalThis as unknown as { Path2D?: new () => Path2D }
@@ -102,6 +102,62 @@ function annotationItem(overrides: Partial<OverlayDisplayAnnotation>): OverlayDi
 }
 
 describe("overlay canvas renderer", () => {
+  it("dims the full project canvas and punches an even-odd spotlight cutout", () => {
+    const fills: Array<{ style: string; rule?: string }> = []
+    const context = {
+      clearRect: () => {},
+      save: () => {},
+      restore: () => {},
+      setLineDash: () => {},
+      beginPath: () => {},
+      ellipse: () => {},
+      stroke: () => {},
+      fill: (_path: unknown, rule?: string) => fills.push({ style: context.fillStyle, rule }),
+      fillStyle: "",
+      strokeStyle: "",
+      lineWidth: 1,
+      globalAlpha: 1,
+      canvas: { width: 960, height: 540 },
+    }
+    const canvas = {
+      width: 960,
+      height: 540,
+      getContext: () => context,
+    } as unknown as HTMLCanvasElement
+
+    renderOverlayDisplayList(
+      {
+        timeMs: 100,
+        items: [
+          annotationItem({
+            annotationType: "spotlight",
+            transform: {
+              x: 100,
+              y: 100,
+              width: 200,
+              height: 100,
+              zIndex: 0,
+              opacity: 1,
+              rotation: 0,
+              anchorX: 0.5,
+              anchorY: 0.5,
+            },
+            fillColor: "rgba(0, 0, 0, 0.6)",
+            fillOpacity: 0.5,
+            strokeWidth: 2,
+          }),
+        ],
+      },
+      canvas,
+      { pixelScale: 0.5 },
+    )
+
+    expect(fills).toHaveLength(1)
+    expect(fills[0]?.rule).toBe("evenodd")
+    // The preset's rgba alpha and the Dimming control both multiply, matching export.
+    expect(fills[0]?.style).toMatch(/rgba\(0, 0, 0, 0\.3\d*\)/)
+  })
+
   it("routes an elbow arrow through a corner", () => {
     const { canvas, calls } = recordingCanvas()
     renderOverlayDisplayList(
@@ -346,5 +402,28 @@ describe("overlay canvas renderer", () => {
       expect.any(Number),
       expect.any(Number),
     )
+  })
+})
+
+describe("wrapTextToLines", () => {
+  const measure = (text: string) => text.length * 10
+
+  it("wraps at spaces", () => {
+    expect(wrapTextToLines("alpha beta gamma", 80, measure)).toEqual(["alpha", "beta", "gamma"])
+  })
+
+  it("breaks an unbroken word by grapheme when export would", () => {
+    const lines = wrapTextToLines("abcdefghijklm", 60, measure)
+    expect(lines).toEqual(["abcdef", "ghijkl", "m"])
+    expect(lines.join("")).toBe("abcdefghijklm")
+  })
+
+  it("breaks a CJK run without splitting surrogate pairs", () => {
+    const text = "😀😀😀😀😀"
+    const lines = wrapTextToLines(text, 30, (value) => value.length * 10)
+    expect(lines.join("")).toBe(text)
+    // Each grapheme measures as two UTF-16 units; a code-unit split would
+    // leave lone surrogates and change the reconstructed string.
+    expect(lines.every((line) => Array.from(line).length > 0)).toBe(true)
   })
 })

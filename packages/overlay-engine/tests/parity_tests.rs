@@ -274,7 +274,7 @@ fn parity_test_renders_fixture_project_overlays() {
             .expect("render frame to pixmap");
 
         if !display_list.items.is_empty() {
-            let non_transparent = pixmap.data().chunks_exact(4).any(|p| p[3] > 0);
+            let non_transparent = pixmap.data().as_chunks::<4>().0.iter().any(|p| p[3] > 0);
             assert!(
                 non_transparent,
                 "frame at {time_ms}ms with {} items should render pixels",

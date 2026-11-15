@@ -234,6 +234,20 @@ pub fn compile_and_evaluate(
     ))
 }
 
+/// Wrap text with the same bundled font metrics used to rasterize SVG text in
+/// export. Keeps preview line breaks (browser measureText over the same Inter /
+/// Source Serif / JetBrains Mono files) and export nearly identical.
+pub(crate) fn wrap_text_for_render(
+    family: &str,
+    weight: &str,
+    text: &str,
+    width: f64,
+    size: f64,
+) -> Vec<String> {
+    let face = glyphs::face(family, weight);
+    glyphs::wrap(&face, text, width, size, 0.0)
+}
+
 impl TitleLayout {
     pub(crate) fn evaluate(&self, elapsed: u64, duration: u64) -> TitleScene {
         let disabled = self.design.motion == TitleMotion::None;

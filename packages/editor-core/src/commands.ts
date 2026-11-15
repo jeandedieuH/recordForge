@@ -4718,23 +4718,42 @@ export function createUpdateAnnotationClipCommand(
   clipId: string,
   update: OverlayClipUpdate<AnnotationClip>,
 ): CommandRecord {
+  const transformOrMotion =
+    update.x !== undefined ||
+    update.y !== undefined ||
+    update.width !== undefined ||
+    update.height !== undefined ||
+    update.rotation !== undefined ||
+    update.anchorX !== undefined ||
+    update.anchorY !== undefined ||
+    update.zIndex !== undefined ||
+    update.opacity !== undefined ||
+    update.overlayAnimation !== undefined
+  const textEdit =
+    update.text !== undefined || update.fontSize !== undefined || update.textColor !== undefined
+  const styleEdit =
+    update.strokeColor !== undefined ||
+    update.strokeWidth !== undefined ||
+    update.strokeStyle !== undefined ||
+    update.fillColor !== undefined ||
+    update.fillOpacity !== undefined ||
+    update.cornerRadius !== undefined ||
+    update.shadowEnabled !== undefined ||
+    update.shadowColor !== undefined ||
+    update.shadowBlur !== undefined
   return {
     kind: "update-annotation-clip",
     name: "Update annotation",
     clipId,
     update,
-    coalesce:
-      update.x !== undefined ||
-      update.y !== undefined ||
-      update.width !== undefined ||
-      update.height !== undefined ||
-      update.rotation !== undefined ||
-      update.anchorX !== undefined ||
-      update.anchorY !== undefined ||
-      update.zIndex !== undefined ||
-      update.opacity !== undefined ||
-      update.overlayAnimation !== undefined,
-    coalesceKey: `annotation:${clipId}`,
+    // Typing, sliders and color pickers are high-frequency edits; coalescing
+    // them keeps one undo step per burst instead of one per keystroke.
+    coalesce: transformOrMotion || textEdit || styleEdit,
+    coalesceKey: textEdit
+      ? `annotation-text:${clipId}`
+      : styleEdit
+        ? `annotation-style:${clipId}`
+        : `annotation:${clipId}`,
   }
 }
 
@@ -4751,23 +4770,42 @@ export function createUpdateTextClipCommand(
   clipId: string,
   update: OverlayClipUpdate<TextClip>,
 ): CommandRecord {
+  const transformOrMotion =
+    update.x !== undefined ||
+    update.y !== undefined ||
+    update.width !== undefined ||
+    update.height !== undefined ||
+    update.rotation !== undefined ||
+    update.anchorX !== undefined ||
+    update.anchorY !== undefined ||
+    update.zIndex !== undefined ||
+    update.opacity !== undefined ||
+    update.overlayAnimation !== undefined
+  const styleEdit =
+    update.fontSize !== undefined ||
+    update.fontFamily !== undefined ||
+    update.fontWeight !== undefined ||
+    update.textColor !== undefined ||
+    update.secondaryTextColor !== undefined ||
+    update.accentColor !== undefined ||
+    update.backdropStyle !== undefined ||
+    update.backdropColor !== undefined ||
+    update.backdropOpacity !== undefined ||
+    update.backdropBlur !== undefined ||
+    update.backdropBorderRadius !== undefined ||
+    update.backdropPaddingX !== undefined ||
+    update.backdropPaddingY !== undefined ||
+    update.shadowEnabled !== undefined ||
+    update.shadowColor !== undefined ||
+    update.shadowBlur !== undefined ||
+    update.titleDesign !== undefined
   return {
     kind: "update-text-clip",
     name: "Update title / text",
     clipId,
     update,
-    coalesce:
-      update.x !== undefined ||
-      update.y !== undefined ||
-      update.width !== undefined ||
-      update.height !== undefined ||
-      update.rotation !== undefined ||
-      update.anchorX !== undefined ||
-      update.anchorY !== undefined ||
-      update.zIndex !== undefined ||
-      update.opacity !== undefined ||
-      update.overlayAnimation !== undefined,
-    coalesceKey: `text:${clipId}`,
+    coalesce: transformOrMotion || styleEdit,
+    coalesceKey: styleEdit ? `text-style:${clipId}` : `text:${clipId}`,
   }
 }
 

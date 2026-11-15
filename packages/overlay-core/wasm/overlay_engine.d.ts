@@ -6,6 +6,12 @@ export class WasmOverlayEngine {
     [Symbol.dispose](): void;
     evaluate(time_ms: number): string;
     constructor(plan_json: string);
+    /**
+     * Patch item transforms/endpoints in place for interactive drags. The
+     * caller must keep every non-geometry field identical (item set, timing,
+     * animation, z-order); the export path still validates the full plan.
+     */
+    update_geometry(patches_json: string): void;
 }
 
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
@@ -15,6 +21,7 @@ export interface InitOutput {
     readonly __wbg_wasmoverlayengine_free: (a: number, b: number) => void;
     readonly wasmoverlayengine_evaluate: (a: number, b: number) => [number, number];
     readonly wasmoverlayengine_new: (a: number, b: number) => [number, number, number];
+    readonly wasmoverlayengine_update_geometry: (a: number, b: number, c: number) => [number, number];
     readonly __wbindgen_externrefs: WebAssembly.Table;
     readonly __wbindgen_free: (a: number, b: number, c: number) => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;

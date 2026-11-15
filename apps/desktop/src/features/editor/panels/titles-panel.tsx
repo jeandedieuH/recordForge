@@ -6,6 +6,7 @@ import {
   createUpdateTextClipCommand,
   TEXT_PRESET_CATALOG,
   textPresetToDefinition,
+  titleCanvasDesignScale,
   type TextClip,
   type TextPresetRecord,
 } from "@recordforge/editor-core"
@@ -16,7 +17,8 @@ import { getPlayheadSnapshot } from "../timeline/use-playback-state"
 import { TitlePresetBrowser } from "../titles/title-preset-browser"
 import { useTitleLibraryState } from "../titles/title-library-state"
 import { TitleSaveDialog } from "../titles/title-save-dialog"
-import type { TitleReplaceOptions } from "../titles/title-preview-plan"
+import { fitTitleLayout } from "../inspector/text/title-layout"
+import { getTitleEditTime, type TitleReplaceOptions } from "../titles/title-preview-plan"
 
 export function TitlesPanel() {
   const engine = useTimelineStore((state) => state.engine)
@@ -43,10 +45,14 @@ export function TitlesPanel() {
 
   function handleAddPreset(preset: TextPresetRecord) {
     try {
+      const state = useTimelineStore.getState()
+      state.pause()
       const titlesTrack = timeline?.tracks.find((track) => track.kind === "titles" && !track.locked)
       const existingClips = titlesTrack?.clips ?? []
-      const startMs = Math.max(0, Math.round(getPlayheadSnapshot()))
       const durationMs = 4000
+      // Titles past the last screen frame are valid: export adds a
+      // freeze-frame tail so end cards remain visible.
+      const startMs = Math.max(0, Math.round(getPlayheadSnapshot()))
 
       const clip = createTextClipFromDefinition(textPresetToDefinition(preset), {
         startMs,
@@ -61,16 +67,19 @@ export function TitlesPanel() {
       )
       if (overlappingClips.length > 0) {
         const offset = (overlappingClips.length % 5) * 80
-        clip.y = Math.min(canvasHeight - clip.height - 40, clip.y + offset)
+        clip.y = Math.max(0, Math.min(canvasHeight - clip.height - 40, clip.y + offset))
       }
 
       const ok = execute(createAddTextClipCommand(clip, titlesTrack?.id))
       if (!ok) throw new Error("Title command rejected")
       setSelection({ kind: "clip", clipIds: [clip.id], primaryClipId: clip.id })
+      useTimelineStore.getState().seek(getTitleEditTime(clip))
       remember(preset.id)
       toast({
         title: "Title added",
-        description: `${preset.name} was added at the playhead.`,
+        description: titlesTrack?.muted
+          ? `${preset.name} was added to the muted Titles track. Unmute it to see the title.`
+          : `${preset.name} was added at the playhead.`,
       })
     } catch {
       toast({
@@ -84,14 +93,20 @@ export function TitlesPanel() {
   function handleReplace(preset: TextPresetRecord, options?: TitleReplaceOptions) {
     if (!selectedTextClip) return
     try {
-      const updated = applyTextPresetToClip(
-        selectedTextClip,
-        textPresetToDefinition(preset),
-        options,
-      )
+      const updated = applyTextPresetToClip(selectedTextClip, textPresetToDefinition(preset), {
+        ...options,
+        canvasWidth,
+        canvasHeight,
+      })
+      const fitted = options?.preserveLayout
+        ? updated
+        : {
+            ...updated,
+            ...fitTitleLayout(updated, { width: canvasWidth, height: canvasHeight }),
+          }
       const ok = execute(
         createUpdateTextClipCommand(selectedTextClip.id, {
-          ...updated,
+          ...fitted,
           primaryText: selectedTextClip.primaryText,
           secondaryText: selectedTextClip.secondaryText,
           tagText: selectedTextClip.tagText,
@@ -100,6 +115,7 @@ export function TitlesPanel() {
         }),
       )
       if (!ok) throw new Error("Title command rejected")
+      useTimelineStore.getState().seek(getTitleEditTime(fitted))
       remember(preset.id)
       toast({
         title: "Title design replaced",
@@ -161,6 +177,7 @@ export function TitlesPanel() {
           clip={selectedTextClip}
           open={saveOpen}
           onOpenChange={setSaveOpen}
+          designScale={titleCanvasDesignScale(canvasWidth, canvasHeight)}
         />
       ) : null}
     </div>

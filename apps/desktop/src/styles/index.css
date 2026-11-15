@@ -16,6 +16,25 @@
   font-display: swap;
 }
 
+/* Export rasterizes legacy titles and annotation labels with the bundled
+   Source Serif 4 / Outfit files; loading the same files in the webview keeps
+   preview line breaks and text metrics aligned with the final MP4. */
+@font-face {
+  font-family: "Source Serif 4";
+  src: url("../../../../packages/overlay-engine/fonts/sourceserif4.ttf") format("truetype");
+  font-weight: 200 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Outfit";
+  src: url("../../../../packages/overlay-engine/fonts/outfit.ttf") format("truetype");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
 html {
   font-size: 14px; /* compact desktop density: rem base 14 */
 }

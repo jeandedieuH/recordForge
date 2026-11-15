@@ -18,10 +18,12 @@ export function TitleSaveDialog({
   clip,
   open,
   onOpenChange,
+  designScale,
 }: {
   clip: TextClip
   open: boolean
   onOpenChange: (open: boolean) => void
+  designScale?: number
 }) {
   const nameId = useId()
   const [name, setName] = useState("")
@@ -39,6 +41,7 @@ export function TitleSaveDialog({
         name: name.trim(),
         description: "Saved from your timeline",
         category: clip.category,
+        designScale,
       })
       // A fresh ID avoids silently overwriting an earlier saved design from the same clip.
       await getTextPresetRegistry().saveCustomPreset({ ...preset, id: undefined })
@@ -64,7 +67,8 @@ export function TitleSaveDialog({
           <DialogHeader>
             <DialogTitle>Save Custom Title</DialogTitle>
             <DialogDescription>
-              Save this design and its current words locally. Timing and position are not included.
+              Save this design and its current words locally. Clip timing and the title's position
+              on the canvas are not included.
             </DialogDescription>
           </DialogHeader>
           <div className="flex flex-col gap-2">

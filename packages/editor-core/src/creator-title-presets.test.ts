@@ -13,12 +13,14 @@ import {
   getTitleContentLabels,
   getTitlePresetGroup,
   hasTitleFontSizeOverrides,
+  migrateTextPresetDesignScale,
   resolveTitleFontSizes,
   textPresetFromClip,
   titleDesignSchema,
   textPresetToDefinition,
   textPresetValuesSchema,
   type PresetStorageData,
+  type TextPresetDefinition,
   type TextPresetValues,
 } from "./index"
 
@@ -166,6 +168,120 @@ describe("creator title presets", () => {
     expect(
       applyTextPresetToClip(clip, getTextPresetById("title-modern")).titleDesign,
     ).toBeUndefined()
+  })
+
+  it("scales a replaced design to the project canvas without touching content or timing", () => {
+    const clip = createTextClipFromPreset("text-speaker", {
+      startMs: 1250,
+      durationMs: 6200,
+      canvasWidth: 3840,
+      canvasHeight: 2160,
+    })
+    clip.primaryText = "Custom words"
+    const preset = getTextPresetById("text-editorial")
+    const replaced = applyTextPresetToClip(clip, preset, {
+      canvasWidth: 3840,
+      canvasHeight: 2160,
+    })
+    expect(replaced.primaryText).toBe("Custom words")
+    expect(replaced.startMs).toBe(1250)
+    expect(replaced.durationMs).toBe(6200)
+    expect(replaced.width).toBeCloseTo(preset.width * 2)
+    expect(replaced.fontSize).toBeCloseTo(Math.min(200, preset.fontSize * 2))
+    // Keep-layout still preserves the box while the typography fits the canvas.
+    const kept = applyTextPresetToClip(clip, preset, {
+      preserveLayout: true,
+      canvasWidth: 3840,
+      canvasHeight: 2160,
+    })
+    expect(kept.width).toBe(clip.width)
+    expect(kept.height).toBe(clip.height)
+    expect(kept.fontSize).toBeCloseTo(Math.min(200, preset.fontSize * 2))
+  })
+
+  it("does not double-scale custom presets saved from a 4K canvas", () => {
+    const clip = createTextClipFromPreset("text-editorial", {
+      canvasWidth: 3840,
+      canvasHeight: 2160,
+    })
+    const record = textPresetFromClip(clip, {
+      name: "4K editorial",
+      description: "Saved at 4K",
+      designScale: 2,
+    })
+    const definition = textPresetToDefinition(record)
+    const at4k = createTextClipFromDefinition(definition, {
+      canvasWidth: 3840,
+      canvasHeight: 2160,
+    })
+    expect(at4k.width).toBeCloseTo(clip.width)
+    expect(at4k.fontSize).toBeCloseTo(clip.fontSize)
+    const at1080 = createTextClipFromDefinition(definition, {
+      canvasWidth: 1920,
+      canvasHeight: 1080,
+    })
+    expect(at1080.width).toBeCloseTo(clip.width / 2)
+    expect(at1080.fontSize).toBeCloseTo(clip.fontSize / 2)
+  })
+
+  it("migrates a legacy custom title preset saved before designScale", () => {
+    const clip = createTextClipFromPreset("text-editorial", {
+      canvasWidth: 3840,
+      canvasHeight: 2160,
+    })
+    const record = textPresetFromClip(clip, {
+      name: "Legacy 4K editorial",
+      description: "Saved before designScale existed",
+    })
+    const legacy = { ...record.definition }
+    delete legacy.designScale
+
+    const migrated = migrateTextPresetDesignScale(legacy, "custom-legacy-editorial")
+    expect(migrated.designScale).toBe(2)
+    const recreated = createTextClipFromDefinition(
+      {
+        ...migrated,
+        id: record.id,
+        name: record.name,
+        description: record.description,
+        category: record.category as TextPresetDefinition["category"],
+      },
+      { canvasWidth: 3840, canvasHeight: 2160 },
+    )
+    expect(recreated.width).toBeCloseTo(clip.width)
+    expect(recreated.fontSize).toBeCloseTo(clip.fontSize)
+  })
+
+  it("persists the inferred designScale for a legacy custom preset on load", async () => {
+    const clip = createTextClipFromPreset("text-editorial", {
+      canvasWidth: 3840,
+      canvasHeight: 2160,
+    })
+    const record = textPresetFromClip(clip, {
+      name: "Legacy 4K editorial",
+      description: "Saved before designScale existed",
+    })
+    const legacy = JSON.parse(JSON.stringify(record)) as typeof record
+    delete legacy.definition.designScale
+    let stored: PresetStorageData<TextPresetValues> | null = {
+      version: 1,
+      presets: [legacy],
+      favorites: [],
+    }
+    const storage = {
+      load: async () => stored,
+      save: async (value: PresetStorageData<TextPresetValues>) => {
+        stored = JSON.parse(JSON.stringify(value))
+      },
+    }
+    const registry = new PresetRegistry(TEXT_PRESET_CATALOG, {
+      definitionSchema: textPresetValuesSchema,
+      storage,
+      migrateDefinition: migrateTextPresetDesignScale,
+    })
+    await registry.load()
+    expect(registry.getPresetById(record.id)?.definition.designScale).toBe(2)
+    expect(stored?.presets[0]?.definition.designScale).toBe(2)
   })
 
   it("round-trips independent custom title design, animation and autoscale snapshots through the registry", async () => {

@@ -1,5 +1,7 @@
 import { useState } from "react"
 import {
+  annotationCanvasScale,
+  annotationCategoryForType,
   annotationPresetFromClip,
   annotationPresetToShapePreset,
   type AnnotationPresetRecord,
@@ -22,7 +24,7 @@ import {
   type AnnotationInspectorProps,
 } from "./annotation-inspector-helpers"
 
-export function AnnotationPresetControls({ clip, onChange }: AnnotationInspectorProps) {
+export function AnnotationPresetControls({ clip, onChange, canvas }: AnnotationInspectorProps) {
   const { registry, snapshot } = useAnnotationPresetRegistry()
   const { toast } = useToast()
   const [browserOpen, setBrowserOpen] = useState(false)
@@ -39,7 +41,7 @@ export function AnnotationPresetControls({ clip, onChange }: AnnotationInspector
       })
       return
     }
-    onChange(applyAnnotationInspectorPreset(clip, shape))
+    onChange(applyAnnotationInspectorPreset(clip, shape, canvas))
     setBrowserOpen(false)
   }
 
@@ -52,9 +54,11 @@ export function AnnotationPresetControls({ clip, onChange }: AnnotationInspector
         .split(",")
         .map((tag) => tag.trim())
         .filter(Boolean),
+      designScale: annotationCanvasScale(canvas?.width, canvas?.height),
     })
     try {
-      await registry.saveCustomPreset(record)
+      // A fresh ID avoids silently overwriting an earlier saved style from the same clip.
+      await registry.saveCustomPreset({ ...record, id: undefined })
       toast({ title: "Preset saved", description: `${data.name} is now in your library.` })
     } catch (error) {
       toast({
@@ -118,7 +122,7 @@ export function AnnotationPresetControls({ clip, onChange }: AnnotationInspector
         key={clip.annotationType}
         open={saveOpen}
         onOpenChange={setSaveOpen}
-        defaultCategory={clip.annotationType}
+        defaultCategory={annotationCategoryForType(clip.annotationType)}
         categories={snapshot.categories}
         onSave={handleSavePreset}
       />

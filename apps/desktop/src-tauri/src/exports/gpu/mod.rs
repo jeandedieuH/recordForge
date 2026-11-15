@@ -267,9 +267,10 @@ pub(crate) fn plan_limitations(
     // with radius = scale), avgblur's radius semantics and the final bilinear
     // upscale, so they no longer force the FFmpeg renderer.
 
-    // Timeline coverage: a gap needs a solid-fill source, which the decode
-    // pass does not synthesise yet.
-    if !plan.gaps.is_empty() {
+    // Timeline coverage: a mid-timeline gap needs a solid-fill source, which
+    // the decode pass does not synthesise yet. A trailing gap is different: it
+    // is an overlay-only freeze tail and the decode pass holds the last frame.
+    if has_non_trailing_gap(plan) {
         reasons.push("timeline gaps".into());
     }
     if !segments_cover_timeline(plan) {
@@ -291,8 +292,9 @@ pub(crate) fn plan_limitations(
     reasons
 }
 
-/// True when the segments tile `[0, plan.duration_ms]` with no hole: the decode
-/// pass relies on that, because it never synthesises a black gap.
+/// True when the segments tile `[0, plan.duration_ms]` with no mid-timeline
+/// hole. The decode pass never synthesises a black gap, but it can hold the
+/// final frame: a trailing uncovered region backed by a gap is a freeze tail.
 fn segments_cover_timeline(plan: &RenderPlan) -> bool {
     let mut spans: Vec<(u64, u64)> = plan
         .segments
@@ -315,6 +317,22 @@ fn segments_cover_timeline(plan: &RenderPlan) -> bool {
         cursor = cursor.max(end);
     }
     cursor >= plan.duration_ms
+        || plan
+            .gaps
+            .iter()
+            .any(|gap| gap.start_ms <= cursor && gap.end_ms >= plan.duration_ms)
+}
+
+/// A gap that starts before the last screen frame cannot be filled by holding
+/// the last picture; only a trailing gap can.
+fn has_non_trailing_gap(plan: &RenderPlan) -> bool {
+    let screen_end = plan
+        .segments
+        .iter()
+        .map(|segment| segment.output_end_ms)
+        .max()
+        .unwrap_or(0);
+    plan.gaps.iter().any(|gap| gap.start_ms < screen_end)
 }
 
 /// Frame-count override for the decode/encode sidecar queues.
@@ -1528,7 +1546,7 @@ pub(crate) fn gpu_error(message: &str) -> crate::errors::AppError {
 mod tests {
     use super::*;
     use crate::exports::cursor::RenderCanvas;
-    use crate::exports::{RenderPlan, RenderSegment};
+    use crate::exports::{RenderPlan, RenderPlanGap, RenderSegment};
     use std::collections::HashMap;
 
     fn gated_canvas() -> RenderCanvas {
@@ -1594,6 +1612,38 @@ mod tests {
     #[test]
     fn a_plain_full_canvas_plan_is_gpu_compatible() {
         assert!(limitations(&plan_with_canvas(gated_canvas())).is_empty());
+    }
+
+    #[test]
+    fn a_trailing_freeze_tail_stays_on_the_gpu_renderer() {
+        let mut plan = plan_with_canvas(gated_canvas());
+        plan.duration_ms = 5_000;
+        plan.gaps.push(RenderPlanGap {
+            start_ms: 3_000,
+            end_ms: 5_000,
+        });
+        assert!(
+            limitations(&plan).is_empty(),
+            "trailing hold should be GPU-compatible: {:?}",
+            limitations(&plan)
+        );
+    }
+
+    #[test]
+    fn a_mid_timeline_gap_still_uses_the_compatibility_renderer() {
+        let mut plan = plan_with_canvas(gated_canvas());
+        plan.gaps = vec![RenderPlanGap {
+            start_ms: 1_000,
+            end_ms: 2_000,
+        }];
+        // Segments still cover the final frame; the gap is the only problem.
+        plan.segments[0].output_start_ms = 0;
+        plan.segments[0].output_end_ms = 3_000;
+        let reasons = limitations(&plan);
+        assert!(
+            reasons.iter().any(|reason| reason == "timeline gaps"),
+            "{reasons:?}"
+        );
     }
 
     fn blur_mask(radius: f64) -> crate::exports::RenderPlanMask {

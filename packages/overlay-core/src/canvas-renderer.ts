@@ -104,9 +104,13 @@ function renderDisplayItem(
 function renderAnnotation(
   context: CanvasRenderingContext2D,
   item: Extract<OverlayDisplayItem, { kind: "annotation" }>,
-  _options: OverlayCanvasRenderOptions,
+  options: OverlayCanvasRenderOptions,
 ): void {
   const { transform } = item
+  if (item.annotationType === "spotlight") {
+    renderSpotlight(context, item, options)
+    return
+  }
   context.save()
   applyTransform(context, transform)
   context.globalAlpha *= item.drawProgress
@@ -119,12 +123,6 @@ function renderAnnotation(
   context.lineCap = "round"
   context.setLineDash(strokeDash(item.strokeStyle, item.strokeWidth))
   applyShadow(context, item.shadowEnabled, item.shadowColor, item.shadowBlur)
-
-  if (item.annotationType === "spotlight") {
-    renderSpotlight(context, item)
-    context.restore()
-    return
-  }
 
   if (item.annotationType === "arrow" || item.annotationType === "line") {
     const start = { x: transform.x, y: transform.y }
@@ -193,6 +191,12 @@ function renderAnnotation(
 
   if ((item.annotationType === "callout" || item.annotationType === "badge") && item.text) {
     context.setLineDash([])
+    // Text is unshadowed in the native renderer; clear the box/backdrop shadow
+    // so glyph edges match the exported frame.
+    context.shadowColor = "transparent"
+    context.shadowBlur = 0
+    context.shadowOffsetX = 0
+    context.shadowOffsetY = 0
     context.fillStyle = item.textColor
     context.font = `700 ${item.fontSize}px ${fontFamily("sans")}`
     context.textAlign = "center"
@@ -253,17 +257,59 @@ function renderCalloutPointer(
 function renderSpotlight(
   context: CanvasRenderingContext2D,
   item: Extract<OverlayDisplayItem, { kind: "annotation" }>,
+  options: OverlayCanvasRenderOptions,
 ): void {
   const { transform } = item
+  // The display list is authored in project pixels, but the preview context is
+  // scaled to the backing store; recover the project canvas so the dimming
+  // covers the whole frame at any preview size.
+  const scale = options.pixelScale ?? 1
+  const projectWidth = context.canvas.width / scale
+  const projectHeight = context.canvas.height / scale
   const centerX = transform.x + transform.width / 2
   const centerY = transform.y + transform.height / 2
+  const anchorX = transform.x + transform.width * transform.anchorX
+  const anchorY = transform.y + transform.height * transform.anchorY
+  const angle = (transform.rotation * Math.PI) / 180
+  const dx = centerX - anchorX
+  const dy = centerY - anchorY
+  const rotatedCenterX = anchorX + dx * Math.cos(angle) - dy * Math.sin(angle)
+  const rotatedCenterY = anchorY + dx * Math.sin(angle) + dy * Math.cos(angle)
+
+  // A single even-odd path cuts the ellipse out of the dimming layer without
+  // erasing overlays drawn earlier in the z-order (destination-out would).
+  const path = new Path2D()
+  path.rect(0, 0, projectWidth, projectHeight)
+  path.ellipse(
+    rotatedCenterX,
+    rotatedCenterY,
+    Math.max(0, transform.width / 2),
+    Math.max(0, transform.height / 2),
+    angle,
+    0,
+    Math.PI * 2,
+  )
   context.save()
+  context.globalAlpha *= transform.opacity * item.drawProgress
   context.fillStyle = withOpacity(item.fillColor, item.fillOpacity)
-  context.fillRect(0, 0, context.canvas.width, context.canvas.height)
-  context.globalCompositeOperation = "destination-out"
-  context.beginPath()
-  context.ellipse(centerX, centerY, transform.width / 2, transform.height / 2, 0, 0, Math.PI * 2)
-  context.fill()
+  context.fill(path, "evenodd")
+
+  if (item.strokeWidth > 0) {
+    context.strokeStyle = item.strokeColor
+    context.lineWidth = item.strokeWidth
+    context.setLineDash(strokeDash(item.strokeStyle, item.strokeWidth))
+    context.beginPath()
+    context.ellipse(
+      rotatedCenterX,
+      rotatedCenterY,
+      Math.max(0, transform.width / 2),
+      Math.max(0, transform.height / 2),
+      angle,
+      0,
+      Math.PI * 2,
+    )
+    context.stroke()
+  }
   context.restore()
 }
 
@@ -689,6 +735,7 @@ function drawArrowHead(
 
 function withOpacity(color: string, opacity: number): string {
   if (opacity >= 1) return color
+  const clamped = Math.min(1, Math.max(0, opacity))
   if (color.startsWith("#")) {
     const hex = color.slice(1)
     const expanded =
@@ -698,12 +745,20 @@ function withOpacity(color: string, opacity: number): string {
             .map((part) => part + part)
             .join("")
         : hex
-    if (expanded.length === 6) {
+    if (expanded.length === 6 || expanded.length === 8) {
       const red = Number.parseInt(expanded.slice(0, 2), 16)
       const green = Number.parseInt(expanded.slice(2, 4), 16)
       const blue = Number.parseInt(expanded.slice(4, 6), 16)
-      return `rgba(${red}, ${green}, ${blue}, ${opacity})`
+      const alpha = expanded.length === 8 ? Number.parseInt(expanded.slice(6, 8), 16) / 255 : 1
+      return `rgba(${red}, ${green}, ${blue}, ${alpha * clamped})`
     }
+  }
+  const rgb = /^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)(?:\s*,\s*([\d.]+))?\s*\)$/.exec(
+    color,
+  )
+  if (rgb) {
+    const alpha = rgb[4] === undefined ? 1 : Number.parseFloat(rgb[4])
+    return `rgba(${rgb[1]}, ${rgb[2]}, ${rgb[3]}, ${alpha * clamped})`
   }
   return color
 }
@@ -711,8 +766,10 @@ function withOpacity(color: string, opacity: number): string {
 function fontFamily(family: string): string {
   if (family === "serif") return '"Source Serif 4", Georgia, serif'
   if (family === "mono") return '"JetBrains Mono", Consolas, monospace'
-  if (family === "heading" || family === "outfit") return "Outfit, Inter, sans-serif"
-  return "Inter, Segoe UI, sans-serif"
+  if (family === "heading" || family === "outfit") {
+    return '"Outfit", "Inter Variable", "Inter", sans-serif'
+  }
+  return '"Inter Variable", "Inter", "Segoe UI", sans-serif'
 }
 
 function textPositionX(
@@ -730,6 +787,49 @@ function revealText(text: string, progress: number): string {
   if (progress >= 1) return text
   if (progress <= 0) return ""
   return text.slice(0, Math.max(0, Math.ceil(text.length * progress)))
+}
+
+interface GraphemeSegmenter {
+  segment(input: string): Iterable<{ segment: string }>
+}
+
+// Intl.Segmenter is present in every supported Chromium/WebView and in Node,
+// but the package's TS lib target predates its typings.
+const SegmenterCtor = (
+  Intl as unknown as {
+    Segmenter?: new (locale?: string, options?: { granularity: "grapheme" }) => GraphemeSegmenter
+  }
+).Segmenter
+const graphemeSegmenter = SegmenterCtor
+  ? new SegmenterCtor(undefined, { granularity: "grapheme" })
+  : null
+
+function graphemes(text: string): string[] {
+  if (graphemeSegmenter) {
+    return Array.from(graphemeSegmenter.segment(text), (part) => part.segment)
+  }
+  return Array.from(text)
+}
+
+/** Split an unbreakable token the same way the Rust renderer does. */
+function breakLongWord(
+  word: string,
+  maxWidth: number,
+  measureWidth: (line: string) => number,
+): string[] {
+  const lines: string[] = []
+  let current = ""
+  for (const grapheme of graphemes(word)) {
+    const next = current + grapheme
+    if (current && measureWidth(next) > maxWidth) {
+      lines.push(current)
+      current = grapheme
+    } else {
+      current = next
+    }
+  }
+  if (current) lines.push(current)
+  return lines.length > 0 ? lines : [""]
 }
 
 export function wrapTextToLines(
@@ -751,6 +851,18 @@ export function wrapTextToLines(
     let currentLine = ""
 
     for (const word of words) {
+      // A word wider than the line cannot be wrapped at spaces. Break it by
+      // grapheme (not UTF-16 code unit) so export's unicode-segmentation
+      // wrapping produces the same lines for long URLs, CJK and emoji runs.
+      if (measureWidth(word) > maxWidth) {
+        if (currentLine) {
+          result.push(currentLine)
+        }
+        const pieces = breakLongWord(word, maxWidth, measureWidth)
+        result.push(...pieces.slice(0, -1))
+        currentLine = pieces[pieces.length - 1] ?? ""
+        continue
+      }
       if (!currentLine) {
         currentLine = word
         continue

@@ -17,6 +17,7 @@ import {
 export interface AnnotationInspectorProps {
   clip: AnnotationClip
   onChange: (update: Partial<AnnotationClip>) => void
+  canvas?: { width: number; height: number }
 }
 
 export function isAnnotationLine(type: AnnotationType) {
@@ -128,10 +129,16 @@ export function changeAnnotationAnimation(
 export function applyAnnotationInspectorPreset(
   clip: AnnotationClip,
   shape: AnnotationShapePreset,
+  canvas?: { width: number; height: number },
 ): AnnotationClip {
   // Shape conversion can move a connector's origin; a position lock must also guard preset changes.
   if (clip.locked && shape.type !== clip.annotationType) return clip
-  const updated = applyAnnotationToolToClip({ clip, settings: annotationSettingsFromPreset(shape) })
+  const updated = applyAnnotationToolToClip({
+    clip,
+    settings: annotationSettingsFromPreset(shape, canvas?.width, canvas?.height),
+    canvasWidth: canvas?.width,
+    canvasHeight: canvas?.height,
+  })
   // Older custom presets may only supply legacy animation fields. Do not retain stale engine motion.
   const legacyOut =
     shape.animationOut === "draw" || shape.animationOut === "scale-up"
