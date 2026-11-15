@@ -93,6 +93,11 @@ export const transcribeRequestSchema = z.object({
   language: z.string().regex(/^(auto|[a-z]{2,3})$/),
   streamIndex: z.number().int().min(0).optional(),
   force: z.boolean(),
+  /**
+   * Verbatim mode: keep disfluencies ("um", "uh") in the transcript so Smart
+   * Cut's filler removal has something to remove. Cached separately.
+   */
+  verbatim: z.boolean().optional(),
 })
 export type TranscribeRequest = z.infer<typeof transcribeRequestSchema>
 

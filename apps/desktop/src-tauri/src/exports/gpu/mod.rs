@@ -29,6 +29,7 @@ use tracing::{info, warn};
 
 use super::camera::{self, ZoomTransformState};
 use super::encoding::ExportEncoder;
+use super::zoom_detail;
 use super::{
     common_screen_source, CompositionShared, CompositionWindow, EffectDowngrade, ExportSettings,
     RenderOutcome, RenderPlan,
@@ -239,13 +240,123 @@ pub(crate) fn effect_support(
                 });
             }
         }
+
+        // Zoom clarity (M2 #3). The compatibility graph zooms the fitted
+        // canvas-resolution stream, so a zoom still magnifies an upscaled plane;
+        // sharpening is a mild luma unsharp instead of the RCAS-style pass, and
+        // only runs when the source carries more detail than the plane.
+        if plan
+            .zoom_segments
+            .iter()
+            .any(|segment| segment.enabled && !super::camera::segment_is_loupe(segment))
+        {
+            downgrades.push(EffectDowngrade {
+                effect: "zoom-detail".into(),
+                reason: "Zoomed frames sample the canvas-resolution stream on this renderer".into(),
+            });
+            let content_w = plan
+                .canvas
+                .as_ref()
+                .map(|canvas| (canvas.width as f64 - 2.0 * canvas.padding as f64).max(1.0))
+                .unwrap_or(1.0);
+            let has_source_detail = plan.segments.iter().any(|segment| {
+                segment
+                    .source_width
+                    .is_some_and(|width| width as f64 / content_w > 1.02)
+            });
+            if has_source_detail
+                && plan
+                    .canvas
+                    .as_ref()
+                    .and_then(|canvas| canvas.zoom_sharpening.as_deref())
+                    != Some("off")
+            {
+                downgrades.push(EffectDowngrade {
+                    effect: "zoom-sharpening".into(),
+                    reason:
+                        "Zoomed frames are sharpened with a mild luma unsharp instead of the compositor's RCAS pass"
+                            .into(),
+                });
+            }
+        }
+
+        // Motion blur (M2 #1): the cursor is exact (same Rust rasterizer), the
+        // zoom/pan taps are GPU-only.
+        if let Some(blur) = plan
+            .canvas
+            .as_ref()
+            .and_then(|canvas| canvas.motion_blur.as_ref())
+            .filter(|blur| blur.is_active())
+        {
+            if blur.zoom > 0.0 || blur.pan > 0.0 {
+                downgrades.push(EffectDowngrade {
+                    effect: "motion-blur".into(),
+                    reason: "Rendered without zoom/pan motion blur: the compatibility renderer blurs the cursor only"
+                        .into(),
+                });
+            }
+        }
+
+        // Glass Loupe (M2 #2): the lens is not rendered on this renderer.
+        if plan
+            .zoom_segments
+            .iter()
+            .any(|segment| segment.enabled && segment.style.as_deref() == Some("loupe"))
+        {
+            downgrades.push(EffectDowngrade {
+                effect: "loupe-glass".into(),
+                reason:
+                    "Rendered without the Glass Loupe: this renderer keeps the frame at its zoom"
+                        .into(),
+            });
+        }
+
+        // Camera layouts (#5): the FFmpeg graph composites one static camera
+        // geometry, so an animated layout renders at the segment's dominant
+        // rect instead of moving.
+        if !plan.camera_layouts.is_empty() {
+            downgrades.push(EffectDowngrade {
+                effect: "camera-layouts".into(),
+                reason: "Animated camera layouts render at a fixed rect on this renderer".into(),
+            });
+        }
+
+        // Animated video layers (#13): fade/scale/slide keyframes are a
+        // compositor feature; this renderer shows the layer at its static rect.
+        if plan
+            .overlays
+            .iter()
+            .any(|overlay| !overlay.keyframes.is_empty())
+        {
+            downgrades.push(EffectDowngrade {
+                effect: "video-layer-animation".into(),
+                reason: "Animated b-roll layers render without their fade/scale/slide".into(),
+            });
+        }
+
+        // Video-layer fit (#13): the FFmpeg graph fills the rect like `cover`,
+        // so letterboxed b-roll is reported instead of silently cropped.
+        if plan
+            .overlays
+            .iter()
+            .any(|overlay| matches!(overlay.fit.as_deref(), Some("contain" | "fill")))
+        {
+            downgrades.push(EffectDowngrade {
+                effect: "video-layer-fit".into(),
+                reason: "B-roll layers fill their rect on this renderer instead of letterboxing"
+                    .into(),
+            });
+        }
     }
     downgrades
 }
 
-/// True when a side-by-side camera window moves the screen rect mid-timeline,
-/// so a static per-window plate cannot follow it.
+/// True when a side-by-side camera window (or a camera layout lane) moves the
+/// screen rect mid-timeline, so a static per-window plate cannot follow it.
 fn screen_rect_varies(plan: &RenderPlan, canvas: &super::cursor::RenderCanvas) -> bool {
+    if !plan.camera_layouts.is_empty() {
+        return true;
+    }
     let windows = super::merge_ms_windows(
         plan.overlays
             .iter()
@@ -316,12 +427,9 @@ pub(crate) fn plan_limitations(
     // with radius = scale), avgblur's radius semantics and the final bilinear
     // upscale, so they no longer force the FFmpeg renderer.
 
-    // Timeline coverage: a mid-timeline gap needs a solid-fill source, which
-    // the decode pass does not synthesise yet. A trailing gap is different: it
-    // is an overlay-only freeze tail and the decode pass holds the last frame.
-    if has_non_trailing_gap(plan) {
-        reasons.push("timeline gaps".into());
-    }
+    // Timeline coverage (F2): the decode pass synthesises black frames for every
+    // declared gap, so mid-timeline holes (b-roll over a hole, custom tracks)
+    // stay on the compositor instead of forcing the FFmpeg renderer.
     if !segments_cover_timeline(plan) {
         reasons.push("segments do not cover the full timeline".into());
     }
@@ -341,9 +449,9 @@ pub(crate) fn plan_limitations(
     reasons
 }
 
-/// True when the segments tile `[0, plan.duration_ms]` with no mid-timeline
-/// hole. The decode pass never synthesises a black gap, but it can hold the
-/// final frame: a trailing uncovered region backed by a gap is a freeze tail.
+/// True when the screen segments plus the declared gaps tile
+/// `[0, plan.duration_ms]`. The trailing region may stay uncovered: it is the
+/// freeze-frame overlay tail the decode pass holds the last frame across.
 fn segments_cover_timeline(plan: &RenderPlan) -> bool {
     let mut spans: Vec<(u64, u64)> = plan
         .segments
@@ -354,6 +462,14 @@ fn segments_cover_timeline(plan: &RenderPlan) -> bool {
     if spans.is_empty() {
         return false;
     }
+    // Only mid-timeline gaps become black fill; a trailing gap is the freeze
+    // tail and is covered by the decode hold.
+    spans.extend(
+        plan.gaps
+            .iter()
+            .filter(|gap| gap.end_ms < plan.duration_ms)
+            .map(|gap| (gap.start_ms, gap.end_ms)),
+    );
     spans.sort_unstable();
     if spans[0].0 != 0 {
         return false;
@@ -365,23 +481,13 @@ fn segments_cover_timeline(plan: &RenderPlan) -> bool {
         }
         cursor = cursor.max(end);
     }
+    // The tail may stay uncovered only when a declared gap covers it: that is
+    // the freeze-frame overlay tail the decode pass holds the last frame across.
     cursor >= plan.duration_ms
         || plan
             .gaps
             .iter()
             .any(|gap| gap.start_ms <= cursor && gap.end_ms >= plan.duration_ms)
-}
-
-/// A gap that starts before the last screen frame cannot be filled by holding
-/// the last picture; only a trailing gap can.
-fn has_non_trailing_gap(plan: &RenderPlan) -> bool {
-    let screen_end = plan
-        .segments
-        .iter()
-        .map(|segment| segment.output_end_ms)
-        .max()
-        .unwrap_or(0);
-    plan.gaps.iter().any(|gap| gap.start_ms < screen_end)
 }
 
 /// Frame-count override for the decode/encode sidecar queues.
@@ -485,6 +591,40 @@ pub(crate) fn render_timeline_on_gpu(
 
     let started = Instant::now();
     let frame = canvas_frame(plan, canvas, asset_paths, resource_dir, shared)?;
+    // Zoom clarity (#3): when a zoom magnifies past what the canvas-resolution
+    // plane can carry, decode the whole screen chain at the detail resolution so
+    // the crop samples real source pixels instead of an upscale. The analysis
+    // decides; a plan without zoom keeps the canvas plane, the pipe size and the
+    // per-frame identity bypass it has today.
+    let source_size = super::common_screen_source(&plan.segments, asset_paths, &shared.probe)
+        .unwrap_or((width, height));
+    let detail = zoom_detail::analyze_zoom_detail(
+        &plan.zoom_segments,
+        canvas,
+        (
+            frame.rect.2.round().max(1.0) as u32,
+            frame.rect.3.round().max(1.0) as u32,
+        ),
+        source_size,
+        window.first_frame,
+        window.frame_count,
+    );
+    let detail_scale = if detail.is_active() {
+        (detail.width as f64 / frame.rect.2.max(1.0)).max(1.0)
+    } else {
+        1.0
+    };
+    let plane = (
+        // NV12 + the compositor's plane creation need a 4x2 grid.
+        ((width as f64 * detail_scale).round() as u32) & !3,
+        ((height as f64 * detail_scale).round() as u32) & !1,
+    );
+    let content = (
+        frame.rect.0 * detail_scale,
+        frame.rect.1 * detail_scale,
+        frame.rect.2 * detail_scale,
+        frame.rect.3 * detail_scale,
+    );
     let plate_runtimes = build_overlay_runtime(
         plan,
         project_id,
@@ -502,9 +642,9 @@ pub(crate) fn render_timeline_on_gpu(
         asset_paths,
         shared,
         &window,
-        width,
-        height,
-        frame.rect,
+        plane.0,
+        plane.1,
+        content,
         fps,
         decode_hwaccel(),
     )?;
@@ -515,7 +655,14 @@ pub(crate) fn render_timeline_on_gpu(
         ));
     }
 
-    let mut compositor = compositor::Compositor::new(width, height, &frame, &spec)?;
+    let mut compositor = compositor::Compositor::new(
+        width,
+        height,
+        plane,
+        &frame,
+        &spec,
+        detail.sharpening as f32,
+    )?;
     let compositor_ready_ms = started.elapsed().as_millis() as u64;
     let compositor_ms = compositor_ready_ms - plan_ms;
 
@@ -564,6 +711,10 @@ pub(crate) fn render_timeline_on_gpu(
         out_width,
         out_height,
         fps,
+        plane_width = plane.0,
+        plane_height = plane.1,
+        detail_frames = detail.detail_frames(),
+        sharpening = detail.sharpening,
         plan_ms,
         compositor_ms,
         cameras = cameras.len(),
@@ -599,6 +750,13 @@ pub(crate) fn render_timeline_on_gpu(
         plate_receivers.push(receiver);
     }
     let plate_count = plate_runtimes.len();
+    // Glass Loupe (#2) is resolved only when the plan has any, so a plan
+    // without lenses pays nothing per frame — including the cursor-point
+    // evaluation the lens needs to ride the rendered pointer tip.
+    let has_loupes = plan
+        .zoom_segments
+        .iter()
+        .any(|segment| segment.enabled && segment.style.as_deref() == Some("loupe"));
 
     let mut composed_frames = 0u64;
     let mut passthrough_frames = 0u64;
@@ -720,11 +878,22 @@ pub(crate) fn render_timeline_on_gpu(
                             index,
                         )
                     });
+                    // The lens rides the rendered cursor tip, which only the
+                    // plate worker's `CursorRenderer` can map — send it along
+                    // with the planes at the frame's exact CFR timestamp.
+                    let cursor_point = if has_loupes {
+                        runtime
+                            .worker
+                            .cursor_canvas_point_at(super::cursor::frame_time_ms(index, fps))
+                    } else {
+                        None
+                    };
                     if sender
                         .send(PlateFrames {
                             cursor,
                             items,
                             keys,
+                            cursor_point,
                         })
                         .is_err()
                     {
@@ -778,6 +947,7 @@ pub(crate) fn render_timeline_on_gpu(
             } else {
                 PlateFrames::default()
             };
+            let cursor_point = planes.cursor_point;
             let planes = (planes.cursor, planes.items, planes.keys);
 
             let mut camera_frames = Vec::new();
@@ -795,10 +965,22 @@ pub(crate) fn render_timeline_on_gpu(
                     let frame = camera.next_frame(camera_prefetch);
                     camera_wait += wait_started.elapsed();
                     match frame {
-                        Ok(Some(data)) => camera_frames.push(compositor::CameraFrame {
-                            index: camera.index,
-                            data,
-                        }),
+                        Ok(Some(data)) => {
+                            let pose = pose_at(&camera.pose, output_ms, camera.base);
+                            // A static frame keeps the pre-baked geometry, so a
+                            // plan without layouts or animation never rewrites
+                            // the quad.
+                            let posed = (pose.0 - camera.base.0).abs() > 0.01
+                                || (pose.1 - camera.base.1).abs() > 0.01
+                                || (pose.2 - camera.base.2).abs() > 0.01
+                                || (pose.3 - camera.base.3).abs() > 0.01
+                                || (pose.4 - camera.base.4).abs() > 0.001;
+                            camera_frames.push(compositor::CameraFrame {
+                                index: camera.index,
+                                data,
+                                pose: posed.then_some(pose),
+                            });
+                        }
                         Ok(None) => {
                             camera.stop();
                             camera.done = true;
@@ -825,18 +1007,72 @@ pub(crate) fn render_timeline_on_gpu(
                 .map(|(index, _)| index)
                 .collect();
 
-            let dest = frame.dest_rect(output_ms);
-            let side_by_side = frame.side_by_side_at(output_ms);
-            let has_layers = planes.0.is_some()
+            let mut dest = frame.dest_rect(output_ms);
+            let mut side_by_side = frame.side_by_side_at(output_ms);
+            // Camera layout lane (#5): a side-by-side window moves the screen
+            // into its own slot, interpolated per frame.
+            if let Some(rect) = screen_layout_rect_at(plan, output_ms) {
+                dest = rect;
+                side_by_side = false;
+            }
+            let has_screen = !is_gap_at(plan, output_ms);
+            // Glass Loupe (#2): one lens per frame riding the cursor tip,
+            // above the screen. While a lens is visible the cursor itself is
+            // dropped below — the pointer stays hidden under the glass.
+            let loupe = has_loupes
+                .then(|| {
+                    super::loupe::resolve_loupe_at(
+                        &plan.zoom_segments,
+                        canvas,
+                        output_ms,
+                        cursor_point,
+                    )
+                })
+                .flatten()
+                .filter(super::loupe::LoupePose::is_visible)
+                .map(|pose| {
+                    let rect = frame.rect;
+                    let ring = super::parse_color_hex(&pose.settings.ring_color, 1.0);
+                    // Magnification = `scale`: the lens samples `diameter /
+                    // scale` and draws it across the lens, so a 2x loupe is
+                    // twice as large. The square stays inside the frame.
+                    let target = super::loupe::loupe_sample_square(&pose, rect);
+                    compositor::LoupeFrame {
+                        center: (pose.center.0 as f32, pose.center.1 as f32),
+                        radius: pose.radius as f32,
+                        corner_radius: pose.corner_radius as f32,
+                        target: [
+                            ((target.0 - rect.0) / rect.2.max(1.0)) as f32,
+                            ((target.1 - rect.1) / rect.3.max(1.0)) as f32,
+                            (target.2 / rect.2.max(1.0)) as f32,
+                            (target.3 / rect.3.max(1.0)) as f32,
+                        ],
+                        ring_width: pose.settings.ring_width as f32,
+                        ring_opacity: pose.settings.ring_opacity as f32,
+                        ring_color: [ring.red(), ring.green(), ring.blue()],
+                        presence: pose.presence as f32,
+                        shadow_blur: pose.settings.shadow_blur as f32,
+                        shadow_opacity: pose.settings.shadow_opacity as f32,
+                        glass: pose.settings.glass,
+                    }
+                });
+            // The lens rides the cursor tip, so while a lens is visible the
+            // pointer hides under the glass: drop the cursor plane. The items
+            // and keys planes are unaffected.
+            let cursor_plane = if loupe.is_some() { None } else { planes.0 };
+            let has_layers = cursor_plane.is_some()
                 || planes.1.is_some()
                 || planes.2.is_some()
                 || !camera_frames.is_empty();
-            // Identity-zoom frames never reach a shader unless a layer, mask or
-            // canvas treatment needs one.
-            let bypass = camera::zoom_transform_is_identity(&state, width, height)
+            // Identity-zoom frames never reach a shader unless a layer, mask,
+            // canvas treatment or lens needs one.
+            let bypass = detail_scale == 1.0
+                && has_screen
+                && camera::zoom_transform_is_identity(&state, width, height)
                 && frame.is_plain(width, height)
                 && !has_layers
                 && masks.is_empty()
+                && loupe.is_none()
                 && dest == frame.rect;
 
             let compose_started = Instant::now();
@@ -847,18 +1083,36 @@ pub(crate) fn render_timeline_on_gpu(
                 composed_frames += 1;
                 compositor::Frame::Compose(compositor::Nv12Frame { data: decoded })
             };
+            // Motion blur (#1): zoom/pan shutters sample the crop at the
+            // shutter's start and end. Cursor blur rides the shared Rust
+            // rasterizer, so it costs nothing here.
+            let blur = if bypass {
+                None
+            } else {
+                motion_blur_strip(&plan.zoom_segments, canvas, output_ms, plane, content)
+            };
             let request = compositor::FrameRequest {
                 crop: if bypass {
                     FULL_FRAME
                 } else {
-                    zoom_crop(&state, width, height, frame.rect)
+                    zoom_crop(&state, plane.0, plane.1, content)
                 },
                 dest,
+                has_screen,
                 radius: frame.radius,
                 side_by_side,
-                cursor: planes.0,
+                cursor: cursor_plane,
                 items: planes.1,
                 keys: planes.2,
+                blur,
+                loupe,
+                // Sharpening is a zoom effect: identity frames keep their pixels
+                // even in a zoomed plan.
+                sharpening: if camera::zoom_transform_is_identity(&state, width, height) {
+                    0.0
+                } else {
+                    detail.sharpening as f32
+                },
                 cameras: camera_frames,
                 masks,
             };
@@ -1000,6 +1254,9 @@ struct PlateFrames {
     cursor: Option<compositor::PlaneFrame>,
     items: Option<compositor::PlaneFrame>,
     keys: Option<compositor::PlaneFrame>,
+    /// The cursor tip's canvas position at this frame — `None` unless the plan
+    /// has loupes (the lens rides it) or the cursor is not drawn.
+    cursor_point: Option<(f64, f64)>,
 }
 
 /// One generated-plate worker: per-frame raster state plus the immutable rects
@@ -1060,6 +1317,11 @@ struct CameraRuntime {
     /// Bounded read-ahead created on the camera's first visible frame.
     prefetch: Option<decode::PrefetchReader>,
     done: bool,
+    /// Per-frame pose track (camera layout lane, or the layer's animation).
+    /// Empty keeps the static geometry for every frame.
+    pose: Vec<super::RenderLayoutKeyframe>,
+    /// Static canvas pose: `(x, y, width, height, opacity)`.
+    base: (f64, f64, f64, f64, f64),
 }
 
 impl CameraRuntime {
@@ -1225,6 +1487,12 @@ fn build_cameras(
         .iter()
         .filter(|track| track.is_renderable(plan.duration_ms))
     {
+        let first = &plan.overlays[track.first_overlay()];
+        // Camera bubble → the camera layout lane drives the pose (and the grown
+        // decode plane). B-roll and media-track video → their own animation
+        // keyframes, never the camera lane.
+        let is_camera = first.role.as_deref() == Some("camera");
+        let max_rect = camera_layout_max_for(plan, track);
         let Some(camera_plan) = decode::plan_camera(
             project_id,
             track,
@@ -1233,14 +1501,17 @@ fn build_cameras(
             shared,
             plan.duration_ms,
             fps,
+            max_rect,
         )?
         else {
             continue;
         };
         let process = decode::DecodeProcess::spawn_camera(ffmpeg_path, &camera_plan)?;
-        // Index the compositor's camera inventory, not the plan overlay list:
-        // hidden/zero-length overlays never reach either, and both lists apply
-        // the identical coalesce + renderable filter.
+        let pose = if is_camera {
+            camera_layout_pose(plan)
+        } else {
+            first.keyframes.clone()
+        };
         cameras.push(CameraRuntime {
             index: cameras.len(),
             start_ms: track.start_ms,
@@ -1248,9 +1519,128 @@ fn build_cameras(
             process,
             prefetch: None,
             done: false,
+            pose,
+            base: (first.x, first.y, first.width, first.height, first.opacity),
         });
     }
     Ok(cameras)
+}
+
+/// Largest rect any camera-layout keyframe reaches, so the camera decoder can
+/// allocate a plane big enough for a `fullscreen` moment.
+fn camera_layout_max_rect(plan: &RenderPlan) -> Option<(f64, f64)> {
+    let mut width: f64 = 0.0;
+    let mut height: f64 = 0.0;
+    for layout in &plan.camera_layouts {
+        for keyframe in &layout.camera {
+            width = width.max(keyframe.width);
+            height = height.max(keyframe.height);
+        }
+    }
+    (width > 0.0 && height > 0.0).then_some((width, height))
+}
+
+/// The layout-driven decode plane applies to camera-role layers only. Both the
+/// decode pass and the compositor inventory call this, so the decoded frame size
+/// and the quad it uploads into cannot disagree.
+fn camera_layout_max_for(plan: &RenderPlan, track: &super::CameraTrack) -> Option<(f64, f64)> {
+    if plan.overlays[track.first_overlay()].role.as_deref() != Some("camera") {
+        return None;
+    }
+    camera_layout_max_rect(plan)
+}
+
+/// Flattened camera-layout keyframes in output order (the bubble's pose track).
+fn camera_layout_pose(plan: &RenderPlan) -> Vec<super::RenderLayoutKeyframe> {
+    let mut keyframes: Vec<super::RenderLayoutKeyframe> = plan
+        .camera_layouts
+        .iter()
+        .flat_map(|layout| layout.camera.iter().cloned())
+        .collect();
+    keyframes.sort_by_key(|keyframe| keyframe.time_ms);
+    keyframes
+}
+
+/// Interpolate a pose track at `time_ms`. Outside the track's own span the
+/// layer keeps its static geometry, which is what lets a layout window end and
+/// the base transform resume.
+fn pose_at(
+    keyframes: &[super::RenderLayoutKeyframe],
+    time_ms: f64,
+    base: (f64, f64, f64, f64, f64),
+) -> (f64, f64, f64, f64, f64) {
+    let Some(first) = keyframes.first() else {
+        return base;
+    };
+    let last = keyframes.last().expect("non-empty");
+    if time_ms < first.time_ms as f64 || time_ms > last.time_ms as f64 {
+        return base;
+    }
+    let mut previous = first;
+    for keyframe in keyframes {
+        if keyframe.time_ms as f64 > time_ms {
+            let span = (keyframe.time_ms - previous.time_ms).max(1) as f64;
+            let t = ((time_ms - previous.time_ms as f64) / span).clamp(0.0, 1.0);
+            let mix = |from: f64, to: f64| from + (to - from) * t;
+            return (
+                mix(previous.x, keyframe.x),
+                mix(previous.y, keyframe.y),
+                mix(previous.width, keyframe.width),
+                mix(previous.height, keyframe.height),
+                mix(previous.opacity, keyframe.opacity),
+            );
+        }
+        previous = keyframe;
+    }
+    (
+        previous.x,
+        previous.y,
+        previous.width,
+        previous.height,
+        previous.opacity,
+    )
+}
+
+/// Screen rect for a camera-layout frame (#5 side-by-side), interpolated from
+/// the active window's `screen` keyframes.
+fn screen_layout_rect_at(plan: &RenderPlan, time_ms: f64) -> Option<(f64, f64, f64, f64)> {
+    let layout = plan
+        .camera_layouts
+        .iter()
+        .rfind(|layout| time_ms >= layout.start_ms as f64 && time_ms < layout.end_ms as f64)?;
+    let keyframes = layout.screen.as_ref()?;
+    let first = keyframes.first()?;
+    let last = keyframes.last()?;
+    if time_ms < first.time_ms as f64 || time_ms > last.time_ms as f64 {
+        return None;
+    }
+    let mut previous = first;
+    for keyframe in keyframes {
+        if keyframe.time_ms as f64 > time_ms {
+            let span = (keyframe.time_ms - previous.time_ms).max(1) as f64;
+            let t = ((time_ms - previous.time_ms as f64) / span).clamp(0.0, 1.0);
+            let mix = |from: f64, to: f64| from + (to - from) * t;
+            return Some((
+                mix(previous.x, keyframe.x),
+                mix(previous.y, keyframe.y),
+                mix(previous.width, keyframe.width),
+                mix(previous.height, keyframe.height),
+            ));
+        }
+        previous = keyframe;
+    }
+    Some((previous.x, previous.y, previous.width, previous.height))
+}
+
+/// True when no screen segment covers `time_ms` (a mid-timeline gap). A trailing
+/// gap is the freeze-frame overlay tail, which the decode hold fills with the
+/// last frame, so it is not a hole.
+fn is_gap_at(plan: &RenderPlan, time_ms: f64) -> bool {
+    plan.gaps.iter().any(|gap| {
+        gap.end_ms < plan.duration_ms
+            && time_ms >= gap.start_ms as f64
+            && time_ms < gap.end_ms as f64
+    })
 }
 
 /// Where the screen sits on the canvas, the side-by-side slot, how round its
@@ -1405,8 +1795,9 @@ fn compositor_spec(
         .filter(|track| track.is_renderable(plan.duration_ms))
     {
         let overlay = &plan.overlays[track.first_overlay()];
-        let width = ((overlay.width.round() as u32) / 2 * 2).max(2);
-        let height = ((overlay.height.round() as u32) / 2 * 2).max(2);
+        // Must match the decode pass: layout keyframes can grow the plane.
+        let layout_max = camera_layout_max_for(plan, track);
+        let (width, height) = decode::camera_decode_size(track, &plan.overlays, layout_max);
         let x = (overlay.x.round() as i32) / 2 * 2;
         let y = (overlay.y.round() as i32) / 2 * 2;
         let shape = match overlay.shape.as_str() {
@@ -1612,6 +2003,98 @@ fn zoom_crop(
     }
 }
 
+/// Zoom/pan motion blur (#1): the crops at the shutter's start and end with the
+/// zoom and pan sliders weighting the size and centre components separately,
+/// plus the tap count the swept distance needs. `None` when the plan has no
+/// blur, the frame does not move, or the sweep is under a pixel.
+fn motion_blur_strip(
+    zoom_segments: &[super::RenderPlanZoomSegment],
+    canvas: &super::cursor::RenderCanvas,
+    output_ms: f64,
+    plane: (u32, u32),
+    content: (f64, f64, f64, f64),
+) -> Option<compositor::CropStrip> {
+    let blur = canvas
+        .motion_blur
+        .as_ref()
+        .filter(|blur| blur.is_active())?;
+    let shutter = blur.zoom.max(blur.pan).clamp(0.0, 1.0);
+    if shutter <= 0.0 {
+        return None;
+    }
+    let frame_ms = 1000.0 / canvas.fps.max(1) as f64;
+    let half = frame_ms * shutter / 2.0;
+    let before = camera::evaluate_zoom_transform(
+        zoom_segments,
+        canvas.width,
+        canvas.height,
+        canvas.padding,
+        (output_ms - half).max(0.0),
+    );
+    let after = camera::evaluate_zoom_transform(
+        zoom_segments,
+        canvas.width,
+        canvas.height,
+        canvas.padding,
+        output_ms + half,
+    );
+    let before_crop = zoom_crop(&before, plane.0, plane.1, content);
+    let after_crop = zoom_crop(&after, plane.0, plane.1, content);
+
+    let zoom_weight = blur.zoom.clamp(0.0, 1.0);
+    let pan_weight = blur.pan.clamp(0.0, 1.0);
+    let width_before = before_crop.width as f64;
+    let width_after = width_before + (after_crop.width as f64 - width_before) * zoom_weight;
+    let centre_before = (
+        before_crop.x as f64 + before_crop.width as f64 / 2.0,
+        before_crop.y as f64 + before_crop.height as f64 / 2.0,
+    );
+    let centre_after = (
+        centre_before.0
+            + (after_crop.x as f64 + after_crop.width as f64 / 2.0 - centre_before.0) * pan_weight,
+        centre_before.1
+            + (after_crop.y as f64 + after_crop.height as f64 / 2.0 - centre_before.1) * pan_weight,
+    );
+
+    let content_w = content.2.max(2.0);
+    let content_h = content.3.max(2.0);
+    let even = |value: f64| ((value.round() as u32) & !1).max(2);
+    let snapped = |width: f64, centre: (f64, f64)| -> compositor::Crop {
+        let w = even(width.min(content_w));
+        let aspect = content_h / content_w;
+        let h = even(w as f64 * aspect).min(even(content_h));
+        let x = (centre.0 - w as f64 / 2.0)
+            .round()
+            .clamp(0.0, (content_w - w as f64).max(0.0));
+        let y = (centre.1 - h as f64 / 2.0)
+            .round()
+            .clamp(0.0, (content_h - h as f64).max(0.0));
+        compositor::Crop {
+            x: x as u32,
+            y: y as u32,
+            width: w,
+            height: h,
+        }
+    };
+    let start = snapped(width_before, centre_before);
+    let end = snapped(width_after, centre_after);
+
+    // Tap count follows the swept pixel distance: two pixels per tap, capped
+    // so a fast flick cannot make one frame arbitrarily expensive.
+    let sweep = (end.width as f64 - start.width as f64).abs().max(
+        ((end.x as f64 + end.width as f64 / 2.0 - start.x as f64 - start.width as f64 / 2.0)
+            .powi(2)
+            + (end.y as f64 + end.height as f64 / 2.0
+                - start.y as f64
+                - start.height as f64 / 2.0)
+                .powi(2))
+        .sqrt(),
+    );
+    let taps = ((sweep / 2.0).ceil() as u32).clamp(1, 16);
+    // A tap count of one would resample the same crop: keep the sharp path.
+    (taps > 1).then_some(compositor::CropStrip { start, end, taps })
+}
+
 /// Short, path-free error for the GPU path.
 pub(crate) fn gpu_error(message: &str) -> crate::errors::AppError {
     InternalError::Media(message.to_string()).into()
@@ -1623,7 +2106,9 @@ pub(crate) fn gpu_error(message: &str) -> crate::errors::AppError {
 mod tests {
     use super::*;
     use crate::exports::cursor::RenderCanvas;
-    use crate::exports::{RenderPlan, RenderPlanGap, RenderSegment};
+    use crate::exports::{
+        RenderLayoutKeyframe, RenderPlan, RenderPlanCameraLayout, RenderPlanGap, RenderSegment,
+    };
     use std::collections::HashMap;
 
     fn gated_canvas() -> RenderCanvas {
@@ -1638,6 +2123,8 @@ mod tests {
     fn plan_with_canvas(canvas: RenderCanvas) -> RenderPlan {
         RenderPlan {
             project_id: "project-1".into(),
+            camera_layouts: Vec::new(),
+            layer_order: Vec::new(),
             duration_ms: 3_000,
             segments: vec![RenderSegment {
                 asset_id: "screen".into(),
@@ -1691,6 +2178,133 @@ mod tests {
         assert!(limitations(&plan_with_canvas(gated_canvas())).is_empty());
     }
 
+    fn keyframe(time_ms: u64, x: f64, width: f64, opacity: f64) -> RenderLayoutKeyframe {
+        RenderLayoutKeyframe {
+            time_ms,
+            x,
+            y: 0.0,
+            width,
+            height: 1080.0,
+            radius: 0.0,
+            opacity,
+        }
+    }
+
+    #[test]
+    fn pose_tracks_interpolate_and_fall_back_to_the_static_rect() {
+        let track = vec![
+            keyframe(1_000, 0.0, 480.0, 1.0),
+            keyframe(2_000, 480.0, 960.0, 0.5),
+        ];
+        let base = (100.0, 100.0, 480.0, 270.0, 1.0);
+        // Outside the track the layer keeps its baked geometry.
+        assert_eq!(pose_at(&track, 500.0, base), base);
+        assert_eq!(pose_at(&track, 2_500.0, base), base);
+        // Halfway between two keyframes is the linear midpoint.
+        let mid = pose_at(&track, 1_500.0, base);
+        assert!((mid.0 - 240.0).abs() < 0.01);
+        assert!((mid.2 - 720.0).abs() < 0.01);
+        assert!((mid.4 - 0.75).abs() < 0.01);
+        // No keyframes at all is the common zero-cost path.
+        assert_eq!(pose_at(&[], 1_500.0, base), base);
+    }
+
+    #[test]
+    fn only_camera_layers_take_the_layout_plane() {
+        // Regression: the decode pass and the compositor inventory must agree on
+        // the grown plane size. A role-less overlay (older plans, benchmark
+        // fixtures) must not grow, or the frame size check fails and the export
+        // falls back to the compatibility renderer.
+        let mut plan = plan_with_canvas(gated_canvas());
+        plan.camera_layouts = vec![RenderPlanCameraLayout {
+            id: "layout".into(),
+            start_ms: 0,
+            end_ms: 1_000,
+            camera: vec![keyframe(0, 0.0, 1920.0, 1.0)],
+            screen: None,
+        }];
+        plan.overlays = vec![crate::exports::RenderPlanOverlay {
+            id: Some("layer".into()),
+            role: None,
+            asset_id: "webcam".into(),
+            stream_index: None,
+            source_in_ms: 0,
+            source_out_ms: 1_000,
+            output_start_ms: 0,
+            output_end_ms: 1_000,
+            speed: 1.0,
+            x: 10.0,
+            y: 10.0,
+            width: 320.0,
+            height: 320.0,
+            crop: None,
+            opacity: 1.0,
+            visible: true,
+            shape: "circle".into(),
+            radius: None,
+            fit: None,
+            keyframes: Vec::new(),
+            border_width: None,
+            border_color: None,
+            border_opacity: None,
+            border_style: None,
+            border_gradient: None,
+            shadow_enabled: None,
+            shadow_color: None,
+            shadow_blur: None,
+            shadow_offset_x: None,
+            shadow_offset_y: None,
+            preset: None,
+        }];
+        let track = crate::exports::coalesce_camera_overlays(&plan.overlays)
+            .into_iter()
+            .next()
+            .expect("camera track");
+        assert_eq!(camera_layout_max_for(&plan, &track), None);
+        plan.overlays[0].role = Some("camera".into());
+        assert_eq!(camera_layout_max_for(&plan, &track), Some((1920.0, 1080.0)));
+    }
+
+    #[test]
+    fn a_camera_layout_window_moves_the_screen_rect() {
+        let mut plan = plan_with_canvas(gated_canvas());
+        plan.camera_layouts = vec![RenderPlanCameraLayout {
+            id: "layout".into(),
+            start_ms: 1_000,
+            end_ms: 2_000,
+            camera: vec![keyframe(1_000, 960.0, 960.0, 1.0)],
+            screen: Some(vec![
+                keyframe(1_000, 0.0, 480.0, 1.0),
+                keyframe(2_000, 480.0, 960.0, 1.0),
+            ]),
+        }];
+        assert_eq!(camera_layout_max_rect(&plan), Some((960.0, 1080.0)));
+        assert_eq!(screen_layout_rect_at(&plan, 900.0), None);
+        let mid = screen_layout_rect_at(&plan, 1_500.0).expect("screen pose");
+        assert!((mid.2 - 720.0).abs() < 0.01);
+        assert!(limitations(&plan).is_empty(), "{:?}", limitations(&plan));
+    }
+
+    #[test]
+    fn only_mid_timeline_gaps_report_no_screen() {
+        // The trailing gap is a freeze tail held by the decode pass, so frames
+        // there must still composite the last picture.
+        let mut plan = plan_with_canvas(gated_canvas());
+        plan.gaps = vec![
+            RenderPlanGap {
+                start_ms: 1_000,
+                end_ms: 2_000,
+            },
+            RenderPlanGap {
+                start_ms: 2_500,
+                end_ms: 3_000,
+            },
+        ];
+        assert!(is_gap_at(&plan, 1_500.0));
+        assert!(!is_gap_at(&plan, 2_600.0));
+        assert!(!is_gap_at(&plan, 500.0));
+    }
+
     #[test]
     fn a_trailing_freeze_tail_stays_on_the_gpu_renderer() {
         let mut plan = plan_with_canvas(gated_canvas());
@@ -1707,19 +2321,26 @@ mod tests {
     }
 
     #[test]
-    fn a_mid_timeline_gap_still_uses_the_compatibility_renderer() {
+    fn a_mid_timeline_gap_renders_on_the_compositor() {
+        // F2: the decode pass splices a black source for every declared gap, so
+        // a plan with a hole stays on the GPU renderer.
         let mut plan = plan_with_canvas(gated_canvas());
+        plan.segments[0].source_out_ms = 1_000;
+        plan.segments[0].output_end_ms = 1_000;
+        let mut second = plan.segments[0].clone();
+        second.source_in_ms = 2_000;
+        second.source_out_ms = 3_000;
+        second.output_start_ms = 2_000;
+        second.output_end_ms = 3_000;
+        plan.segments.push(second);
         plan.gaps = vec![RenderPlanGap {
             start_ms: 1_000,
             end_ms: 2_000,
         }];
-        // Segments still cover the final frame; the gap is the only problem.
-        plan.segments[0].output_start_ms = 0;
-        plan.segments[0].output_end_ms = 3_000;
-        let reasons = limitations(&plan);
         assert!(
-            reasons.iter().any(|reason| reason == "timeline gaps"),
-            "{reasons:?}"
+            limitations(&plan).is_empty(),
+            "declared gaps should be GPU-compatible: {:?}",
+            limitations(&plan)
         );
     }
 
@@ -1930,7 +2551,9 @@ mod tests {
     }
 
     #[test]
-    fn a_timeline_hole_needs_a_gap_source() {
+    fn an_undeclared_timeline_hole_still_needs_a_gap_source() {
+        // Only declared gaps become black frames; an uncovered span the plan
+        // never lists as a gap still forces the compatibility renderer.
         let mut plan = plan_with_canvas(gated_canvas());
         plan.segments[0].output_end_ms = 2_000;
         assert!(limitations(&plan)
@@ -2117,10 +2740,8 @@ mod tests {
     #[test]
     fn explicit_gpu_degrades_with_a_reason_when_the_plan_is_out_of_scope() {
         let mut plan = plan_with_canvas(gated_canvas());
-        plan.gaps.push(crate::exports::RenderPlanGap {
-            start_ms: 1_000,
-            end_ms: 2_000,
-        });
+        // A hole the plan never declares as a gap cannot be synthesised.
+        plan.segments[0].output_end_ms = 1_000;
         let choice = resolve_renderer(
             "gpu",
             &plan,
@@ -2129,7 +2750,10 @@ mod tests {
             &HashMap::new(),
         );
         assert_eq!(choice.renderer, ExportRenderer::Compatibility);
-        assert!(choice.reason.unwrap_or_default().contains("gap"));
+        assert!(choice
+            .reason
+            .unwrap_or_default()
+            .contains("cover the full timeline"));
     }
 
     #[test]

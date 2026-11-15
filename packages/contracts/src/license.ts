@@ -19,6 +19,8 @@ export const PRO_FEATURE_KEYS = [
   "keystroke-overlay",
   "youtube-publish",
   "cloud-storage",
+  "motion-blur",
+  "glass-loupe",
 ] as const
 
 export const proFeatureKeySchema = z.enum(PRO_FEATURE_KEYS)
@@ -83,6 +85,14 @@ export const PRO_FEATURES: Record<ProFeatureKey, ProFeature> = {
   "cloud-storage": {
     label: "Cloud storage uploads",
     description: "Send exports and recordings to S3-compatible buckets and Google Drive.",
+  },
+  "motion-blur": {
+    label: "Motion blur",
+    description: "Real motion blur on zooms, pans and the cursor for cinematic movement.",
+  },
+  "glass-loupe": {
+    label: "Glass Loupe",
+    description: "Magnify details inside a frosted-glass lens instead of zooming the frame.",
   },
 }
 

@@ -5,6 +5,7 @@ import type { MediaJob, ProjectAsset } from "@recordforge/contracts"
 import {
   createAddExternalAudioClipCommand,
   createAddImageClipCommand,
+  createAddVideoClipCommand,
 } from "@recordforge/editor-core"
 import {
   FileAudio,
@@ -38,9 +39,14 @@ import { onMediaJobUpdate, listMediaJobs } from "../../../lib/media"
 import { loadProject } from "../../../lib/project"
 import { toErrorMessage } from "../../../lib/errors"
 import { isTauri } from "../../../lib/settings"
+import { useTauriFileDrop } from "../../../hooks/use-tauri-file-drop"
 import { useTimelineStore } from "../../../stores/timeline-store"
 import { getPlayheadSnapshot } from "../timeline/use-playback-state"
-import { assetDurationMs, createImageClipForAsset } from "../assets/asset-clip-factory"
+import {
+  assetDurationMs,
+  createImageClipForAsset,
+  createVideoClipForAsset,
+} from "../assets/asset-clip-factory"
 import { toAssetUrl } from "../media/derivative-resources"
 
 const IMPORT_EXTENSIONS = [
@@ -99,6 +105,7 @@ function audioRoleForAsset(asset: ProjectAsset): "music" | "other" {
 export function ProjectAssetsPanel() {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const assetListRef = useRef<HTMLDivElement>(null)
+  const dropzoneRef = useRef<HTMLDivElement>(null)
   const [filter, setFilter] = useState<AssetFilter>("all")
   const [roleFilter, setRoleFilter] = useState<RoleFilter>("all")
   const [isImporting, setIsImporting] = useState(false)
@@ -118,6 +125,11 @@ export function ProjectAssetsPanel() {
   const syncProject = useTimelineStore((state) => state.syncProject)
   const refreshAssetPaths = useTimelineStore((state) => state.refreshAssetPaths)
   const relinkAsset = useTimelineStore((state) => state.relinkAsset)
+
+  // OS drops arrive as paths through the native bridge, not as `File` handles.
+  const nativeDragging = useTauriFileDrop(dropzoneRef, (paths) => {
+    void importPaths(paths)
+  })
 
   const refreshJobs = useCallback(async () => {
     if (!recording) return
@@ -176,26 +188,8 @@ export function ProjectAssetsPanel() {
     overscan: 8,
   })
 
-  async function handleImport() {
-    if (!isTauri() || !recording) {
-      fileInputRef.current?.click()
-      if (!isTauri()) {
-        toast({
-          title: "Desktop import required",
-          description: "Run the RecordForge desktop app to persist project assets.",
-        })
-      }
-      return
-    }
-
-    const selected = await open({
-      multiple: true,
-      directory: false,
-      filters: [{ name: "Media", extensions: IMPORT_EXTENSIONS }],
-    })
-    const paths = selected ? (Array.isArray(selected) ? selected : [selected]) : []
-    if (paths.length === 0) return
-
+  async function importPaths(paths: string[]) {
+    if (!isTauri() || !recording || paths.length === 0) return
     setIsImporting(true)
     try {
       const result = await importAssets({
@@ -227,6 +221,27 @@ export function ProjectAssetsPanel() {
     } finally {
       setIsImporting(false)
     }
+  }
+
+  async function handleImport() {
+    if (!isTauri() || !recording) {
+      fileInputRef.current?.click()
+      if (!isTauri()) {
+        toast({
+          title: "Desktop import required",
+          description: "Run the RecordForge desktop app to persist project assets.",
+        })
+      }
+      return
+    }
+
+    const selected = await open({
+      multiple: true,
+      directory: false,
+      filters: [{ name: "Media", extensions: IMPORT_EXTENSIONS }],
+    })
+    const paths = selected ? (Array.isArray(selected) ? selected : [selected]) : []
+    await importPaths(paths)
   }
 
   function handleFallbackFileInput() {
@@ -270,6 +285,22 @@ export function ProjectAssetsPanel() {
         setSelection({ kind: "clip", clipIds: [clip.id], primaryClipId: clip.id })
         toast({
           title: "Image overlay added",
+          description: `Added ${assetLabel(asset)} at the playhead.`,
+        })
+      }
+      return
+    }
+
+    if (asset.kind === "video") {
+      // B-roll (#13): added to the first media track, or a new one is created by
+      // the command. Embedded audio mixes automatically.
+      const clip = createVideoClipForAsset(asset, startMs, timeline.canvas)
+      const mediaTrack = timeline.tracks.find((track) => track.kind === "media")
+      const ok = execute(createAddVideoClipCommand(clip, mediaTrack?.id))
+      if (ok) {
+        setSelection({ kind: "clip", clipIds: [clip.id], primaryClipId: clip.id })
+        toast({
+          title: "Video added",
           description: `Added ${assetLabel(asset)} at the playhead.`,
         })
       }
@@ -425,9 +456,12 @@ export function ProjectAssetsPanel() {
       </div>
 
       <div
+        ref={dropzoneRef}
         className={cn(
           "mx-3 mt-3 flex items-center justify-center rounded-xl border-2 border-dashed p-3 text-center transition-colors",
-          isDragging ? "border-primary bg-primary/10" : "border-border bg-surface-dim",
+          isDragging || nativeDragging
+            ? "border-primary bg-primary/10"
+            : "border-border bg-surface-dim",
         )}
         onDragOver={(event) => {
           if (event.dataTransfer.types.includes("Files")) {
@@ -439,14 +473,18 @@ export function ProjectAssetsPanel() {
         onDrop={(event) => {
           event.preventDefault()
           setIsDragging(false)
+          // Browser dev has no native path bridge; the dialog is the only way to
+          // get a durable path there.
           void handleImport()
         }}
       >
         <div>
           <Upload className="mx-auto mb-1 size-5 text-muted-foreground" aria-hidden />
-          <p className="text-xs font-medium text-foreground">Import audio, images, or video</p>
+          <p className="text-xs font-medium text-foreground">
+            Drop audio, image or video files here
+          </p>
           <p className="text-[10px] text-muted-foreground">
-            Files are copied into the project by default
+            Or use Import media — files are copied into the project
           </p>
         </div>
       </div>
@@ -490,7 +528,13 @@ export function ProjectAssetsPanel() {
                     track.clips.some((clip) => clip.assetId === asset.id),
                   ),
                 )
-                const canAdd = asset.kind === "audio" || asset.kind === "image"
+                const canAdd =
+                  asset.kind === "audio" ||
+                  asset.kind === "image" ||
+                  // Imported video is b-roll (#13). The recording's own screen /
+                  // webcam assets already have their lanes, so they stay
+                  // non-addable.
+                  (asset.kind === "video" && !BUILTIN_ROLES.has(asset.role))
                 return (
                   <div
                     key={asset.id}

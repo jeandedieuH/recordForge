@@ -10,12 +10,12 @@
 
 The durable job scheduler manages background media and project work:
 
-| Kind | Purpose | Trigger |
-|------|---------|---------|
-| `prepare` | Probe, thumbnail, waveform, and audio/video track generation for a recording; optional low-res preview proxy on request | After recording stop or recovery; proxy stage runs when the editor picks a reduced preview-quality mode |
-| `asset_derivative` | Generate thumbnails, waveforms, previews, or proxies for one imported asset | Asset import or relink |
-| `export` | Render timeline to final MP4 | User initiates export |
-| `upload` | Send exported file to S3/Drive/local folder | User initiates upload |
+| Kind               | Purpose                                                                                                                 | Trigger                                                                                                 |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `prepare`          | Probe, thumbnail, waveform, and audio/video track generation for a recording; optional low-res preview proxy on request | After recording stop or recovery; proxy stage runs when the editor picks a reduced preview-quality mode |
+| `asset_derivative` | Generate thumbnails, waveforms, previews, or proxies for one imported asset                                             | Asset import or relink                                                                                  |
+| `export`           | Render timeline to final MP4                                                                                            | User initiates export                                                                                   |
+| `upload`           | Send exported file to S3/Drive/local folder                                                                             | User initiates upload                                                                                   |
 
 ---
 
@@ -25,16 +25,16 @@ The durable job scheduler manages background media and project work:
 {
   "id": "job-uuid",
   "recordingId": "recording-uuid",
-  "kind": "prepare",             // prepare | asset_derivative | export | upload
-  "status": "running",           // pending | running | completed | failed | cancelled
-  "progress": 0.45,              // 0.0–1.0
-  "stage": "proxy",              // Current sub-stage label
+  "kind": "prepare", // prepare | asset_derivative | export | upload
+  "status": "running", // pending | running | completed | failed | cancelled
+  "progress": 0.45, // 0.0–1.0
+  "stage": "proxy", // Current sub-stage label
   "message": "Generating proxy (45%)",
   "error": null,
-  "priority": 0,                 // Higher = more urgent; exports > derivatives
-  "attempts": 1,                 // Retry count
+  "priority": 0, // Higher = more urgent; exports > derivatives
+  "attempts": 1, // Retry count
   "maxAttempts": 3,
-  "restartPolicy": "retry",      // retry | skip | fail
+  "restartPolicy": "retry", // retry | skip | fail
   "createdAt": "2026-01-01T00:00:00Z",
   "updatedAt": "2026-01-01T00:02:30Z",
   "startedAt": "2026-01-01T00:00:01Z",
@@ -47,10 +47,10 @@ The durable job scheduler manages background media and project work:
     "waveformPath": "...",
     "waveformImagePath": "...",
     "assetId": null,
-    "derivatives": {}
+    "derivatives": {},
   },
   "options": { "projectId": "...", "outputPath": "...", "plan": "...", "settings": "..." }, // JSON persisted in SQLite
-  "cancellationToken": "in-memory AtomicBool"
+  "cancellationToken": "in-memory AtomicBool",
 }
 ```
 
@@ -66,15 +66,16 @@ The durable job scheduler manages background media and project work:
 
 ### 3.2 Concurrency and throttling
 
-| Scenario | Max Concurrent Jobs |
-|----------|-------------------|
-| Idle (no recording) | 2 prepare + 1 export |
-| During recording | 0 (pause all heavy jobs) |
-| Low-end machine | 1 at a time |
+| Scenario            | Max Concurrent Jobs      |
+| ------------------- | ------------------------ |
+| Idle (no recording) | 2 prepare + 1 export     |
+| During recording    | 0 (pause all heavy jobs) |
+| Low-end machine     | 1 at a time              |
 
 ### 3.3 Deduplication
 
 Before creating a job, check if an equivalent job already exists:
+
 - Same `recordingId` + same `kind` + status is `pending` or `running` → reuse the scheduler-owned job identity
 - Export retries re-queue the failed/cancelled row and retain its id/options
 - Prepare jobs may still create a new row when `force: true`
@@ -89,6 +90,7 @@ Before creating a job, check if an equivalent job already exists:
 ### 3.5 Atomic outputs
 
 All jobs write to `.partial` files, validate, then rename to final path:
+
 ```
 proxy.mp4.partial → (FFprobe validate) → proxy.mp4
 ```
@@ -120,8 +122,10 @@ interface RenderPlan {
   segments: RenderSegment[]
   gaps: Array<{ startMs: number; endMs: number }>
   audioTracks: RenderPlanAudio[]
-  overlays: RenderPlanOverlay[]
-  captions: RenderPlanCaption[]   // each cue may carry a px-resolved `layout` the ASS writer renders verbatim
+  overlays: RenderPlanOverlay[] // the unified video-layer list (camera + b-roll)
+  cameraLayouts: RenderPlanCameraLayout[] // #5 per-frame camera/screen poses
+  layerOrder: Array<{ kind: "camera" | "video"; id: string }> // middle-band draw order
+  captions: RenderPlanCaption[] // each cue may carry a px-resolved `layout` the ASS writer renders verbatim
   masks: RenderPlanMask[]
   zoomSegments: RenderPlanZoomSegment[]
   cursorEffects: RenderPlanCursorEffect[]
@@ -133,9 +137,10 @@ interface RenderPlanZoomSegment {
   endMs: number
   target: { x: number; y: number; width: number; height: number }
   scale: number
-  easing: "linear" | "ease-in" | "ease-out" | "ease-in-out" | "smooth" | "cinematic" | "snappy" | "spring"
-  transitionInMs: number   // default 400
-  transitionOutMs: number  // default 400
+  easing:
+    "linear" | "ease-in" | "ease-out" | "ease-in-out" | "smooth" | "cinematic" | "snappy" | "spring"
+  transitionInMs: number // default 400
+  transitionOutMs: number // default 400
   enabled: boolean
   mode?: "auto" | "manual" | "static" | "follow-cursor" | "smooth-pan"
   source?: "click" | "dwell" | "movement" | "manual" | "follow" | "cluster"
@@ -173,7 +178,7 @@ interface RenderPlanZoomMotionPlan {
 }
 
 interface RenderSegment {
-  assetId: string           // Rust resolves project assetId → canonical path
+  assetId: string // Rust resolves project assetId → canonical path
   sourceInMs: number
   sourceOutMs: number
   outputStartMs: number
@@ -183,13 +188,75 @@ interface RenderSegment {
 
 interface ExportTimelineOptions {
   projectId: string
-  outputPath: string        // validated destination, never source media
+  outputPath: string // validated destination, never source media
   plan: RenderPlan
   settings: ProjectExportSettings
 }
 ```
 
 TypeScript validates the plan and project identity before IPC. Rust validates the same ranges, effect timing, canvas, settings, and asset references before scheduling FFmpeg.
+
+#### 4.1.1 Unified video layers, camera layouts and gaps (M3, ADR 022)
+
+```typescript
+interface RenderPlanOverlay {
+  id?: string
+  role?: "camera" | "video" // camera → follows cameraLayouts, video → b-roll
+  assetId: string
+  sourceInMs: number
+  sourceOutMs: number
+  outputStartMs: number
+  outputEndMs: number
+  speed: number
+  x: number
+  y: number
+  width: number
+  height: number
+  crop?: { x: number; y: number; width: number; height: number }
+  opacity: number
+  visible: boolean
+  shape: "rectangle" | "rounded" | "circle"
+  radius?: number // corner radius in canvas px (video layers)
+  fit?: "contain" | "cover" | "fill" // camera defaults to cover, b-roll to contain
+  // Animated pose track, absolute output ms. Linear interpolation between
+  // samples; a hold is two equal poses. Absent keeps the static rect.
+  keyframes?: RenderPlanLayoutKeyframe[]
+}
+
+interface RenderPlanLayoutKeyframe {
+  timeMs: number
+  x: number
+  y: number
+  width: number
+  height: number
+  radius: number
+  opacity: number
+}
+
+interface RenderPlanCameraLayout {
+  id: string
+  startMs: number
+  endMs: number
+  camera: RenderPlanLayoutKeyframe[] // camera bubble pose per frame
+  screen?: RenderPlanLayoutKeyframe[] // screen pose (side-by-side slot)
+}
+```
+
+- **One layer record.** Camera bubbles and b-roll / media-track video crossed the
+  boundary as the same `RenderPlanOverlay` shape, so both renderers reuse one
+  coalescing + decode + quad path. Layers decode at the largest rect their
+  keyframes reach (capped at source size) and the compositor rewrites the quad's
+  destination rect per frame.
+- **Draw order.** `layerOrder` lists the middle band (camera bubbles and video
+  layers) in timeline track order. Screen is pinned to the bottom and
+  cursor/items/keystrokes/captions to the top.
+- **Gaps (F2).** A mid-timeline gap becomes a black `color` source in the decode
+  pass and sets `has_screen = false` for those frames, so the composite pass
+  paints the canvas background only. A trailing gap stays a freeze-frame tail
+  (`tpad=clone`). Plans with declared gaps no longer leave the GPU gate.
+- **Downgrades (ADR 020).** The compatibility renderer composites video layers at
+  their static rect: animated layers report `video-layer-animation` and camera
+  layouts report `camera-layouts`.
 
 ### 4.2 Boundary guarantees
 
@@ -243,14 +310,14 @@ One camera model is shared by the preview, the FFmpeg `zoompan` graph, and the R
 
 ### 5.4 Current gaps
 
-| Concern | Phase 8 behavior |
-|---------|------------------|
-| Source authority | `projectId` and trusted asset IDs; Rust resolves canonical paths |
-| Render graph | FFmpeg graph covers cuts, gaps, speed, audio, camera, canvas, zoom, cursor, captions, and masks |
-| Cancellation | `AtomicBool` is checked between stages and while streaming cursor frames |
-| Atomic output | Render writes to `.partial`, FFprobe validates, then Rust publishes atomically |
-| Job persistence | Export request is stored in `media_jobs.options` before the worker starts |
-| Job identity | Scheduler-created id is used for events, completion, cancellation, retry, and resume |
+| Concern          | Phase 8 behavior                                                                                |
+| ---------------- | ----------------------------------------------------------------------------------------------- |
+| Source authority | `projectId` and trusted asset IDs; Rust resolves canonical paths                                |
+| Render graph     | FFmpeg graph covers cuts, gaps, speed, audio, camera, canvas, zoom, cursor, captions, and masks |
+| Cancellation     | `AtomicBool` is checked between stages and while streaming cursor frames                        |
+| Atomic output    | Render writes to `.partial`, FFprobe validates, then Rust publishes atomically                  |
+| Job persistence  | Export request is stored in `media_jobs.options` before the worker starts                       |
+| Job identity     | Scheduler-created id is used for events, completion, cancellation, retry, and resume            |
 
 ### 5.5 Export execution
 
@@ -299,6 +366,7 @@ so the stream-copy concat stays frame-exact. Its disk preflight uses a
 per-profile bits-per-pixel table (~3.5 bpp for HQ at any pixel rate).
 
 ### 5.7 Native GPU compositor (ADR 018)
+
 `ExportSettings.renderer` (`auto` | `gpu` | `compatibility`) selects the
 compositor. Since Phase 5 G5, `auto` selects the GPU compositor when the plan is
 inside the gate and the adapter is real hardware, and the FFmpeg graph otherwise.
@@ -309,12 +377,14 @@ for the rest of the process (a success resets the count).
 `gpu::plan_limitations` is the feature gate. The compositor handles the full
 canvas frame (padding, background colour/gradient/image, blur, dim, rounded
 corners, shadow), the fitted screen rect and zoom, cursor/overlay items,
-camera + side-by-side layout windows, redact/pixelate/blur privacy masks,
-keystrokes, burned-in captions (encode-side libass), chapters, HEVC, the license
-output cap and selected-range plans. Timeline gaps/coverage holes, mixed source
-dimensions, animated containers (GIF/WebP), non-4×2-grid canvases, and the
-keystroke + burned-caption pair (badges must sit above captions, which run after
-the GPU raster) keep the compatibility renderer. Blur masks use per-plane YUV
+camera + side-by-side layout windows, the camera layout lane, video layers
+(camera, b-roll and media-track video), declared mid-timeline gaps, redact/
+pixelate/blur privacy masks, keystrokes, burned-in captions (encode-side libass),
+chapters, HEVC, the license output cap and selected-range plans. Mixed source
+dimensions, undeclared coverage holes, animated containers (GIF/WebP),
+non-4×2-grid canvases, and the keystroke + burned-caption pair (badges must sit
+above captions, which run after the GPU raster) keep the compatibility renderer.
+Blur masks use per-plane YUV
 passes that reproduce swscale's widened downscale, `avgblur` and the bilinear
 upscale (47.78 dB mean / 29.83 dB min on the synthetic fixture; see
 `docs/benchmarks/phase-5-results.md`). Explicit `gpu` requests outside the gate
@@ -360,14 +430,13 @@ Software adapters (CPU device type, WARP/llvmpipe/SwiftShader) are rejected so
 the GPU path can never silently become a slower software path.
 
 **Parity.** The GPU renderer is compared against a compatibility render of the
-same plan *with the same encode segmentation* (`export-synth-spec.ts
+same plan _with the same encode segmentation_ (`export-synth-spec.ts
 --single-pass`), because chunked and single-pass x264 encodes of identical
 frames differ by ~46 dB from per-chunk rate control alone. `parity.ts
 --profile renderer` uses that budget: identity/plate-free plans must stay
 bit-exact, and composited plans must stay above the measured resampler ceiling
 (no alternative swscale kernel scores better than ~48 dB against swscale's
 default bicubic on the synthetic fixture).
-
 
 ### 5.8 Frame borders
 
@@ -394,17 +463,97 @@ is exact and reports nothing.
 
 ---
 
+### 5.9 Zoom clarity, motion blur and Glass Loupe (M2)
+
+Three effects share the screen path; all are optional on project v1, so a plan
+without them renders byte-identically to Phase 8.
+
+- **Zoom detail plane (`canvas.zoomSharpening`, Free).** `zoom_detail.rs`
+  analyses the plan per pass window: `m` is the largest zoom scale, `r` is
+  `source_width / content_width`. A detail plane exists when `m > 1.02 && r >
+1.02`; its size is `content × min(m_max, r)`, even and never above the source.
+  The GPU renderer then decodes the whole screen chain at `plane = canvas ×
+min(m_max, r)` and the composite pass maps uvs through a `plane_size` row, so
+  the crop samples real source pixels. While a detail plane is active the
+  per-frame identity bypass is off (the passthrough bytes would be plane-sized,
+  not canvas-sized), and the RCAS-style luma sharpening runs whenever `m > r`
+  (`off` | `auto` | `strong`). The compatibility renderer zooms its fitted
+  canvas-resolution stream and sharpens with a mild luma `unsharp`, reporting
+  `zoom-detail` and `zoom-sharpening` (ADR 020).
+- **Motion blur (`canvas.motionBlur`, Pro).** `{ enabled, cursor, zoom, pan }`
+  are shutter fractions of one frame (1 = a 180° shutter). The cursor is exact
+  on both renderers: `CursorEngine::evaluate_motion_samples` walks the same
+  spline at sub-frame times and `CursorRenderer` accumulates up to six equally
+  weighted ghost poses, chosen from the mapped sweep distance, widening the
+  cursor tile to the swept path. Zoom/pan blur is GPU-only: the compose loop
+  evaluates the crop at `t ± shutter/2` with the zoom and pan sliders weighting
+  the size and centre deltas, then the composite shader averages up to 16 taps
+  along that strip. Hold and identity frames resolve to one tap, so blur costs
+  nothing when nothing moves; compatibility renders report `motion-blur`.
+- **Glass Loupe (`zoomSegments[].style: "loupe"`, Pro).** Loupe segments never
+  move the frame (`resolveCameraShots` and `evaluate_zoom_transform` skip them).
+  `resolveLoupes`/`resolveLoupeAt` (editor-core) and `exports/loupe.rs` resolve
+  the lens pose — centre, presence ramp, size fraction of the canvas short edge,
+  ring, glass and shadow. The lens always rides the recorded cursor tip (the
+  plate workers feed the GPU compose loop the same `map_source_point` canvas
+  position the rasterizer draws at), with `loupe.offset` as a drag nudge and
+  `loupe.center`/the target centre as the no-cursor fallback. While a lens is
+  visible the cursor itself is suppressed — GPU export drops the cursor plane
+  and preview hides the cursor overlay. The GPU composite pass draws the lens
+  analytically between the screen and the cursor (SDF mask, rim refraction,
+  inner highlight, SDF shadow). The compatibility renderer omits the lens and
+  reports `loupe-glass`. Export gating is `glass-loupe`/`motion-blur` in
+  `licensing/entitlements.rs`, mirrored by `analyzeProFeatureUsage`;
+  `stripProTimelineFeatures` turns loupe segments into frame zooms and disables
+  motion blur for a Free export.
+
+Smart Cut also gains filler-word detection
+(`packages/editor-core/src/smart-cut-fillers.ts`, Pro via the existing
+`smart-cut` key): strict per-language disfluency lexicons (en/fr/es/de), opt-in
+phrase and repeated-word sets, frame-snapped and padded ranges that absorb
+adjacent silence, merged into one `ripple-delete-ranges` command.
+
+**Authoring and preview.**
+
+- _Canvas Layout → Effects:_ a Zoom clarity select (`off | auto | strong`) and a
+  Pro Motion blur block (cursor / zoom / pan shutter sliders, 0–100% where 100%
+  is a 180° shutter). Both write `canvas.zoomSharpening` / `canvas.motionBlur`
+  through the ordinary `update-canvas` command.
+- _Zoom inspector → Presentation:_ a Zoom frame / Glass Loupe toggle plus lens
+  shape, size, ring width and glass rim controls. The lens always rides the
+  cursor — a canvas drag writes a `loupe.offset` nudge — and Reset lens
+  position clears it. Loupe segments show a `loupe` badge on the zoom lane.
+- _Preview:_ `PlaybackOverlays` resolves the lens pose once per playhead tick
+  with the cursor tip's zoom-space point, so the same pose drives both the lens
+  canvas and cursor suppression (a following lens hides the drawn pointer).
+  `LoupeOverlay` samples the already-decoded `<video>` into a lens canvas
+  (letterbox-aware: the picture is located inside the element's
+  `object-contain` box, and the visible A/B slot is preferred) through the same
+  `diameter / scale` square the export samples, so the magnification can never
+  drift from the lens geometry. Ring, glass highlight and shadow are drawn
+  above the canvas. Zoom/pan motion blur is approximated with a velocity-scaled
+  CSS blur on the screen surface — a preview hint only; the GPU export averages
+  real sub-frame crops.
+- _Audio panel → Filler words:_ the card maps the caption track's `sourceWords`
+  through the same coverage mapping caption resync uses, lists candidates with
+  context, and applies the accepted ones as one `ripple-delete-ranges`. It
+  needs an existing AI transcript, and the transcript is most useful when
+  generated in verbatim mode (`TranscribeRequest.verbatim`, which forwards a
+  per-language initial prompt and keys the cache by mode).
+
+---
+
 ## 6. Export Presets
 
-| Preset | Container | Video Codec | Audio Codec | Notes |
-|--------|-----------|-------------|-------------|-------|
-| `default-mp4` | MP4 | H.264 | AAC 128kbps | Legacy balanced default |
-| `fast-share` | MP4 | H.264 | AAC 128kbps | Very fast, smaller output |
-| `balanced` | MP4 | H.264 or HEVC | AAC 128kbps | Recommended |
-| `high-quality` | MP4 | H.264 or HEVC, CRF 18 | AAC 192kbps | Larger files |
-| `vertical` | MP4 | H.264 or HEVC | AAC 128kbps | Enabled only for vertical canvases |
-| `square` | MP4 | H.264 or HEVC | AAC 128kbps | Enabled only for square canvases |
-| `selected-range` | MP4 | Project codec | Project bitrate | Requires a positive range |
+| Preset           | Container | Video Codec           | Audio Codec     | Notes                              |
+| ---------------- | --------- | --------------------- | --------------- | ---------------------------------- |
+| `default-mp4`    | MP4       | H.264                 | AAC 128kbps     | Legacy balanced default            |
+| `fast-share`     | MP4       | H.264                 | AAC 128kbps     | Very fast, smaller output          |
+| `balanced`       | MP4       | H.264 or HEVC         | AAC 128kbps     | Recommended                        |
+| `high-quality`   | MP4       | H.264 or HEVC, CRF 18 | AAC 192kbps     | Larger files                       |
+| `vertical`       | MP4       | H.264 or HEVC         | AAC 128kbps     | Enabled only for vertical canvases |
+| `square`         | MP4       | H.264 or HEVC         | AAC 128kbps     | Enabled only for square canvases   |
+| `selected-range` | MP4       | Project codec         | Project bitrate | Requires a positive range          |
 
 Presets are capability-driven. Unsupported canvas shapes and invalid ranges are disabled in the UI and rejected by Rust. Animated GIF and WebP exports are capped at 60 s (`MAX_ANIMATION_DURATION_MS` / `ANIMATION_MAX_DURATION_MS`); longer timelines require the Selected range preset, which is judged by the range length rather than the full timeline. Presets also prefill the output format — `smooth-60fps` sets `frameRate: "60"`, `ultra-4k`/`ultra-4k-60` set `resolution: "2160p"` — but the user can override either field afterwards (§5.6).
 
@@ -414,13 +563,13 @@ Presets are capability-driven. Unsupported canvas shapes and invalid ranges are 
 
 Derivatives are versioned and can be invalidated when the recipe changes:
 
-| Derivative | Recipe Version | Inputs | Invalidation |
-|-----------|---------------|--------|-------------|
-| Proxy | 1 | Original video, proxy height | Source file changed, height changed. On-demand only: prepare skips it unless `includeProxy` is set |
-| Thumbnails | 1 | Original video or imported image, interval, sprite size | Source file changed, interval changed |
-| Waveform | 1 | Original video or imported audio track | Source file changed |
-| Audio preview | 1 | Imported audio source | Source file changed |
-| Image thumbnail | 1 | Imported raster/SVG image | Source file changed |
-| Metadata | 1 | Original or imported media | Source file changed |
+| Derivative      | Recipe Version | Inputs                                                  | Invalidation                                                                                       |
+| --------------- | -------------- | ------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| Proxy           | 1              | Original video, proxy height                            | Source file changed, height changed. On-demand only: prepare skips it unless `includeProxy` is set |
+| Thumbnails      | 1              | Original video or imported image, interval, sprite size | Source file changed, interval changed                                                              |
+| Waveform        | 1              | Original video or imported audio track                  | Source file changed                                                                                |
+| Audio preview   | 1              | Imported audio source                                   | Source file changed                                                                                |
+| Image thumbnail | 1              | Imported raster/SVG image                               | Source file changed                                                                                |
+| Metadata        | 1              | Original or imported media                              | Source file changed                                                                                |
 
 When a recipe version changes (e.g., proxy generation quality improves), all derivatives of that kind are automatically rebuilt.

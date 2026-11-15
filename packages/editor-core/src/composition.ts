@@ -222,6 +222,8 @@ export function findManualZoomAtTime(
       .filter(
         (segment) =>
           segment.enabled &&
+          // Loupe segments magnify a lens, not the frame (see `zoom-loupe.ts`).
+          segment.style !== "loupe" &&
           timeMs >= segment.startMs &&
           timeMs < segment.startMs + segment.durationMs,
       )

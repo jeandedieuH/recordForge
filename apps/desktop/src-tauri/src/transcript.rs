@@ -688,10 +688,18 @@ struct TranscriptCacheFile {
 
 /// `<work_dir>/transcripts/<model>-<language>-s<stream>.json` — the cache key
 /// uses the *requested* language ("auto" stays "auto").
-pub fn cache_path(work_dir: &Path, model: &str, language: &str, stream_index: i32) -> PathBuf {
+pub fn cache_path(
+    work_dir: &Path,
+    model: &str,
+    language: &str,
+    stream_index: i32,
+    verbatim: bool,
+) -> PathBuf {
+    // The verbatim prompt changes the transcript, so it is part of the key.
+    let mode = if verbatim { "-verbatim" } else { "" };
     work_dir
         .join("transcripts")
-        .join(format!("{model}-{language}-s{stream_index}.json"))
+        .join(format!("{model}-{language}-s{stream_index}{mode}.json"))
 }
 
 /// Read a cached transcript when the header still matches the source file.
@@ -1045,7 +1053,7 @@ mod tests {
     #[test]
     fn cache_round_trips_and_invalidates() {
         let dir = tempfile::tempdir().unwrap();
-        let path = cache_path(dir.path(), "base", "auto", 1);
+        let path = cache_path(dir.path(), "base", "auto", 1, false);
         let transcript = Transcript {
             language: "en".to_string(),
             model: "base".to_string(),

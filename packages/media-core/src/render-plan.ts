@@ -9,9 +9,12 @@ import type {
   RenderPlan,
   RenderPlanAnnotation,
   RenderPlanAudio,
+  RenderPlanCameraLayout,
   RenderPlanCaption,
   RenderPlanCursorEffect,
   RenderPlanImage,
+  RenderPlanLayoutKeyframe,
+  RenderPlanLayerEntry,
   RenderPlanMask,
   RenderCaptionMode,
   RenderChapterMode,
@@ -27,12 +30,19 @@ import type {
 } from "@recordforge/domain"
 import {
   applyCaptionContinuity,
+  baseCameraLayoutPose,
   buildFollowCursorMotionPlan,
+  evaluateCameraLayoutWindow,
   getOverlayContentEndMs,
+  resolveCameraLayoutWindows,
   resolveCameraShots,
   resolveCaptionLayout,
   resolveClipDesign,
+  sampleCameraLayoutKeyframes,
   timelineMarkersToChapters,
+  videoLayerAnimationRamps,
+  videoLayerBaseRect,
+  videoLayerPose,
 } from "@recordforge/editor-core"
 import {
   canonicalizeZoomTarget,
@@ -180,31 +190,82 @@ function toGaps(
   return gaps
 }
 
+/**
+ * Animated pose keyframes for one video layer, in output time. Returns
+ * `undefined` when the clip has no animation so a static layer keeps the
+ * zero-cost path (one quad, no per-frame math).
+ */
+function videoLayerKeyframes(
+  clip: Extract<TimelineClip, { kind: "video" }>,
+  canvas: { width: number; height: number },
+  window: WindowedClip,
+): RenderPlanLayoutKeyframe[] | undefined {
+  const duration = Math.max(0, window.outputEndMs - window.outputStartMs)
+  const { inMs, outMs } = videoLayerAnimationRamps(clip, duration)
+  if (inMs <= 0 && outMs <= 0) return undefined
+  const start = window.outputStartMs
+  const end = window.outputEndMs
+  const times = new Set<number>([start, end])
+  if (inMs > 0) {
+    times.add(start + inMs)
+    times.add(start + Math.round(inMs / 2))
+  }
+  if (outMs > 0) {
+    times.add(end - outMs)
+    times.add(end - Math.round(outMs / 2))
+  }
+  return [...times]
+    .filter((time) => time >= start && time <= end)
+    .sort((left, right) => left - right)
+    .map((time) => {
+      const inProgress = inMs <= 0 ? 1 : Math.min(1, Math.max(0, (time - start) / inMs))
+      const outProgress = outMs <= 0 ? 0 : Math.min(1, Math.max(0, (time - (end - outMs)) / outMs))
+      // Same pose math as the preview (`video-layers.ts`), so the two agree.
+      const pose = videoLayerPose(clip, canvas, inProgress, outProgress)
+      return {
+        timeMs: time,
+        x: Math.round(pose.rect.x),
+        y: Math.round(pose.rect.y),
+        width: Math.round(pose.rect.width),
+        height: Math.round(pose.rect.height),
+        radius: clip.borderRadius,
+        opacity: Math.min(1, Math.max(0, pose.opacity)),
+      }
+    })
+}
+
+/**
+ * The unified video-layer list (F3): the camera bubble and every b-roll /
+ * media-track video clip, in track order. A muted track contributes nothing,
+ * which is what makes track mute hide its visuals.
+ */
 function toOverlays(
-  clips: TimelineClip[],
+  state: TimelineState,
   canvas: TimelineState["canvas"],
-  trackVisible: boolean,
   range: ExportRange | undefined,
   assets?: ProjectAsset[],
 ): RenderPlanOverlay[] {
   const assetById = new Map(assets?.map((asset) => [asset.id, asset]))
-  return sortClips(clips)
-    .filter((clip): clip is Extract<TimelineClip, { kind: "camera" }> => clip.kind === "camera")
-    .flatMap((clip) => {
-      const window = windowClip(clip, range)
-      if (!window) return []
-      const transform = clip.transform
-      const width = Math.min(Math.max(0, transform.width), canvas.width)
-      const height = Math.min(Math.max(0, transform.height), canvas.height)
-      const asset = assetById.get(clip.assetId)
-      const isStandaloneWebcam =
-        asset?.role === "webcam" &&
-        Boolean(
-          asset.path && !asset.path.includes(":") && asset.path.toLowerCase().endsWith(".mp4"),
-        )
-      const streamIndex = isStandaloneWebcam ? undefined : clip.streamIndex
-      return [
-        {
+  const layers: RenderPlanOverlay[] = []
+  for (const track of state.tracks) {
+    if (track.muted) continue
+    for (const clip of sortClips(track.clips)) {
+      if (clip.kind === "camera") {
+        const window = windowClip(clip, range)
+        if (!window) continue
+        const transform = clip.transform
+        const width = Math.min(Math.max(0, transform.width), canvas.width)
+        const height = Math.min(Math.max(0, transform.height), canvas.height)
+        const asset = assetById.get(clip.assetId)
+        const isStandaloneWebcam =
+          asset?.role === "webcam" &&
+          Boolean(
+            asset.path && !asset.path.includes(":") && asset.path.toLowerCase().endsWith(".mp4"),
+          )
+        const streamIndex = isStandaloneWebcam ? undefined : clip.streamIndex
+        layers.push({
+          id: clip.id,
+          role: "camera",
           assetId: clip.assetId,
           ...(streamIndex !== undefined ? { streamIndex: Math.round(streamIndex) } : {}),
           sourceInMs: window.sourceInMs,
@@ -218,7 +279,7 @@ function toOverlays(
           height,
           crop: transform.crop,
           opacity: transform.opacity,
-          visible: trackVisible && transform.visible !== false,
+          visible: transform.visible !== false,
           shape: transform.shape,
           borderWidth: transform.borderWidth,
           borderColor: transform.borderColor,
@@ -231,9 +292,135 @@ function toOverlays(
           shadowOffsetX: transform.shadowOffsetX,
           shadowOffsetY: transform.shadowOffsetY,
           preset: transform.preset,
-        },
-      ]
-    })
+        })
+        continue
+      }
+      if (clip.kind !== "video") continue
+      if (clip.enabled === false) continue
+      const window = windowClip(clip, range)
+      if (!window) continue
+      const rect = videoLayerBaseRect(clip, canvas)
+      const keyframes = videoLayerKeyframes(clip, canvas, window)
+      layers.push({
+        id: clip.id,
+        role: "video",
+        assetId: clip.assetId,
+        ...(clip.streamIndex !== undefined ? { streamIndex: Math.round(clip.streamIndex) } : {}),
+        sourceInMs: window.sourceInMs,
+        sourceOutMs: window.sourceOutMs,
+        outputStartMs: window.outputStartMs,
+        outputEndMs: window.outputEndMs,
+        speed: clip.speed,
+        x: Math.round(rect.x),
+        y: Math.round(rect.y),
+        width: Math.round(rect.width),
+        height: Math.round(rect.height),
+        crop: clip.crop,
+        opacity: clip.opacity,
+        visible: true,
+        shape: clip.borderRadius > 0 ? "rounded" : "rectangle",
+        radius: clip.borderRadius,
+        // A fullscreen b-roll fills the canvas rather than letterboxing inside it.
+        fit: clip.layoutMode === "fullscreen" ? "cover" : clip.fit,
+        ...(keyframes ? { keyframes } : {}),
+        borderWidth: clip.borderWidth,
+        borderColor: clip.borderColor,
+        borderStyle: clip.borderStyle,
+        borderGradient: clip.borderGradient,
+        shadowEnabled: clip.shadowEnabled,
+        shadowColor: clip.shadowColor,
+        shadowBlur: clip.shadowBlur,
+      })
+    }
+  }
+  return layers
+}
+
+/**
+ * Camera layout lane → render plan (#5). Each window carries per-frame camera
+ * and screen poses; the renderer linearly interpolates between samples, so an
+ * eased transition becomes a short run of keyframes.
+ */
+function toCameraLayouts(
+  state: TimelineState,
+  range: ExportRange | undefined,
+  canvas: TimelineState["canvas"],
+): RenderPlanCameraLayout[] {
+  const segments = state.cameraLayouts ?? []
+  if (segments.length === 0) return []
+  const cameraClip = state.tracks
+    .filter((track) => track.kind === "camera" && !track.muted)
+    .flatMap((track) => track.clips)
+    .find((clip) => clip.kind === "camera")
+  const base = baseCameraLayoutPose(
+    canvas,
+    cameraClip && cameraClip.kind === "camera" ? cameraClip.transform : null,
+  )
+  const windows = resolveCameraLayoutWindows(canvas, segments, { base })
+  const rangeStart = range ? Math.round(range.startMs) : 0
+  const rangeEnd = range ? Math.round(range.endMs) : Number.POSITIVE_INFINITY
+  return windows.flatMap((window) => {
+    const startMs = Math.max(window.startMs, rangeStart)
+    const endMs = Math.min(window.endMs, rangeEnd)
+    if (endMs <= startMs) return []
+    const times = new Set<number>([startMs, endMs])
+    for (const sample of sampleCameraLayoutKeyframes(window)) {
+      if (sample.timeMs > startMs && sample.timeMs < endMs) times.add(sample.timeMs)
+    }
+    const camera: RenderPlanLayoutKeyframe[] = []
+    const screen: RenderPlanLayoutKeyframe[] = []
+    for (const timeMs of [...times].sort((left, right) => left - right)) {
+      const pose = evaluateCameraLayoutWindow(window, timeMs)
+      const outputMs = Math.max(0, Math.round(timeMs - rangeStart))
+      camera.push({
+        timeMs: outputMs,
+        x: Math.round(pose.camera.x),
+        y: Math.round(pose.camera.y),
+        width: Math.round(pose.camera.width),
+        height: Math.round(pose.camera.height),
+        radius: Math.round(pose.radius),
+        opacity: Math.min(1, Math.max(0, pose.opacity)),
+      })
+      screen.push({
+        timeMs: outputMs,
+        x: Math.round(pose.screen.x),
+        y: Math.round(pose.screen.y),
+        width: Math.round(pose.screen.width),
+        height: Math.round(pose.screen.height),
+        radius: 0,
+        opacity: 1,
+      })
+    }
+    return [
+      {
+        id: window.segment.id,
+        startMs: Math.max(0, Math.round(startMs - rangeStart)),
+        endMs: Math.max(1, Math.round(endMs - rangeStart)),
+        camera,
+        screen,
+      },
+    ]
+  })
+}
+
+/**
+ * Middle-band draw order (F4): camera bubbles and video layers alternate by
+ * track order, exactly like the timeline lanes read top to bottom.
+ */
+function toLayerOrder(state: TimelineState): RenderPlanLayerEntry[] {
+  const order: RenderPlanLayerEntry[] = []
+  for (const track of state.tracks) {
+    if (track.muted) continue
+    if (track.kind === "camera") {
+      order.push({ kind: "camera", id: track.id })
+      continue
+    }
+    for (const clip of sortClips(track.clips)) {
+      if (clip.kind !== "video" || clip.enabled === false) continue
+      order.push({ kind: "video", id: clip.id })
+    }
+  }
+  return order
 }
 
 function toCaptions(
@@ -766,6 +953,10 @@ function toZoomSegments(
             : undefined,
           fromScale: shot.fromScale,
           motionPlan,
+          // Glass Loupe (#2): the export renders these with the loupe pass, so
+          // the style and presentation must cross the plan boundary.
+          style: shot.style,
+          loupe: shot.loupe,
         },
       ]
     })
@@ -1047,16 +1238,49 @@ function buildAtempoFilter(speed: number): string {
 }
 
 function buildAudioTracks(state: TimelineState, range: ExportRange | undefined): RenderPlanAudio[] {
+  // Custom media tracks (#14) carry audio beds and b-roll with embedded audio,
+  // so they mix exactly like dedicated audio tracks.
   const audioTracks = state.tracks.filter(
-    (track) => track.kind === "audio" && track.clips.length > 0,
+    (track) => (track.kind === "audio" || track.kind === "media") && track.clips.length > 0,
   )
   const hasSoloTrack = audioTracks.some((track) => track.solo)
+
   return audioTracks.flatMap((track) => {
-    const clips = sortClips(track.clips).filter(
+    const clips = sortClips(track.clips)
+    const audioClips = clips.filter(
       (clip): clip is Extract<TimelineClip, { kind: "audio" }> => clip.kind === "audio",
     )
-    const segments = clips.flatMap((clip) =>
-      toSegments([clip], range, true).map((segment) => {
+    const videoClips = clips.filter(
+      (clip): clip is Extract<TimelineClip, { kind: "video" }> =>
+        clip.kind === "video" && clip.enabled !== false && !clip.audioMuted,
+    )
+    const muted = track.muted || (hasSoloTrack && !track.solo)
+
+    const groups = new Map<
+      string,
+      {
+        assetId: string
+        streamIndex: number | undefined
+        role: RenderPlanAudio["role"]
+        segments: RenderSegment[]
+      }
+    >()
+    const groupFor = (
+      assetId: string,
+      streamIndex: number | undefined,
+      role?: RenderPlanAudio["role"],
+    ) => {
+      const key = `${assetId}:${streamIndex ?? "default"}`
+      let group = groups.get(key)
+      if (!group) {
+        group = { assetId, streamIndex, role, segments: [] }
+        groups.set(key, group)
+      }
+      return group
+    }
+
+    for (const clip of audioClips) {
+      const segments = toSegments([clip], range, true).map((segment) => {
         const segDurationMs = segment.outputEndMs - segment.outputStartMs
         const effectiveVolume = Math.min(2, clip.volume * track.volume)
         const audioFilter = generateAudioVolumeFilter({
@@ -1066,25 +1290,38 @@ function buildAudioTracks(state: TimelineState, range: ExportRange | undefined):
           fadeOutMs: segment.fadeOutMs,
           volumeKeyframes: segment.volumeKeyframes,
         })
-        return {
-          ...segment,
+        return { ...segment, volume: effectiveVolume, audioFilter }
+      })
+      if (segments.length === 0) continue
+      groupFor(clip.assetId, clip.streamIndex, clip.role).segments.push(...segments)
+    }
+
+    for (const clip of videoClips) {
+      const segments = toSegments([clip], range, false).map((segment) => {
+        const segDurationMs = segment.outputEndMs - segment.outputStartMs
+        const effectiveVolume = Math.min(2, clip.volume * track.volume)
+        const audioFilter = generateAudioVolumeFilter({
+          durationMs: segDurationMs,
           volume: effectiveVolume,
-          audioFilter,
-        }
-      }),
-    )
-    const firstAudioClip = clips[0]
-    if (!firstAudioClip || segments.length === 0) return []
-    return [
-      {
-        assetId: firstAudioClip.assetId,
-        streamIndex: firstAudioClip.streamIndex,
-        role: firstAudioClip.role,
-        muted: track.muted || (hasSoloTrack && !track.solo),
+          fadeInMs: clip.fadeInMs,
+          fadeOutMs: clip.fadeOutMs,
+        })
+        return { ...segment, volume: effectiveVolume, audioFilter }
+      })
+      if (segments.length === 0) continue
+      groupFor(clip.assetId, clip.streamIndex, "other").segments.push(...segments)
+    }
+
+    return [...groups.values()]
+      .filter((group) => group.segments.length > 0)
+      .map((group) => ({
+        assetId: group.assetId,
+        streamIndex: group.streamIndex,
+        role: group.role,
+        muted,
         volume: track.volume,
-        segments,
-      },
-    ]
+        segments: group.segments.sort((left, right) => left.outputStartMs - right.outputStartMs),
+      }))
   })
 }
 
@@ -1111,12 +1348,23 @@ function cleanTextDesign(design: TitleDesign | undefined): TitleDesign {
 
 /**
  * Derive a Free-clean timeline copy: annotation clips are disabled (project
- * data stays intact — only the render plan loses them) and premium title
- * designs are converted to Clean Text. Mirrors the Free fallbacks in ADR 016.
+ * data stays intact — only the render plan loses them), premium title designs
+ * are converted to Clean Text, Glass Loupe zooms fall back to frame zooms and
+ * motion blur is switched off. Mirrors the Free fallbacks in ADR 016/020.
  */
 export function stripProTimelineFeatures(state: TimelineState): TimelineState {
+  const canvas =
+    state.canvas.motionBlur?.enabled === true
+      ? { ...state.canvas, motionBlur: { ...state.canvas.motionBlur, enabled: false } }
+      : state.canvas
   return {
     ...state,
+    canvas,
+    zoomSegments: state.zoomSegments?.map((segment) => {
+      if (segment.style !== "loupe") return segment
+      const { loupe: _loupe, ...rest } = segment
+      return { ...rest, style: "frame" as const }
+    }),
     tracks: state.tracks.map((track) => ({
       ...track,
       clips: track.clips.map((clip) => {
@@ -1247,9 +1495,7 @@ export function buildRenderPlan(
   const durationMs = Math.round(range ? range.endMs - range.startMs : contentEndMs)
   const effectiveRange: ExportRange = range ?? { startMs: 0, endMs: contentEndMs }
 
-  const cameraTrack = state.tracks.find((track) => track.kind === "camera")
-  const audioTracks = buildAudioTracks(state, effectiveRange)
-  // One engine instance feeds the zoom motion plans.
+  const audioTracks = buildAudioTracks(state, effectiveRange) // One engine instance feeds the zoom motion plans.
   const cursorEngine =
     input.cursorEngine ?? (input.cursorTelemetry ? createCursorEngine(input.cursorTelemetry) : null)
   const zoomSegments = toZoomSegments(state, effectiveRange, {
@@ -1301,9 +1547,9 @@ export function buildRenderPlan(
     }
   }
 
-  const overlays = cameraTrack
-    ? toOverlays(cameraTrack.clips, state.canvas, !cameraTrack.muted, effectiveRange, input.assets)
-    : []
+  const overlays = toOverlays(state, state.canvas, effectiveRange, input.assets)
+  const cameraLayouts = toCameraLayouts(state, effectiveRange, state.canvas)
+  const layerOrder = toLayerOrder(state)
   const firstScreenAssetId = segments[0].assetId
   const chapterMode =
     input.settings?.container === "gif" ||
@@ -1337,6 +1583,8 @@ export function buildRenderPlan(
       chapterMode: input.stripProFeatures ? "none" : chapterMode,
       masks,
       zoomSegments,
+      cameraLayouts,
+      layerOrder,
       cursorEffects,
       // An empty plan would disable the GPU passthrough check without drawing
       // anything, so only ship the unified overlay plane when it has items.

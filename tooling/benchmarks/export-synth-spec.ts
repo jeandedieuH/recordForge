@@ -419,6 +419,10 @@ const keystrokes = Array.from({ length: 15 }, (_, index) => ({
 // same 48 px margin the padded variants use, border + shadow on so the full
 // mask/border/shadow-plate path is exercised.
 const cameraOverlay = {
+  id: "camera-layer",
+  // The editor emits `role: "camera"` for the camera bubble; the layout lane and
+  // the grown decode plane key off it.
+  role: "camera",
   assetId: "webcam",
   sourceInMs: 0,
   sourceOutMs: EXPORT_MS,
@@ -446,6 +450,69 @@ const plainCanvas = {
   padding: 0,
   borderRadius: 0,
   shadow: false,
+}
+
+// A static b-roll video layer (#13): the same asset as the camera fixture, but
+// composited as a `role: "video"` layer with `fit: cover`. Both renderers decode
+// and composite it identically, so the row is held to the parity profile. No
+// animation keyframes: those are a GPU-only approximation (ADR 020).
+const brollOverlay = {
+  id: "b-roll-layer",
+  role: "video",
+  assetId: "broll",
+  sourceInMs: 0,
+  sourceOutMs: EXPORT_MS,
+  outputStartMs: 0,
+  outputEndMs: EXPORT_MS,
+  x: 160,
+  y: 120,
+  width: 640,
+  height: 360,
+  fit: "cover",
+  radius: 16,
+  shape: "rounded",
+  opacity: 1,
+  borderWidth: 4,
+  borderColor: "#ffffff",
+  borderOpacity: 1,
+  shadowEnabled: true,
+  shadowColor: "#000000",
+  shadowBlur: 18,
+  shadowOffsetX: 0,
+  shadowOffsetY: 6,
+}
+
+function layoutKeyframe(timeMs: number, x: number, y: number, width: number, height: number) {
+  return { timeMs, x, y, width, height, radius: 0, opacity: 1 }
+}
+
+// Camera layout lane (#5). The camera grows from its 320 px bubble to a
+// full-bleed frame and back. Approximation row (`approx-`): the compatibility
+// renderer keeps the static bubble, so it is measured for wall time, not parity.
+const cameraLayoutPlan = {
+  ...plainPlan(),
+  durationMs: 10_000,
+  segments: [screenSegment(5_000, 15_000, 0)],
+  overlays: [cameraOverlay],
+  cameraLayouts: [
+    {
+      id: "layout-fullscreen",
+      startMs: 2_000,
+      endMs: 8_000,
+      camera: [
+        layoutKeyframe(2_000, WIDTH - 320 - 48, HEIGHT - 320 - 48, 320, 320),
+        layoutKeyframe(2_800, 0, 0, WIDTH, HEIGHT),
+        layoutKeyframe(7_200, 0, 0, WIDTH, HEIGHT),
+        layoutKeyframe(8_000, WIDTH - 320 - 48, HEIGHT - 320 - 48, 320, 320),
+      ],
+    },
+  ],
+  audioTracks: [
+    {
+      ...audioTracks[0],
+      segments: [{ ...audioTracks[0].segments[0], sourceOutMs: 15_000, outputEndMs: 10_000 }],
+    },
+  ],
 }
 
 // A 1.5× hold for the whole clip: every frame samples the cropped region, so
@@ -532,6 +599,13 @@ const ablations: Array<{
     plan: { ...plainPlan(), overlays: [cameraOverlay] },
     extraAssets: { webcam: webcamPath },
   },
+  {
+    // Static video layer (#13/F3): the same decode/quad path as the camera, so
+    // the parity profile applies.
+    name: "b-roll",
+    plan: { ...plainPlan(), overlays: [brollOverlay] },
+    extraAssets: { broll: webcamPath },
+  },
 ]
 
 // The "all features" plan is unchanged from the original fixture so existing
@@ -556,6 +630,103 @@ const synthPlan = {
   annotations,
   captions,
   audioTracks,
+}
+
+// Zoom clarity (#3, M2). A 1280×720 canvas over the 1920×1080 source gives
+// `r = 1.5`, so the GPU path builds a source-resolution detail plane (plane =
+// canvas × min(m, r) = 1920×1080) and sharpens the remaining upscale; the
+// compatibility renderer zooms the canvas stream and reports `zoom-detail` /
+// `zoom-sharpening`. Approximation row: wall time and frames, not parity.
+const clarityZoomPlan = {
+  ...plainPlan({ width: 1280, height: 720, zoomSharpening: "strong" }),
+  durationMs: 10_000,
+  segments: [screenSegment(5_000, 15_000, 0)],
+  zoomSegments: [
+    {
+      id: "clarity-1.5-hold",
+      startMs: 0,
+      endMs: 10_000,
+      target: { x: 480, y: 270, width: 960, height: 540 },
+      scale: 1.5,
+      mode: "manual",
+    },
+  ],
+  audioTracks: [
+    {
+      ...audioTracks[0],
+      segments: [{ ...audioTracks[0].segments[0], sourceOutMs: 15_000, outputEndMs: 10_000 }],
+    },
+  ],
+}
+
+// Motion blur (#1, M2). Cursor blur comes from the shared rasterizer (exact on
+// both renderers); zoom/pan blur is the GPU multi-tap pass and is omitted by the
+// compatibility renderer. Transitions are placed inside the window so the taps
+// actually move.
+const motionBlurPlan = {
+  ...plainPlan({ motionBlur: { enabled: true, cursor: 0.5, zoom: 0.6, pan: 0.6 } }),
+  durationMs: 10_000,
+  segments: [screenSegment(5_000, 15_000, 0)],
+  zoomSegments: [
+    {
+      id: "mb-in",
+      startMs: 1_000,
+      endMs: 5_000,
+      target: { x: 480, y: 270, width: 1200, height: 675 },
+      scale: 1.6,
+      mode: "manual",
+      transitionInMs: 800,
+      transitionOutMs: 800,
+    },
+    {
+      id: "mb-pan",
+      startMs: 5_000,
+      endMs: 9_000,
+      target: { x: 200, y: 120, width: 1200, height: 675 },
+      scale: 1.6,
+      mode: "manual",
+      transitionInMs: 800,
+      transitionOutMs: 800,
+      fromTarget: { x: 480, y: 270, width: 1200, height: 675 },
+      fromScale: 1.6,
+    },
+  ],
+  cursorEffects,
+  audioTracks: [
+    {
+      ...audioTracks[0],
+      segments: [{ ...audioTracks[0].segments[0], sourceOutMs: 15_000, outputEndMs: 10_000 }],
+    },
+  ],
+}
+
+// Glass Loupe (#2, M2): the frame stays put and a lens magnifies the target.
+// The GPU draws it in the composite pass; the compatibility renderer omits the
+// lens and reports `loupe-glass`.
+const loupePlan = {
+  ...plainPlan(),
+  durationMs: 10_000,
+  segments: [screenSegment(5_000, 15_000, 0)],
+  zoomSegments: [
+    {
+      id: "loupe-2x",
+      startMs: 1_000,
+      endMs: 9_000,
+      target: { x: 480, y: 270, width: 960, height: 540 },
+      scale: 2,
+      mode: "manual",
+      transitionInMs: 400,
+      transitionOutMs: 400,
+      style: "loupe",
+      loupe: { shape: "circle", size: 0.34, glass: true, ringWidth: 6, ringOpacity: 0.9 },
+    },
+  ],
+  audioTracks: [
+    {
+      ...audioTracks[0],
+      segments: [{ ...audioTracks[0].segments[0], sourceOutMs: 15_000, outputEndMs: 10_000 }],
+    },
+  ],
 }
 
 const settings = {
@@ -604,14 +775,13 @@ const blurMaskPlan = {
     },
   ],
 }
-// A coverage hole plus a gap entry is deliberately outside the GPU gate: this
-// spec proves the automatic fallback still produces the compatibility output
-// (the pair must score 100 dB in parity) and keeps the runtime fallback path
-// exercised by every matrix run.
-const fallbackGapPlan = {
+// 10 s with a mid-timeline hole. Since F2 (M3) the decode pass splices a black
+// source for every declared gap, so this plan is inside the GPU gate: the pair
+// is a parity row again, not a fallback row.
+const gapFillPlan = {
   ...plainPlan(),
-  // Short on purpose: < 20 s keeps both sides single-pass, so the fallback pair
-  // is a bit-exact comparison instead of a chunking-artifact comparison.
+  // Short on purpose: < 20 s keeps both sides single-pass, so the pair is a
+  // bit-exact comparison instead of a chunking-artifact comparison.
   durationMs: 10_000,
   segments: [screenSegment(5_000, 9_500, 0), screenSegment(30_500, 35_000, 5_500)],
   gaps: [{ startMs: 4_500, endMs: 5_500 }],
@@ -640,6 +810,7 @@ const gpuCompatible = new Set([
   "keys",
   "captions",
   "camera",
+  "b-roll",
 ])
 if (longMode) {
   specs.push({
@@ -671,9 +842,9 @@ if (longMode) {
       forceSinglePass: single,
     })
     specs.push({
-      name: `spec_fallback_gap_${mode}${variantSuffix}`,
-      outputName: `render_fallback_gap_${mode}${variantSuffix}.mp4`,
-      plan: fallbackGapPlan,
+      name: `spec_gap_fill_${mode}${variantSuffix}`,
+      outputName: `render_gap_fill_${mode}${variantSuffix}.mp4`,
+      plan: gapFillPlan,
       assetPaths: baseAssetPaths,
       forceSinglePass: single,
     })
@@ -681,6 +852,39 @@ if (longMode) {
       name: `spec_blur_${mode}${variantSuffix}`,
       outputName: `render_blur_${mode}${variantSuffix}.mp4`,
       plan: blurMaskPlan,
+      assetPaths: baseAssetPaths,
+      forceSinglePass: single,
+    })
+    // Camera layout lane (#5). `approx-` keeps it out of the parity gate: the
+    // compatibility renderer draws the static bubble by design (ADR 020).
+    specs.push({
+      name: `spec_approx-camera-layout_${mode}${variantSuffix}`,
+      outputName: `render_approx-camera-layout_${mode}${variantSuffix}.mp4`,
+      plan: cameraLayoutPlan,
+      assetPaths: { ...baseAssetPaths, webcam: webcamPath },
+      forceSinglePass: single,
+    })
+    // M2 rows: each is approximated on the compatibility renderer (ADR 020), so
+    // `approx-` keeps them out of the parity gate while still measuring wall
+    // time and producing frames for review.
+    specs.push({
+      name: `spec_approx-zoom-clarity_${mode}${variantSuffix}`,
+      outputName: `render_approx-zoom-clarity_${mode}${variantSuffix}.mp4`,
+      plan: clarityZoomPlan,
+      assetPaths: baseAssetPaths,
+      forceSinglePass: single,
+    })
+    specs.push({
+      name: `spec_approx-motion-blur_${mode}${variantSuffix}`,
+      outputName: `render_approx-motion-blur_${mode}${variantSuffix}.mp4`,
+      plan: motionBlurPlan,
+      assetPaths: baseAssetPaths,
+      forceSinglePass: single,
+    })
+    specs.push({
+      name: `spec_approx-loupe_${mode}${variantSuffix}`,
+      outputName: `render_approx-loupe_${mode}${variantSuffix}.mp4`,
+      plan: loupePlan,
       assetPaths: baseAssetPaths,
       forceSinglePass: single,
     })

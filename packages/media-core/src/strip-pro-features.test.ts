@@ -10,6 +10,7 @@ import {
   type TimelineState,
 } from "@recordforge/domain"
 import { analyzeProFeatureUsage } from "@recordforge/editor-core"
+import { manualZoomSegmentSchema } from "@recordforge/contracts"
 import { buildRenderPlan, freeExportSettings, stripProTimelineFeatures } from "./render-plan"
 
 function makeTimeline(clips: TimelineClip[] = []): TimelineState {
@@ -127,6 +128,37 @@ describe("stripProTimelineFeatures", () => {
     expect(premium.titleDesign?.appearance).toBe("light")
     expect(legacy.titleDesign?.template).toBe("clean-text")
     expect(legacy.presetId).toBe("lower-third-bold")
+  })
+
+  it("turns Glass Loupe segments into frame zooms", () => {
+    const loupe = manualZoomSegmentSchema.parse({
+      id: "loupe-1",
+      startMs: 1_000,
+      durationMs: 2_000,
+      target: { x: 100, y: 100, width: 640, height: 360 },
+      scale: 2,
+      style: "loupe",
+      loupe: { shape: "circle", glass: true },
+    })
+    const timeline: TimelineState = { ...makeTimeline(), zoomSegments: [loupe] }
+    const stripped = stripProTimelineFeatures(timeline)
+    expect(stripped.zoomSegments?.[0]?.style).toBe("frame")
+    expect(stripped.zoomSegments?.[0]?.loupe).toBeUndefined()
+    // Everything else about the segment survives, so a Free export still zooms.
+    expect(stripped.zoomSegments?.[0]?.scale).toBe(2)
+    expect(stripped.zoomSegments?.[0]?.target).toEqual(loupe.target)
+  })
+
+  it("switches motion blur off for Free exports", () => {
+    const base = makeTimeline()
+    const timeline: TimelineState = {
+      ...base,
+      canvas: {
+        ...base.canvas,
+        motionBlur: { enabled: true, cursor: 0.5, zoom: 0.5, pan: 0.5 },
+      },
+    }
+    expect(stripProTimelineFeatures(timeline).canvas.motionBlur?.enabled).toBe(false)
   })
 })
 

@@ -17,16 +17,22 @@ import {
   cursorIconPresetSchema,
   cursorSettingsSchema,
   cursorSmoothingSchema,
+  loupeSettingsSchema,
   manualZoomSegmentSchema,
+  cameraLayoutKindSchema,
+  cameraLayoutPipSchema,
+  cameraLayoutSourceSchema,
   smartZoomSettingsSchema,
   textClipSchema,
   timelineCanvasSchema,
   timelineTrackKindSchema,
   trackUpdateSchema,
+  videoClipSchema,
   zoomEasingSchema,
   zoomModeSchema,
   zoomPresetSchema,
   zoomSourceSchema,
+  zoomStyleSchema,
   zoomTargetSchema,
 } from "@recordforge/contracts"
 
@@ -516,6 +522,8 @@ export const addZoomSegmentCommandSchema = commandMetaSchema.extend({
   followSmoothingAlpha: z.number().min(0.05).max(1.0).optional(),
   followSpeed: z.enum(["relaxed", "balanced", "tight"]).optional(),
   label: z.string().optional(),
+  style: zoomStyleSchema.optional(),
+  loupe: loupeSettingsSchema.partial().optional(),
 })
 
 export type AddZoomSegmentCommand = z.infer<typeof addZoomSegmentCommandSchema>
@@ -539,6 +547,8 @@ export const updateZoomSegmentCommandSchema = commandMetaSchema.extend({
   followSmoothingAlpha: z.number().min(0.05).max(1.0).optional(),
   followSpeed: z.enum(["relaxed", "balanced", "tight"]).optional(),
   label: z.string().optional(),
+  style: zoomStyleSchema.optional(),
+  loupe: loupeSettingsSchema.partial().optional(),
 })
 
 export type UpdateZoomSegmentCommand = z.infer<typeof updateZoomSegmentCommandSchema>
@@ -585,6 +595,74 @@ export const regenerateZoomSuggestionsCommandSchema = commandMetaSchema.extend({
 export type RegenerateZoomSuggestionsCommand = z.infer<
   typeof regenerateZoomSuggestionsCommandSchema
 >
+
+// Camera layout lane (#5). One command per gesture keeps undo granularity
+// aligned with what the user sees (a drag is one resize command).
+export const addCameraLayoutCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("add-camera-layout"),
+  segmentId: z.string().optional(),
+  startMs: z.number().int().min(0),
+  endMs: z.number().int().positive(),
+  layout: cameraLayoutKindSchema,
+  pip: cameraLayoutPipSchema.partial().optional(),
+  transitionInMs: z.number().int().min(0).max(10_000).optional(),
+  transitionOutMs: z.number().int().min(0).max(10_000).optional(),
+  easing: zoomEasingSchema.optional(),
+  source: cameraLayoutSourceSchema.optional(),
+  label: z.string().optional(),
+})
+
+export type AddCameraLayoutCommand = z.infer<typeof addCameraLayoutCommandSchema>
+
+export const updateCameraLayoutCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("update-camera-layout"),
+  segmentId: z.string(),
+  startMs: z.number().int().min(0).optional(),
+  endMs: z.number().int().positive().optional(),
+  layout: cameraLayoutKindSchema.optional(),
+  pip: cameraLayoutPipSchema.partial().optional(),
+  transitionInMs: z.number().int().min(0).max(10_000).optional(),
+  transitionOutMs: z.number().int().min(0).max(10_000).optional(),
+  easing: zoomEasingSchema.optional(),
+  enabled: z.boolean().optional(),
+  locked: z.boolean().optional(),
+  label: z.string().optional(),
+})
+
+export type UpdateCameraLayoutCommand = z.infer<typeof updateCameraLayoutCommandSchema>
+
+export const splitCameraLayoutCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("split-camera-layout"),
+  segmentId: z.string(),
+  splitTimeMs: z.number().int().min(0),
+  leftSegmentId: z.string().optional(),
+  rightSegmentId: z.string().optional(),
+})
+
+export type SplitCameraLayoutCommand = z.infer<typeof splitCameraLayoutCommandSchema>
+
+export const resizeCameraLayoutCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("resize-camera-layout"),
+  segmentId: z.string(),
+  startMs: z.number().int().min(0).optional(),
+  endMs: z.number().int().positive().optional(),
+})
+
+export type ResizeCameraLayoutCommand = z.infer<typeof resizeCameraLayoutCommandSchema>
+
+export const deleteCameraLayoutCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("delete-camera-layout"),
+  segmentId: z.string(),
+})
+
+export type DeleteCameraLayoutCommand = z.infer<typeof deleteCameraLayoutCommandSchema>
+
+export const deleteCameraLayoutsCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("delete-camera-layouts"),
+  segmentIds: z.array(z.string()).min(1),
+})
+
+export type DeleteCameraLayoutsCommand = z.infer<typeof deleteCameraLayoutsCommandSchema>
 
 export const trimTimelineEndsCommandSchema = commandMetaSchema.extend({
   kind: z.literal("trim-timeline-ends"),
@@ -637,6 +715,24 @@ export const addImageClipCommandSchema = commandMetaSchema.extend({
 })
 
 export type AddImageClipCommand = z.infer<typeof addImageClipCommandSchema>
+
+// B-roll / media-track video (#13). Adds an existing project video asset as a
+// composited layer; the clip's embedded audio mixes automatically.
+export const addVideoClipCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("add-video-clip"),
+  trackId: z.string().optional(),
+  clip: videoClipSchema,
+})
+
+export type AddVideoClipCommand = z.infer<typeof addVideoClipCommandSchema>
+
+export const updateVideoClipCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("update-video-clip"),
+  clipId: z.string(),
+  update: videoClipSchema.partial(),
+})
+
+export type UpdateVideoClipCommand = z.infer<typeof updateVideoClipCommandSchema>
 
 export const updateImageClipCommandSchema = commandMetaSchema.extend({
   kind: z.literal("update-image-clip"),
@@ -716,6 +812,12 @@ export const commandRecordSchema = z.discriminatedUnion("kind", [
   deleteZoomSegmentCommandSchema,
   deleteZoomSegmentsCommandSchema,
   regenerateZoomSuggestionsCommandSchema,
+  addCameraLayoutCommandSchema,
+  updateCameraLayoutCommandSchema,
+  splitCameraLayoutCommandSchema,
+  resizeCameraLayoutCommandSchema,
+  deleteCameraLayoutCommandSchema,
+  deleteCameraLayoutsCommandSchema,
   trimTimelineEndsCommandSchema,
   addAnnotationClipCommandSchema,
   updateAnnotationClipCommandSchema,
@@ -723,6 +825,8 @@ export const commandRecordSchema = z.discriminatedUnion("kind", [
   updateTextClipCommandSchema,
   addImageClipCommandSchema,
   updateImageClipCommandSchema,
+  addVideoClipCommandSchema,
+  updateVideoClipCommandSchema,
   addExternalAudioClipCommandSchema,
 ])
 

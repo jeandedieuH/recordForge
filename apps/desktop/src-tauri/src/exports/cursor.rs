@@ -57,7 +57,31 @@ pub struct RenderCanvas {
     pub border_style: Option<String>,
     #[serde(default)]
     pub border_gradient: Option<RenderBorderGradient>,
+    /// Zoom clarity (ADR 020): `off` | `auto` | `strong`. Governs the RCAS
+    /// sharpening applied when a zoom crop is upscaled past the source.
+    #[serde(default)]
+    pub zoom_sharpening: Option<String>,
+    /// Motion blur shutters for cursor / zoom / pan (Pro, ADR 020).
+    #[serde(default)]
+    pub motion_blur: Option<RenderMotionBlur>,
     pub cursor_settings: CursorSettings,
+}
+
+/// Per-motion-source shutter fractions (0 = off, 1 = a 180° shutter).
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+pub struct RenderMotionBlur {
+    pub enabled: bool,
+    pub cursor: f64,
+    pub zoom: f64,
+    pub pan: f64,
+}
+
+impl RenderMotionBlur {
+    /// True when the plan asks for any non-zero blur shutter.
+    pub fn is_active(&self) -> bool {
+        self.enabled && (self.cursor > 0.0 || self.zoom > 0.0 || self.pan > 0.0)
+    }
 }
 
 /// Two-colour ramp for a `gradient` border. `angle` is degrees clockwise from
@@ -294,6 +318,12 @@ pub struct CursorRenderer {
     canvas_width: u32,
     canvas_height: u32,
     canvas_padding: u32,
+    /// Canvas frame rate, used to size the cursor's shutter window.
+    fps: u32,
+    /// Motion-blur shutters from the canvas settings (M2 #1). `None` or a zero
+    /// cursor shutter keeps the single-pose path, so a plan without blur pays
+    /// nothing.
+    motion_blur: Option<RenderMotionBlur>,
     /// The recorded video screen in full-canvas coordinates. Cursor drawing is
     /// clipped to this rectangle unless a zoom effect expands the view to the
     /// full canvas.
@@ -558,6 +588,8 @@ impl CursorRenderer {
             canvas_width: canvas.width,
             canvas_height: canvas.height,
             canvas_padding: canvas.padding,
+            fps: canvas.fps.max(1),
+            motion_blur: canvas.motion_blur,
             video_screen,
             video_screen_rect,
             zoompan_out_w,
@@ -585,6 +617,100 @@ impl CursorRenderer {
                 self.base_fit_scale,
                 self.video_screen_rect,
             ))
+    }
+
+    /// Shutter fraction for cursor motion blur, or `None` when blur is off or
+    /// its cursor shutter is zero — the zero-cost path.
+    fn cursor_blur_shutter(&self) -> Option<f64> {
+        let blur = self.motion_blur.as_ref().filter(|blur| blur.is_active())?;
+        (blur.cursor > 0.0).then(|| blur.cursor.clamp(0.0, 1.0))
+    }
+
+    /// Source milliseconds per output millisecond at this PTS (clip speed).
+    fn source_ms_per_output_ms(&self, output_ms: f64) -> f64 {
+        let Some(start) = source_time_for_output(&self.segments, output_ms) else {
+            return 1.0;
+        };
+        let Some(next) = source_time_for_output(&self.segments, output_ms + 1.0) else {
+            return 1.0;
+        };
+        let rate = next - start;
+        if rate.is_finite() && rate > 0.0 {
+            rate
+        } else {
+            1.0
+        }
+    }
+
+    /// Canvas poses the cursor sweeps through across its shutter window, oldest
+    /// first. An empty vec means the motion is sub-pixel, so the caller draws
+    /// the single sharp pose (no cost when nothing moves).
+    #[allow(clippy::too_many_arguments)]
+    fn cursor_motion_poses(
+        &self,
+        output_ms: f64,
+        source_time_ms: f64,
+        transform: &ZoomTransformState,
+        clip: ClipRect,
+        rect: (f64, f64, f64, f64),
+        fit_scale: f64,
+    ) -> Vec<(f64, f64)> {
+        /// Poses probed before the sample count is chosen.
+        const PROBE: usize = 6;
+        /// Cap on accumulated ghost copies: each copy is one cached-raster blit.
+        const MAX_SAMPLES: usize = 6;
+        /// Sweep below this many canvas pixels per sample is not worth a pass.
+        const MIN_STEP_PX: f64 = 1.5;
+
+        let Some(shutter) = self.cursor_blur_shutter() else {
+            return Vec::new();
+        };
+        let frame_source_ms = 1000.0 / self.fps as f64 * self.source_ms_per_output_ms(output_ms);
+        let probe = self
+            .engine
+            .lock()
+            .expect("cursor engine")
+            .evaluate_motion_samples(
+                source_time_ms,
+                frame_source_ms,
+                shutter,
+                PROBE,
+                &self.settings,
+            );
+        let mapped = |samples: &[(f64, f64)]| {
+            samples
+                .iter()
+                .map(|(source_x, source_y)| {
+                    let (x, y, _) = self
+                        .map_source_point(transform, *source_x, *source_y, clip, rect, fit_scale);
+                    (x, y)
+                })
+                .collect::<Vec<_>>()
+        };
+        let probed = mapped(&probe);
+        let sweep: f64 = probed
+            .windows(2)
+            .map(|pair| ((pair[1].0 - pair[0].0).powi(2) + (pair[1].1 - pair[0].1).powi(2)).sqrt())
+            .sum();
+        if sweep < MIN_STEP_PX {
+            return Vec::new();
+        }
+        let samples = ((sweep / MIN_STEP_PX).ceil() as usize).clamp(2, MAX_SAMPLES);
+        if samples == PROBE {
+            return probed;
+        }
+        let resampled = self
+            .engine
+            .lock()
+            .expect("cursor engine")
+            .evaluate_motion_samples(
+                source_time_ms,
+                frame_source_ms,
+                shutter,
+                samples,
+                &self.settings,
+            );
+        mapped(&resampled)
     }
 
     /// Resolve the effective asset id for a cursor frame, honoring the user's
@@ -732,15 +858,36 @@ impl CursorRenderer {
         let shape_id = self.resolve_cursor_shape_id(&cursor_frame.shape_id);
         // Apply the idle fade opacity computed by the canonical engine. The
         // cached asset is rendered at full opacity and modulated per-frame.
-        self.draw_cursor(
-            &mut target,
-            x,
-            y,
-            cursor_frame.opacity,
-            &shape_id,
-            effective_cursor_scale * cursor_frame.click_scale,
-            &clip,
-        );
+        let glyph_scale = effective_cursor_scale * cursor_frame.click_scale;
+        // Cursor motion blur (M2 #1): accumulate equally-weighted ghost poses
+        // across the shutter. Sub-pixel movement returns an empty track, so a
+        // still cursor costs exactly one blit and an unblurred plan costs none.
+        let poses =
+            self.cursor_motion_poses(output_ms, source_time_ms, &transform, clip, rect, fit_scale);
+        if poses.is_empty() {
+            self.draw_cursor(
+                &mut target,
+                x,
+                y,
+                cursor_frame.opacity,
+                &shape_id,
+                glyph_scale,
+                &clip,
+            );
+        } else {
+            let weight = cursor_frame.opacity / poses.len() as f64;
+            for (pose_x, pose_y) in poses {
+                self.draw_cursor(
+                    &mut target,
+                    pose_x,
+                    pose_y,
+                    weight,
+                    &shape_id,
+                    glyph_scale,
+                    &clip,
+                );
+            }
+        }
     }
 
     /// Resolve zoom at a fractional output PTS so the cursor and video use the
@@ -771,6 +918,37 @@ impl CursorRenderer {
             self.base_fit_scale,
         );
         (x, y)
+    }
+
+    /// Canvas position of the cursor tip at `output_ms`, or `None` when the
+    /// cursor is not drawn there. The (x, y) is the exact point
+    /// `map_source_point` feeds the rasterizer for this frame — the rendered
+    /// pointer tip, not the cursor plate's top-left origin — so the Glass
+    /// Loupe lens rides the same position the export draws.
+    pub(crate) fn cursor_canvas_point(&self, output_ms: f64) -> Option<(f64, f64)> {
+        if !self.settings.enabled || !output_ms.is_finite() || output_ms < 0.0 {
+            return None;
+        }
+        let source_time_ms = source_time_for_output(&self.segments, output_ms)?;
+        let cursor_frame = self
+            .engine
+            .lock()
+            .expect("cursor engine")
+            .evaluate(source_time_ms, &self.settings);
+        if !cursor_frame.visible {
+            return None;
+        }
+        let transform = self.resolve_zoom_transform_at(output_ms);
+        let (clip, fit_scale, rect) = self.screen_entry_at(output_ms);
+        let (x, y, _) = self.map_source_point(
+            &transform,
+            cursor_frame.source_x,
+            cursor_frame.source_y,
+            clip,
+            rect,
+            fit_scale,
+        );
+        Some((x, y))
     }
 
     /// Focus-spotlight dim: the screen area outside a feathered hole around the
@@ -945,6 +1123,23 @@ impl CursorRenderer {
         let mut y0 = geometry.y0 as f64;
         let mut x1 = x0 + geometry.width as f64;
         let mut y1 = y0 + geometry.height as f64;
+
+        // Blurred ghosts sweep beyond the sharp pose; widen the plate so the
+        // blur is never clipped at the tile edge.
+        for (pose_x, pose_y) in
+            self.cursor_motion_poses(output_ms, source_time_ms, &transform, clip, rect, fit_scale)
+        {
+            let ghost = self.cursor_draw_geometry(
+                &shape_id,
+                pose_x,
+                pose_y,
+                effective_cursor_scale * cursor_frame.click_scale,
+            );
+            x0 = x0.min(ghost.x0 as f64);
+            y0 = y0.min(ghost.y0 as f64);
+            x1 = x1.max(ghost.x0 as f64 + ghost.width as f64);
+            y1 = y1.max(ghost.y0 as f64 + ghost.height as f64);
+        }
 
         if self.settings.click_feedback != "none" {
             for click in &cursor_frame.active_clicks {
@@ -2542,6 +2737,8 @@ mod tests {
     #[test]
     fn apply_zoom_clamps_target_to_padded_content_area() {
         let zoom = RenderPlanZoomSegment {
+            style: None,
+            loupe: None,
             id: "zoom".into(),
             start_ms: 0,
             end_ms: 1_000,
@@ -2598,6 +2795,8 @@ mod tests {
     #[test]
     fn apply_zoom_interpolates_keyframes_accurately() {
         let zoom = RenderPlanZoomSegment {
+            style: None,
+            loupe: None,
             id: "zoom-follow".into(),
             start_ms: 0,
             end_ms: 1_000,
@@ -2662,6 +2861,8 @@ mod tests {
     #[test]
     fn apply_zoom_interpolates_compact_motion_plan_accurately() {
         let zoom = RenderPlanZoomSegment {
+            style: None,
+            loupe: None,
             id: "zoom-motion".into(),
             start_ms: 0,
             end_ms: 1_000,
@@ -2718,6 +2919,8 @@ mod tests {
     #[test]
     fn apply_zoom_pans_seamlessly_from_previous_segment() {
         let zoom1 = RenderPlanZoomSegment {
+            style: None,
+            loupe: None,
             id: "zoom-1".into(),
             start_ms: 0,
             end_ms: 1_000,
@@ -2744,6 +2947,8 @@ mod tests {
             motion_plan: None,
         };
         let zoom2 = RenderPlanZoomSegment {
+            style: None,
+            loupe: None,
             id: "zoom-2".into(),
             start_ms: 1_000,
             end_ms: 2_000,
@@ -3079,6 +3284,8 @@ mod tests {
     #[test]
     fn snappy_zoom_out_decelerates_into_the_end() {
         let zoom_segments = vec![RenderPlanZoomSegment {
+            style: None,
+            loupe: None,
             id: "snappy-out".into(),
             start_ms: 0,
             end_ms: 1_000,
@@ -3337,6 +3544,8 @@ mod tests {
         // the square's unzoomed display position (124*0.5, 64*0.5) = (62,32)
         // over the first 1.2s, then hold.
         let zoom = RenderPlanZoomSegment {
+            style: None,
+            loupe: None,
             id: "zoom-reg".into(),
             start_ms: 0,
             end_ms: 2_000,
@@ -3483,6 +3692,8 @@ mod tests {
     fn tests_plan() -> crate::exports::RenderPlan {
         crate::exports::RenderPlan {
             project_id: "cursor-reg-test".into(),
+            camera_layouts: Vec::new(),
+            layer_order: Vec::new(),
             duration_ms: 2_000,
             segments: segments(),
             gaps: Vec::new(),

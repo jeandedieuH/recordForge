@@ -5,12 +5,14 @@ import type {
   OverlayTransform,
   TextClip,
   TimelineState,
+  VideoClip,
 } from "@recordforge/domain"
 import { findClip } from "@recordforge/domain"
 import {
   createUpdateAnnotationClipCommand,
   createUpdateImageClipCommand,
   createUpdateTextClipCommand,
+  createUpdateVideoClipCommand,
 } from "./commands"
 import {
   createInteractionTransaction,
@@ -20,7 +22,7 @@ import {
 } from "./interaction-transaction"
 import type { CommandResult } from "./history"
 
-export type OverlayClip = AnnotationClip | TextClip | ImageClip
+export type OverlayClip = AnnotationClip | TextClip | ImageClip | VideoClip
 
 export type OverlayGestureKind =
   "move" | "resize" | "rotate" | "arrow-start" | "arrow-end" | "text-edit"
@@ -379,7 +381,8 @@ export function buildOverlayCommand(
   if (
     found.clip.kind !== "annotation" &&
     found.clip.kind !== "text" &&
-    found.clip.kind !== "image"
+    found.clip.kind !== "image" &&
+    found.clip.kind !== "video"
   ) {
     return { ok: false, error: editorError("invalid_clip", "Clip is not an overlay") }
   }
@@ -405,6 +408,15 @@ export function buildOverlayCommand(
     return {
       ok: true,
       value: { command: createUpdateTextClipCommand(draft.clipId, update), hint: null },
+    }
+  }
+  if (found.clip.kind === "video") {
+    // B-roll layers share the overlay transform; `overlayAnimation` is not a
+    // video-clip field, so the schema drops it on the way in.
+    const update = { ...(draft.update ?? {}), ...commonUpdate }
+    return {
+      ok: true,
+      value: { command: createUpdateVideoClipCommand(draft.clipId, update), hint: null },
     }
   }
   const update = { ...(draft.update ?? {}), ...commonUpdate }

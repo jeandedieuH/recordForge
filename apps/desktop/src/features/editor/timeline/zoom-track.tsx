@@ -447,7 +447,7 @@ const ZoomSegmentItem = memo(function ZoomSegmentItem({
             }
             onSelectZoom(segment.id)
           }}
-          title={`${segment.label ? `${segment.label} · ` : ""}${segment.scale.toFixed(1)}× (${formatZoomTime(segment.startMs)} → ${formatZoomTime(segment.startMs + segment.durationMs)})`}
+          title={`${segment.label ? `${segment.label} · ` : ""}${segment.scale.toFixed(1)}× (${formatZoomTime(segment.startMs)} → ${formatZoomTime(segment.startMs + segment.durationMs)})${segment.style === "loupe" ? " · loupe" : ""}`}
         >
           {/* Top Accent Bar */}
           <div className="pointer-events-none absolute inset-x-0 top-0 h-0.5 bg-lane/80" />
@@ -491,7 +491,11 @@ const ZoomSegmentItem = memo(function ZoomSegmentItem({
                 {segment.label ? `${segment.label} ` : ""}
                 {segment.scale.toFixed(1)}×
               </span>
-              {width >= 90 && segment.mode === "follow-cursor" ? (
+              {width >= 90 && segment.style === "loupe" ? (
+                <span className="rounded-sm bg-lane/20 px-1 py-0.5 font-mono text-[9px] font-medium text-lane">
+                  loupe
+                </span>
+              ) : width >= 90 && segment.mode === "follow-cursor" ? (
                 <span className="rounded-sm bg-lane/20 px-1 py-0.5 font-mono text-[9px] font-medium text-lane">
                   follow
                 </span>

@@ -75,7 +75,14 @@ export function getOverlayContentEndMs(state: TimelineState): number {
   for (const track of state.tracks) {
     if (track.muted) continue
     for (const clip of track.clips) {
-      if (clip.kind !== "annotation" && clip.kind !== "text" && clip.kind !== "image") continue
+      if (
+        clip.kind !== "annotation" &&
+        clip.kind !== "text" &&
+        clip.kind !== "image" &&
+        clip.kind !== "video"
+      ) {
+        continue
+      }
       if (clip.enabled === false) continue
       duration = Math.max(duration, clip.startMs + clip.durationMs)
     }
@@ -169,6 +176,10 @@ export function trackAcceptsClipKind(
   ) {
     return true
   }
+  // Custom media tracks (#14) hold b-roll video, images and extra audio beds.
+  if (trackKind === "media") {
+    return clipKind === "video" || clipKind === "image" || clipKind === "audio"
+  }
   return false
 }
 
@@ -183,6 +194,9 @@ export function trackAllowsOverlap(track: TimelineTrack): boolean {
   if (track.kind === "titles") return true
   if (track.kind === "graphics") return true
   if (track.kind === "overlay") return true
+  // Media tracks are independent stacked layers (#14), so b-roll and audio beds
+  // may overlap within one track without splitting it in two.
+  if (track.kind === "media") return true
   return false
 }
 
@@ -244,6 +258,24 @@ export function ensureCursorEffectTrack(
 export function ensureZoomTrack(state: TimelineState): TimelineState {
   if (state.tracks.some((track) => track.kind === "zoom")) return state
   return { ...state, tracks: [...state.tracks, makeTrack("zoom", "Zoom", [])] }
+}
+
+/**
+ * Anchor track for the camera layout lane (#5). Like the zoom lane it holds no
+ * clips — the segments live in `TimelineState.cameraLayouts`; the track exists
+ * so the timeline can render and lock the lane through the normal track rows.
+ */
+export function createCameraLayoutTrack(): TimelineTrack {
+  return makeTrack("camera-layouts", "Camera layouts", [])
+}
+
+export function ensureCameraLayoutTrack(state: TimelineState): TimelineState {
+  if (state.tracks.some((track) => track.kind === "camera-layouts")) return state
+  const track = createCameraLayoutTrack()
+  const cameraIndex = state.tracks.findIndex((candidate) => candidate.kind === "camera")
+  const tracks = [...state.tracks]
+  tracks.splice(cameraIndex >= 0 ? cameraIndex + 1 : tracks.length, 0, track)
+  return { ...state, tracks }
 }
 
 function audioStreamRole(stream: MediaStream | undefined, index: number): AudioRole {
@@ -500,6 +532,7 @@ export function createTimelineFromRecording(
     tracks,
     markers,
     zoomSegments: [],
+    cameraLayouts: [],
     smartZoomSettings: defaultSmartZoomSettings,
     createdAt: now,
     updatedAt: now,
@@ -519,6 +552,8 @@ export function trackKindDisplayName(kind: TimelineTrackKind): string {
     titles: "Titles & Text",
     graphics: "Graphics & Overlays",
     overlay: "Overlay",
+    media: "Media",
+    "camera-layouts": "Camera layouts",
   }
   return names[kind]
 }
@@ -690,6 +725,7 @@ export function createProjectFromRecording(
     tracks: timeline.tracks,
     markers: timeline.markers,
     zoomSegments: timeline.zoomSegments ?? [],
+    cameraLayouts: timeline.cameraLayouts ?? [],
     smartZoomSettings: timeline.smartZoomSettings ?? defaultSmartZoomSettings,
     exportSettings: exportSettings ?? defaultProjectExportSettings,
     createdAt: timeline.createdAt,
@@ -709,11 +745,12 @@ export function projectToTimeline(project: Project): TimelineState {
     tracks: project.tracks.filter((track) => track.kind !== "cursor"),
     markers: project.markers,
     zoomSegments: project.zoomSegments ?? [],
+    cameraLayouts: project.cameraLayouts ?? [],
     smartZoomSettings: project.smartZoomSettings ?? defaultSmartZoomSettings,
     createdAt: project.createdAt,
     updatedAt: project.updatedAt,
   }
-  return ensureZoomTrack(timeline)
+  return ensureCameraLayoutTrack(ensureZoomTrack(timeline))
 }
 
 // Merge an updated timeline back into an existing project without losing assets,
@@ -724,9 +761,13 @@ export function timelineToProject(timeline: TimelineState, base: Project): Proje
     ...base,
     name: timeline.name,
     canvas: timeline.canvas,
-    tracks: timeline.tracks,
+    // The camera layout lane is a view anchor with no user data (its segments
+    // live in `cameraLayouts`), so it is not persisted: older builds can still
+    // open the file without knowing the track kind.
+    tracks: timeline.tracks.filter((track) => track.kind !== "camera-layouts"),
     markers: timeline.markers,
     zoomSegments: timeline.zoomSegments ?? [],
+    cameraLayouts: timeline.cameraLayouts ?? [],
     smartZoomSettings: timeline.smartZoomSettings ?? defaultSmartZoomSettings,
     exportSettings: base.exportSettings ?? defaultProjectExportSettings,
     updatedAt: new Date().toISOString(),

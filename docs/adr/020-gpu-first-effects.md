@@ -57,11 +57,11 @@ renders an honest, documented approximation.
 
 | Effect | GPU compositor | Compatibility renderer | Downgrade reported |
 | --- | --- | --- | --- |
-| Zoom detail plane (source-resolution crop) | Exact | Holds exact; animated transitions sample the post-scale stream | `zoom-detail` when a transition is post-scale |
-| Zoom sharpening (RCAS) | Exact | Mild luma `unsharp` | `zoom-sharpening` |
+| Zoom detail plane (source-resolution crop) | Exact: the screen chain decodes at the plan's detail resolution (`D = content × min(m, r)`, never above the source) and the composite pass samples the real source pixels | Holds exact; animated transitions sample the post-scale stream | `zoom-detail` when a transition is post-scale |
+| Zoom sharpening (RCAS-style) | Exact | Mild luma `unsharp` | `zoom-sharpening` |
 | Motion blur — cursor | Exact (shared Rust rasterizer) | Exact (same rasterizer) | never |
 | Motion blur — zoom/pan | Exact | Omitted | `motion-blur` |
-| Glass Loupe | Exact | Lens + flat ring, no refraction/glass highlight | `loupe-glass` |
+| Glass Loupe | Exact (analytic SDF lens, glass rim, SDF shadow) | Not rendered: the frame keeps its zoom and the lens is omitted | `loupe-glass` |
 | Camera colour / LUT | Exact (camera decode chain) | Exact (same FFmpeg chain) | never |
 | Camera cutout matte + background modes | Exact (camera decode chain) | Exact (same FFmpeg chain) | never |
 | Camera cutout silhouette shadow | Exact | Omitted | `cutout-shadow` |
@@ -71,6 +71,28 @@ renders an honest, documented approximation.
 
 The table is updated whenever an effect is added; an effect without a row may
 not ship.
+
+### M2 implementation notes (2026-11-15)
+
+- **Detail plane shape.** The screen chain decodes at the detail resolution
+  instead of adding a second sidecar: `plane = canvas × min(m_max, r)`, the
+  content rect scales with it, and the composite pass reads `plane_size` for its
+  uv mapping. Consequence: while a detail plane is active, the per-frame
+  identity bypass is off (every frame is composed, which is what keeps
+  identity → encoder passthrough valid) and the raw NV12 pipe grows by up to
+  `(D / content)²`. The plan analysis (`.exports/zoom_detail.rs`) reports which
+  frame ranges need it and the RCAS strength; a plan without zoom keeps today's
+  plane size and bypass.
+- **Motion blur cost.** Cursor blur accumulates up to six equally weighted
+  ghost poses inside the shared rasterizer, chosen from the mapped sweep
+  distance (sub-pixel movement falls back to one pose). Zoom/pan blur is a
+  multi-tap average along the crop strip in the composite shader (up to 16
+  taps). A plan with blur off writes one tap and takes the existing single-sample
+  path, so the cost is zero.
+- **Glass Loupe compat.** The compatibility graph has no cheap "magnify a region
+  inside a masked lens" equivalent that also follows the cursor, so the lens is
+  omitted there and reported. The GPU path draws it analytically in the
+  composite pass between the screen and the cursor.
 
 ## Consequences
 

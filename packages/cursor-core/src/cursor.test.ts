@@ -257,6 +257,21 @@ describe("cursor-core", () => {
     expect(keys).toContain("locked")
     expect(keys).toContain("source")
     expect(keys).toContain("preset")
+
+    // A loupe-styled segment reports the Glass Loupe badge; plain frame zooms
+    // do not.
+    const loupe = zoomSegmentBadges({ ...segment, style: "loupe" })
+    const styleBadge = loupe.find((badge) => badge.key === "style")
+    expect(styleBadge).toMatchObject({ label: "Glass Loupe", variant: "default" })
+    expect(labels.find((badge) => badge.key === "style")).toBeUndefined()
+
+    // The loupe suppresses the camera-mode badge (the lens always rides the
+    // cursor itself), while a follow-cursor frame zoom still reports it.
+    const loupeFollow = zoomSegmentBadges({ ...segment, style: "loupe", mode: "follow-cursor" })
+    expect(loupeFollow.find((badge) => badge.key === "style")?.label).toBe("Glass Loupe")
+    expect(loupeFollow.find((badge) => badge.key === "mode")).toBeUndefined()
+    const frameFollow = zoomSegmentBadges({ ...segment, mode: "follow-cursor" })
+    expect(frameFollow.find((badge) => badge.key === "mode")?.label).toBe("Follow cursor")
   })
 
   it("supports idle hiding and source mapping through a sped-up clip", () => {

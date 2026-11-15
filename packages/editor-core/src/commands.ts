@@ -3,11 +3,13 @@ import {
   imageClipSchema,
   normalizeOverlayClipInput,
   textClipSchema,
+  videoClipSchema,
 } from "@recordforge/domain"
 import type {
   AnnotationClip,
   AppError,
   AudioClip,
+  CameraLayoutSegment,
   CameraPlacementPreset,
   CaptionClip,
   CaptionCue,
@@ -27,9 +29,12 @@ import type {
   TimelineState,
   TimelineTrack,
   TrackUpdate,
+  VideoClip,
 } from "@recordforge/domain"
 import {
   buildCameraPresetTransform,
+  cameraLayoutPipSchema,
+  cameraLayoutSegmentSchema,
   DEFAULT_CAPTION_DESIGN,
   defaultSmartZoomSettings,
   findClip,
@@ -66,8 +71,10 @@ import { getClipGroupId } from "./grouping"
 import { clipDurationFromSourceRange, timelineToSource } from "./time-mapping"
 import { snapRangeEdgeToFrame } from "./smart-cut"
 import { warpTimeline } from "./time-warp"
+import { resolveLoupeSettings } from "./zoom-loupe"
 import type {
   AddAnnotationClipCommand,
+  AddCameraLayoutCommand,
   AddCaptionClipCommand,
   AddCursorRangeCommand,
   AddExternalAudioClipCommand,
@@ -76,8 +83,11 @@ import type {
   AddMarkerCommand,
   AddTextClipCommand,
   AddTrackCommand,
+  AddVideoClipCommand,
   AddZoomSegmentCommand,
   CommandRecord,
+  DeleteCameraLayoutCommand,
+  DeleteCameraLayoutsCommand,
   DeleteClipCommand,
   DeleteClipsCommand,
   DeleteCursorRangeCommand,
@@ -99,6 +109,7 @@ import type {
   ReorderTracksCommand,
   ReplaceCaptionTextCommand,
   ResyncCaptionTrackCommand,
+  ResizeCameraLayoutCommand,
   ResizeCursorRangeCommand,
   ResizeZoomSegmentCommand,
   SetClipSpeedCommand,
@@ -106,13 +117,15 @@ import type {
   RippleDeleteClipsCommand,
   RippleDeleteRangeCommand,
   RippleDeleteRangesCommand,
-  SplitClipCommand,
   SplitAllClipsCommand,
+  SplitCameraLayoutCommand,
+  SplitClipCommand,
   SplitCursorRangeCommand,
   SplitZoomSegmentCommand,
   TrimClipCommand,
   TrimTimelineEndsCommand,
   UpdateAnnotationClipCommand,
+  UpdateCameraLayoutCommand,
   UpdateCanvasCommand,
   UpdateCaptionClipCommand,
   UpdateCaptionTrackCommand,
@@ -126,6 +139,7 @@ import type {
   UpdateSmartZoomSettingsCommand,
   UpdateTextClipCommand,
   UpdateTrackCommand,
+  UpdateVideoClipCommand,
   UpdateZoomSegmentCommand,
 } from "./command-records"
 import type { CommandResult } from "./history"
@@ -317,6 +331,57 @@ function validateZoomSegments(segments: ManualZoomSegment[]): CommandResult<Manu
       return {
         ok: false,
         error: editorError("invalid_zoom_target", "Zoom target must have positive dimensions"),
+      }
+    }
+  }
+  return { ok: true, value: sorted }
+}
+
+function getCameraLayoutSegments(state: TimelineState): CameraLayoutSegment[] {
+  return state.cameraLayouts ?? []
+}
+
+function findCameraLayoutSegment(
+  state: TimelineState,
+  segmentId: string,
+): CameraLayoutSegment | null {
+  return getCameraLayoutSegments(state).find((segment) => segment.id === segmentId) ?? null
+}
+
+/** The camera layout lane is locked through its anchor track (#5). */
+function cameraLayoutLaneLocked(state: TimelineState): boolean {
+  return state.tracks.some((track) => track.kind === "camera-layouts" && track.locked)
+}
+
+function validateCameraLayoutSegments(
+  segments: CameraLayoutSegment[],
+): CommandResult<CameraLayoutSegment[]> {
+  const sorted = [...segments].sort(
+    (left, right) => left.startMs - right.startMs || left.id.localeCompare(right.id),
+  )
+  for (let index = 0; index < sorted.length; index++) {
+    const segment = sorted[index]
+    if (segment.durationMs <= 0) {
+      return {
+        ok: false,
+        error: editorError("invalid_camera_layout", "Camera layout must have a duration"),
+      }
+    }
+    if (index > 0) {
+      const previous = sorted[index - 1]
+      if (previous.startMs + previous.durationMs > segment.startMs) {
+        return {
+          ok: false,
+          error: editorError("camera_layout_overlap", "Camera layout segments cannot overlap"),
+        }
+      }
+    }
+    if (segment.layout === "pip" && segment.pip?.sizeFraction !== undefined) {
+      if (segment.pip.sizeFraction <= 0 || segment.pip.sizeFraction > 0.6) {
+        return {
+          ok: false,
+          error: editorError("invalid_camera_layout", "Camera PiP size must be within 5–60%"),
+        }
       }
     }
   }
@@ -913,6 +978,110 @@ export function canApplyCommand(state: TimelineState, command: CommandRecord): C
       }
       return { ok: true, value: undefined }
     }
+    case "add-camera-layout": {
+      if (cameraLayoutLaneLocked(state)) {
+        return {
+          ok: false,
+          error: editorError("camera_layout_lane_locked", "The camera layouts lane is locked"),
+        }
+      }
+      if (command.startMs >= command.endMs) {
+        return {
+          ok: false,
+          error: editorError(
+            "invalid_camera_layout",
+            "Camera layout end must be greater than start",
+          ),
+        }
+      }
+      return { ok: true, value: undefined }
+    }
+    case "split-camera-layout":
+    case "resize-camera-layout":
+    case "update-camera-layout":
+    case "delete-camera-layout": {
+      if (cameraLayoutLaneLocked(state)) {
+        return {
+          ok: false,
+          error: editorError("camera_layout_lane_locked", "The camera layouts lane is locked"),
+        }
+      }
+      const segment = findCameraLayoutSegment(state, command.segmentId)
+      if (!segment) {
+        return {
+          ok: false,
+          error: editorError("camera_layout_not_found", "Camera layout segment not found"),
+        }
+      }
+      if (segment.locked) {
+        const onlyUnlock =
+          command.kind === "update-camera-layout" &&
+          command.locked === false &&
+          command.startMs === undefined &&
+          command.endMs === undefined &&
+          command.layout === undefined &&
+          command.pip === undefined &&
+          command.transitionInMs === undefined &&
+          command.transitionOutMs === undefined &&
+          command.easing === undefined &&
+          command.enabled === undefined &&
+          command.label === undefined
+        if (!onlyUnlock) {
+          return {
+            ok: false,
+            error: editorError("camera_layout_locked", "Camera layout segment is locked"),
+          }
+        }
+      }
+      if (command.kind === "split-camera-layout") {
+        const end = segment.startMs + segment.durationMs
+        if (command.splitTimeMs <= segment.startMs || command.splitTimeMs >= end) {
+          return {
+            ok: false,
+            error: editorError(
+              "invalid_camera_layout_split",
+              "Split point is outside the camera layout segment",
+            ),
+          }
+        }
+      }
+      if (command.kind === "resize-camera-layout" || command.kind === "update-camera-layout") {
+        const nextStart = command.startMs ?? segment.startMs
+        const nextEnd = command.endMs ?? segment.startMs + segment.durationMs
+        if (nextStart >= nextEnd) {
+          return {
+            ok: false,
+            error: editorError(
+              "invalid_camera_layout",
+              "Camera layout end must be greater than start",
+            ),
+          }
+        }
+      }
+      return { ok: true, value: undefined }
+    }
+    case "delete-camera-layouts": {
+      if (cameraLayoutLaneLocked(state)) {
+        return {
+          ok: false,
+          error: editorError("camera_layout_lane_locked", "The camera layouts lane is locked"),
+        }
+      }
+      const segments = command.segmentIds.map((id) => findCameraLayoutSegment(state, id))
+      if (segments.some((segment) => !segment)) {
+        return {
+          ok: false,
+          error: editorError("camera_layout_not_found", "Camera layout segment not found"),
+        }
+      }
+      if (segments.some((segment) => segment?.locked)) {
+        return {
+          ok: false,
+          error: editorError("camera_layout_locked", "Camera layout segment is locked"),
+        }
+      }
+      return { ok: true, value: undefined }
+    }
     case "update-canvas":
       return { ok: true, value: undefined }
     case "update-smart-zoom-settings":
@@ -931,11 +1100,13 @@ export function canApplyCommand(state: TimelineState, command: CommandRecord): C
     case "add-annotation-clip":
     case "add-text-clip":
     case "add-image-clip":
+    case "add-video-clip":
     case "add-external-audio-clip":
       return { ok: true, value: undefined }
     case "update-annotation-clip":
     case "update-text-clip":
-    case "update-image-clip": {
+    case "update-image-clip":
+    case "update-video-clip": {
       const found = findClip(state, command.clipId)
       if (!found) return { ok: false, error: editorError("clip_not_found", "Clip not found") }
       const trackResult = checkTrackLocked(found.track)
@@ -1039,6 +1210,10 @@ export function applyCommand(
       return applyAddImageClip(state, command)
     case "update-image-clip":
       return applyUpdateImageClip(state, command)
+    case "add-video-clip":
+      return applyAddVideoClip(state, command)
+    case "update-video-clip":
+      return applyUpdateVideoClip(state, command)
     case "add-external-audio-clip":
       return applyAddExternalAudioClip(state, command)
     case "update-canvas":
@@ -1071,6 +1246,18 @@ export function applyCommand(
       return applyDeleteZoomSegments(state, command)
     case "regenerate-zoom-suggestions":
       return applyRegenerateZoomSuggestions(state, command)
+    case "add-camera-layout":
+      return applyAddCameraLayout(state, command)
+    case "update-camera-layout":
+      return applyUpdateCameraLayout(state, command)
+    case "split-camera-layout":
+      return applySplitCameraLayout(state, command)
+    case "resize-camera-layout":
+      return applyResizeCameraLayout(state, command)
+    case "delete-camera-layout":
+      return applyDeleteCameraLayout(state, command)
+    case "delete-camera-layouts":
+      return applyDeleteCameraLayouts(state, command)
     case "trim-timeline-ends":
       return applyTrimTimelineEnds(state, command)
     default:
@@ -1183,6 +1370,17 @@ function applyDeleteTrack(
   const track = findTrack(state, command.trackId)
   if (!track) {
     return { ok: false, error: editorError("track_not_found", "Track not found") }
+  }
+  if (track.kind === "camera-layouts") {
+    // The lane is the anchor row for `cameraLayouts`; deleting it would strand
+    // the segments with nowhere to edit them.
+    return {
+      ok: false,
+      error: editorError(
+        "camera_layout_lane_required",
+        "The camera layouts lane cannot be deleted",
+      ),
+    }
   }
   if (track.locked) {
     return { ok: false, error: editorError("track_locked", `Track "${track.name}" is locked`) }
@@ -2302,12 +2500,24 @@ function deleteRangeFromTrack(
   }
 }
 
-function zoomSegmentsAfterRange(
-  segments: ManualZoomSegment[],
+/** Minimal shape shared by the zoom and camera-layout effect lanes. */
+interface EffectLaneSegment {
+  id: string
+  startMs: number
+  durationMs: number
+  locked?: boolean
+}
+
+/**
+ * Remap one effect-lane segment across a deleted range. Shared by the zoom and
+ * camera-layout lanes so a ripple delete cannot desynchronize them.
+ */
+function laneSegmentsAfterRange<T extends EffectLaneSegment>(
+  segments: T[],
   deleteStartMs: number,
   deleteEndMs: number,
   ripple: boolean,
-): ManualZoomSegment[] {
+): T[] {
   return segments.flatMap((segment) => {
     if (segment.locked) return [segment]
     const segmentEndMs = segment.startMs + segment.durationMs
@@ -2336,7 +2546,7 @@ function zoomSegmentsAfterRange(
       ]
     }
 
-    const next: ManualZoomSegment[] = []
+    const next: T[] = []
     if (hasLeft) {
       next.push({ ...segment, durationMs: leftEndMs - segment.startMs })
     }
@@ -2353,6 +2563,24 @@ function zoomSegmentsAfterRange(
     }
     return next
   })
+}
+
+function zoomSegmentsAfterRange(
+  segments: ManualZoomSegment[],
+  deleteStartMs: number,
+  deleteEndMs: number,
+  ripple: boolean,
+): ManualZoomSegment[] {
+  return laneSegmentsAfterRange(segments, deleteStartMs, deleteEndMs, ripple)
+}
+
+function cameraLayoutsAfterRange(
+  segments: CameraLayoutSegment[],
+  deleteStartMs: number,
+  deleteEndMs: number,
+  ripple: boolean,
+): CameraLayoutSegment[] {
+  return laneSegmentsAfterRange(segments, deleteStartMs, deleteEndMs, ripple)
 }
 
 function deleteMarkersInRange(
@@ -2394,7 +2622,13 @@ function applyDeleteRangeInternal(
   const zoomSegments = isZoomTrackLocked
     ? (state.zoomSegments ?? [])
     : zoomSegmentsAfterRange(getManualZoomSegments(state), deleteStartMs, deleteEndMs, ripple)
-  return { ...state, tracks, markers, zoomSegments, updatedAt: now() }
+  const cameraLayouts = cameraLayoutsAfterRange(
+    getCameraLayoutSegments(state),
+    deleteStartMs,
+    deleteEndMs,
+    ripple,
+  )
+  return { ...state, tracks, markers, zoomSegments, cameraLayouts, updatedAt: now() }
 }
 
 function applyDeleteClips(
@@ -3485,6 +3719,64 @@ function applyUpdateImageClip(
   return { ok: true, value: replaceClipInState(state, found.track.id, command.clipId, next) }
 }
 
+function applyAddVideoClip(
+  state: TimelineState,
+  command: AddVideoClipCommand,
+): CommandResult<TimelineState> {
+  const existingTrack = command.trackId
+    ? findTrack(state, command.trackId)
+    : state.tracks.find((track) => track.kind === "media")
+  if (existingTrack && !trackAcceptsClipKind(existingTrack.kind, "video")) {
+    return {
+      ok: false,
+      error: editorError("invalid_track", `Track "${existingTrack.name}" cannot hold video`),
+    }
+  }
+  const track: TimelineTrack = existingTrack ?? {
+    id: command.trackId ?? `track:media:${Date.now()}`,
+    kind: "media",
+    name: "Media",
+    muted: false,
+    locked: false,
+    solo: false,
+    volume: 1,
+    clips: [],
+  }
+  if (track.locked) {
+    return { ok: false, error: editorError("track_locked", `Track "${track.name}" is locked`) }
+  }
+  const clip = videoClipSchema.parse(command.clip)
+  const nextTrack: TimelineTrack = {
+    ...track,
+    clips: [...track.clips, clip].sort(
+      (left, right) => left.startMs - right.startMs || left.id.localeCompare(right.id),
+    ),
+  }
+  const tracks = existingTrack
+    ? state.tracks.map((candidate) => (candidate.id === track.id ? nextTrack : candidate))
+    : [...state.tracks, nextTrack]
+  return { ok: true, value: { ...state, tracks, updatedAt: now() } }
+}
+
+function applyUpdateVideoClip(
+  state: TimelineState,
+  command: UpdateVideoClipCommand,
+): CommandResult<TimelineState> {
+  const found = findClip(state, command.clipId)
+  if (!found) return { ok: false, error: editorError("clip_not_found", "Clip not found") }
+  if (found.track.locked) {
+    return {
+      ok: false,
+      error: editorError("track_locked", `Track "${found.track.name}" is locked`),
+    }
+  }
+  if (found.clip.kind !== "video") {
+    return { ok: false, error: editorError("invalid_clip", "Clip is not a video clip") }
+  }
+  const next = videoClipSchema.parse({ ...found.clip, ...command.update })
+  return { ok: true, value: replaceClipInState(state, found.track.id, command.clipId, next) }
+}
+
 function applyAddExternalAudioClip(
   state: TimelineState,
   command: AddExternalAudioClipCommand,
@@ -3858,6 +4150,15 @@ function applyAddZoomSegment(
     followSmoothingAlpha: command.followSmoothingAlpha,
     followSpeed: command.followSpeed,
     label: command.label,
+    style: command.style,
+    // Glass Loupe settings are stored fully resolved so the render plan never
+    // has to guess defaults.
+    loupe: command.loupe ? resolveLoupeSettings(command.loupe) : undefined,
+  }
+  // A flat (1x) lens magnifies nothing: adding a loupe at an unmagnified zoom
+  // bumps the lens to 2x. Existing loupes keep their scale untouched.
+  if (segment.style === "loupe" && segment.scale < 1.05) {
+    segment.scale = 2
   }
   const segments = [...getManualZoomSegments(state), segment]
   const valid = validateZoomSegments(segments)
@@ -3887,7 +4188,9 @@ function applyUpdateZoomSegment(
     command.source === undefined &&
     command.preset === undefined &&
     command.transitionInMs === undefined &&
-    command.transitionOutMs === undefined
+    command.transitionOutMs === undefined &&
+    command.style === undefined &&
+    command.loupe === undefined
   const hasManualEdit =
     !onlyUnlock &&
     (command.startMs !== undefined ||
@@ -3896,7 +4199,8 @@ function applyUpdateZoomSegment(
       command.scale !== undefined ||
       command.easing !== undefined ||
       command.transitionInMs !== undefined ||
-      command.transitionOutMs !== undefined)
+      command.transitionOutMs !== undefined ||
+      command.style !== undefined)
   const next: ManualZoomSegment = {
     ...current,
     startMs,
@@ -3918,6 +4222,16 @@ function applyUpdateZoomSegment(
     followSmoothingAlpha: command.followSmoothingAlpha ?? current.followSmoothingAlpha,
     followSpeed: command.followSpeed ?? current.followSpeed,
     label: command.label ?? current.label,
+    style: command.style ?? current.style,
+    loupe:
+      command.loupe === undefined
+        ? current.loupe
+        : resolveLoupeSettings({ ...current.loupe, ...command.loupe }),
+  }
+  // A flat (1x) lens magnifies nothing: switching a frame zoom into `loupe`
+  // style bumps the lens to 2x. Updates to an existing loupe keep its scale.
+  if (next.style === "loupe" && current.style !== "loupe" && next.scale < 1.05) {
+    next.scale = 2
   }
   const segments = getManualZoomSegments(state).map((segment) =>
     segment.id === command.segmentId ? next : segment,
@@ -4003,6 +4317,168 @@ function applyDeleteZoomSegments(
     value: {
       ...state,
       zoomSegments: getManualZoomSegments(state).filter((segment) => !removed.has(segment.id)),
+      updatedAt: now(),
+    },
+  }
+}
+
+function applyAddCameraLayout(
+  state: TimelineState,
+  command: AddCameraLayoutCommand,
+): CommandResult<TimelineState> {
+  const startMs = Math.max(0, Math.round(command.startMs))
+  const endMs = Math.max(startMs + 1, Math.round(command.endMs))
+  const duration = Math.max(1, endMs - startMs)
+  const defaultTrans = Math.min(450, Math.max(60, Math.round(duration * 0.3)))
+  const segment = cameraLayoutSegmentSchema.parse({
+    id: command.segmentId ?? `camera-layout:${startMs}:${endMs}`,
+    startMs,
+    durationMs: duration,
+    layout: command.layout,
+    pip:
+      command.layout === "pip"
+        ? { ...(command.pip ?? {}) }
+        : command.pip
+          ? { ...command.pip }
+          : undefined,
+    transitionInMs: command.transitionInMs ?? defaultTrans,
+    transitionOutMs: command.transitionOutMs ?? defaultTrans,
+    easing: command.easing ?? "smooth",
+    source: command.source ?? "manual",
+    label: command.label,
+  })
+  const valid = validateCameraLayoutSegments([...getCameraLayoutSegments(state), segment])
+  if (!valid.ok) return valid
+  return { ok: true, value: { ...state, cameraLayouts: valid.value, updatedAt: now() } }
+}
+
+function applyUpdateCameraLayout(
+  state: TimelineState,
+  command: UpdateCameraLayoutCommand,
+): CommandResult<TimelineState> {
+  const current = findCameraLayoutSegment(state, command.segmentId)
+  if (!current) {
+    return {
+      ok: false,
+      error: editorError("camera_layout_not_found", "Camera layout segment not found"),
+    }
+  }
+  const startMs = Math.max(0, command.startMs ?? current.startMs)
+  const endMs = Math.max(startMs + 1, command.endMs ?? current.startMs + current.durationMs)
+  const layout = command.layout ?? current.layout
+  const next: CameraLayoutSegment = {
+    ...current,
+    startMs,
+    durationMs: endMs - startMs,
+    layout,
+    pip:
+      command.pip === undefined
+        ? current.pip
+        : cameraLayoutPipSchema.parse({
+            ...(current.pip ?? {}),
+            ...command.pip,
+          }),
+    transitionInMs: command.transitionInMs ?? current.transitionInMs,
+    transitionOutMs: command.transitionOutMs ?? current.transitionOutMs,
+    easing: command.easing ?? current.easing,
+    enabled: command.enabled ?? current.enabled,
+    locked: command.locked ?? current.locked,
+    label: command.label ?? current.label,
+  }
+  const segments = getCameraLayoutSegments(state).map((segment) =>
+    segment.id === command.segmentId ? next : segment,
+  )
+  const valid = validateCameraLayoutSegments(segments)
+  if (!valid.ok) return valid
+  return { ok: true, value: { ...state, cameraLayouts: valid.value, updatedAt: now() } }
+}
+
+function applySplitCameraLayout(
+  state: TimelineState,
+  command: SplitCameraLayoutCommand,
+): CommandResult<TimelineState> {
+  const current = findCameraLayoutSegment(state, command.segmentId)
+  if (!current) {
+    return {
+      ok: false,
+      error: editorError("camera_layout_not_found", "Camera layout segment not found"),
+    }
+  }
+  const leftDuration = command.splitTimeMs - current.startMs
+  const left: CameraLayoutSegment = {
+    ...current,
+    id: command.leftSegmentId ?? `${current.id}:left:${command.splitTimeMs}`,
+    durationMs: leftDuration,
+  }
+  const right: CameraLayoutSegment = {
+    ...current,
+    id: command.rightSegmentId ?? `${current.id}:right:${command.splitTimeMs}`,
+    startMs: command.splitTimeMs,
+    durationMs: current.durationMs - leftDuration,
+  }
+  const segments = getCameraLayoutSegments(state)
+    .filter((segment) => segment.id !== command.segmentId)
+    .concat(left, right)
+  const valid = validateCameraLayoutSegments(segments)
+  if (!valid.ok) return valid
+  return { ok: true, value: { ...state, cameraLayouts: valid.value, updatedAt: now() } }
+}
+
+function applyResizeCameraLayout(
+  state: TimelineState,
+  command: ResizeCameraLayoutCommand,
+): CommandResult<TimelineState> {
+  const current = findCameraLayoutSegment(state, command.segmentId)
+  if (!current) {
+    return {
+      ok: false,
+      error: editorError("camera_layout_not_found", "Camera layout segment not found"),
+    }
+  }
+  const startMs = Math.max(0, command.startMs ?? current.startMs)
+  const endMs = Math.max(startMs + 1, command.endMs ?? current.startMs + current.durationMs)
+  const segments = getCameraLayoutSegments(state).map((segment) =>
+    segment.id === command.segmentId
+      ? { ...current, startMs, durationMs: endMs - startMs }
+      : segment,
+  )
+  const valid = validateCameraLayoutSegments(segments)
+  if (!valid.ok) return valid
+  return { ok: true, value: { ...state, cameraLayouts: valid.value, updatedAt: now() } }
+}
+
+function applyDeleteCameraLayout(
+  state: TimelineState,
+  command: DeleteCameraLayoutCommand,
+): CommandResult<TimelineState> {
+  if (!findCameraLayoutSegment(state, command.segmentId)) {
+    return {
+      ok: false,
+      error: editorError("camera_layout_not_found", "Camera layout segment not found"),
+    }
+  }
+  return {
+    ok: true,
+    value: {
+      ...state,
+      cameraLayouts: getCameraLayoutSegments(state).filter(
+        (segment) => segment.id !== command.segmentId,
+      ),
+      updatedAt: now(),
+    },
+  }
+}
+
+function applyDeleteCameraLayouts(
+  state: TimelineState,
+  command: DeleteCameraLayoutsCommand,
+): CommandResult<TimelineState> {
+  const removed = new Set(command.segmentIds)
+  return {
+    ok: true,
+    value: {
+      ...state,
+      cameraLayouts: getCameraLayoutSegments(state).filter((segment) => !removed.has(segment.id)),
       updatedAt: now(),
     },
   }
@@ -4507,6 +4983,8 @@ export function createAddZoomSegmentCommand(
     followSmoothingAlpha?: number
     followSpeed?: ManualZoomSegment["followSpeed"]
     label?: string
+    style?: ManualZoomSegment["style"]
+    loupe?: Partial<NonNullable<ManualZoomSegment["loupe"]>>
   } = {},
 ): CommandRecord {
   return {
@@ -4527,6 +5005,8 @@ export function createAddZoomSegmentCommand(
     followSmoothingAlpha: options.followSmoothingAlpha,
     followSpeed: options.followSpeed,
     label: options.label,
+    style: options.style,
+    loupe: options.loupe,
   }
 }
 
@@ -4549,6 +5029,8 @@ export function createUpdateZoomSegmentCommand(
     followSmoothingAlpha?: number
     followSpeed?: ManualZoomSegment["followSpeed"]
     label?: string
+    style?: ManualZoomSegment["style"]
+    loupe?: Partial<NonNullable<ManualZoomSegment["loupe"]>>
   },
 ): CommandRecord {
   return {
@@ -4602,6 +5084,106 @@ export function createDeleteZoomSegmentsCommand(segmentIds: string[]): CommandRe
   return {
     kind: "delete-zoom-segments",
     name: "Delete zoom segments",
+    segmentIds: [...segmentIds],
+  }
+}
+
+export function createAddCameraLayoutCommand(
+  startMs: number,
+  endMs: number,
+  layout: CameraLayoutSegment["layout"],
+  options: {
+    segmentId?: string
+    pip?: Partial<NonNullable<CameraLayoutSegment["pip"]>>
+    transitionInMs?: number
+    transitionOutMs?: number
+    easing?: CameraLayoutSegment["easing"]
+    source?: CameraLayoutSegment["source"]
+    label?: string
+  } = {},
+): CommandRecord {
+  return {
+    kind: "add-camera-layout",
+    name: "Add camera layout",
+    segmentId: options.segmentId ?? crypto.randomUUID(),
+    startMs: Math.round(startMs),
+    endMs: Math.max(Math.round(startMs) + 1, Math.round(endMs)),
+    layout,
+    pip: options.pip,
+    transitionInMs: options.transitionInMs,
+    transitionOutMs: options.transitionOutMs,
+    easing: options.easing,
+    source: options.source,
+    label: options.label,
+  }
+}
+
+export function createUpdateCameraLayoutCommand(
+  segmentId: string,
+  update: {
+    startMs?: number
+    endMs?: number
+    layout?: CameraLayoutSegment["layout"]
+    pip?: Partial<NonNullable<CameraLayoutSegment["pip"]>>
+    transitionInMs?: number
+    transitionOutMs?: number
+    easing?: CameraLayoutSegment["easing"]
+    enabled?: boolean
+    locked?: boolean
+    label?: string
+  },
+): CommandRecord {
+  return {
+    kind: "update-camera-layout",
+    name: "Update camera layout",
+    segmentId,
+    ...update,
+    coalesce: true,
+    coalesceKey: `camera-layout:${segmentId}`,
+  }
+}
+
+export function createSplitCameraLayoutCommand(
+  segmentId: string,
+  splitTimeMs: number,
+): CommandRecord {
+  return {
+    kind: "split-camera-layout",
+    name: "Split camera layout",
+    segmentId,
+    splitTimeMs: Math.round(splitTimeMs),
+    leftSegmentId: crypto.randomUUID(),
+    rightSegmentId: crypto.randomUUID(),
+  }
+}
+
+export function createResizeCameraLayoutCommand(
+  segmentId: string,
+  update: { startMs?: number; endMs?: number },
+  options: { coalesceKey?: string } = {},
+): CommandRecord {
+  return {
+    kind: "resize-camera-layout",
+    name: "Resize camera layout",
+    segmentId,
+    ...update,
+    coalesce: true,
+    coalesceKey: options.coalesceKey ?? `camera-layout-resize:${segmentId}`,
+  }
+}
+
+export function createDeleteCameraLayoutCommand(segmentId: string): CommandRecord {
+  return {
+    kind: "delete-camera-layout",
+    name: "Delete camera layout",
+    segmentId,
+  }
+}
+
+export function createDeleteCameraLayoutsCommand(segmentIds: string[]): CommandRecord {
+  return {
+    kind: "delete-camera-layouts",
+    name: "Delete camera layouts",
     segmentIds: [...segmentIds],
   }
 }
@@ -5004,6 +5586,35 @@ export function createUpdateImageClipCommand(
       update.opacity !== undefined ||
       update.overlayAnimation !== undefined,
     coalesceKey: `image:${clipId}`,
+  }
+}
+
+export function createAddVideoClipCommand(clip: VideoClip, trackId?: string): CommandRecord {
+  return {
+    kind: "add-video-clip",
+    name: "Add video",
+    clip,
+    trackId,
+  }
+}
+
+export function createUpdateVideoClipCommand(
+  clipId: string,
+  update: Partial<VideoClip>,
+): CommandRecord {
+  return {
+    kind: "update-video-clip",
+    name: "Update video",
+    clipId,
+    update,
+    coalesce:
+      update.x !== undefined ||
+      update.y !== undefined ||
+      update.width !== undefined ||
+      update.height !== undefined ||
+      update.opacity !== undefined ||
+      update.volume !== undefined,
+    coalesceKey: `video:${clipId}`,
   }
 }
 

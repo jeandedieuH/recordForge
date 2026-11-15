@@ -25,9 +25,12 @@
  * `render-spec_abl-plain_chunked_nvenc-auto.mp4`). Exits 1 on any failed pair, 0
  * when every pair passes. `export-synth-spec.ts` emits the full G4 ablation
  * matrix (plain/padding/radius/shadow/zoom/zoom-border/cursor/items/masks/keys/
- * captions/camera) for both renderers; run the renderer side with
- * `export-bench.ts --require-gpu` so a silently gated plan cannot masquerade as
- * a GPU row.
+ * captions/camera/b-roll) plus the gap-fill plan for both renderers; run the
+ * renderer side with `export-bench.ts --require-gpu` so a silently gated plan
+ * cannot masquerade as a GPU row. Stems containing `approx-` (camera layouts,
+ * animated video layers) are rendered by both paths but reported as SKIP: ADR 020
+ * lets the compatibility renderer draw a cheaper version, and the benchmark
+ * measures their wall time instead.
  *
  * ffmpeg/ffprobe resolve like export-synth-spec.ts: repo sidecars first,
  * RF_FFMPEG/RF_FFPROBE override.
@@ -359,6 +362,13 @@ const rows: string[] = [
 let failed = false
 
 for (const pair of pairs) {
+  // Approximation rows (`approx-` in the stem) are rendered on both paths but
+  // are not held to the parity profile: ADR 020 lets the compatibility renderer
+  // draw a cheaper version, and the benchmark measures their wall time instead.
+  if (pair.name.includes("approx-")) {
+    rows.push(`| ${pair.name} | - | - | - | - | - | SKIP: approximation (ADR 020) |`)
+    continue
+  }
   if (pair.missing) {
     if (args.skipMissing) {
       rows.push(`| ${pair.name} | - | - | - | - | - | SKIP: not rendered |`)

@@ -25,6 +25,8 @@ pub const PRO_FEATURE_KEYS: &[&str] = &[
     "keystroke-overlay",
     "youtube-publish",
     "cloud-storage",
+    "motion-blur",
+    "glass-loupe",
 ];
 
 const HIGH_RES_EXPORT: &str = "high-res-export";
@@ -34,6 +36,8 @@ const CHAPTERS: &str = "chapters";
 const PREMIUM_TITLES: &str = "premium-titles";
 const ANNOTATIONS: &str = "annotations";
 const KEYSTROKE_OVERLAY: &str = "keystroke-overlay";
+const MOTION_BLUR: &str = "motion-blur";
+const GLASS_LOUPE: &str = "glass-loupe";
 
 /// Free canvases must measure 16:9 on their actual pixel dimensions,
 /// allowing ±0.5% for rounding on odd source sizes.
@@ -106,6 +110,25 @@ pub fn required_pro_features(plan: &RenderPlan, settings: &ExportSettings) -> Ve
         .is_some_and(|overlay| overlay.enabled)
     {
         push(KEYSTROKE_OVERLAY);
+    }
+
+    // M2 effects (ADR 020): cinematic motion blur and Glass Loupe are Pro; the
+    // source-resolution detail plane and its sharpening are Free.
+    if plan
+        .canvas
+        .as_ref()
+        .and_then(|canvas| canvas.motion_blur.as_ref())
+        .is_some_and(|blur| blur.is_active())
+    {
+        push(MOTION_BLUR);
+    }
+
+    if plan
+        .zoom_segments
+        .iter()
+        .any(|segment| segment.enabled && segment.style.as_deref() == Some("loupe"))
+    {
+        push(GLASS_LOUPE);
     }
 
     features
@@ -226,6 +249,8 @@ mod tests {
     fn plan_with_canvas(width: u32, height: u32) -> RenderPlan {
         RenderPlan {
             project_id: "p".to_string(),
+            camera_layouts: Vec::new(),
+            layer_order: Vec::new(),
             duration_ms: 1000,
             segments: vec![segment()],
             gaps: vec![],

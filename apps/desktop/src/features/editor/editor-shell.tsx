@@ -92,8 +92,19 @@ export function EditorShell({ recordingId, onClose, onOpenExport }: EditorShellP
     activeJob?.outputs?.thumbnailManifestPath ?? null,
     recording?.workDir,
   )
+  // Imported video assets carry their own sprite manifest from the derivative
+  // job; it backfills the filmstrip for media-track clips (#13).
+  const assetThumbnails = useMemo(
+    () =>
+      (project?.assets ?? []).flatMap((asset) => {
+        const path = asset.kind === "video" ? asset.derivatives?.thumbnailManifest : undefined
+        return path ? [{ assetId: asset.id, path }] : []
+      }),
+    [project?.assets],
+  )
   const videoThumbnailResources = useVideoTrackThumbnailResources(
     activeJob?.outputs?.videoTracks ?? [],
+    assetThumbnails,
     recording?.workDir,
   )
   // Imported audio assets keep their peak JSON under `derivatives.waveform`;

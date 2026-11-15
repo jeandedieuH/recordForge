@@ -1,10 +1,13 @@
 import { Fragment, useState } from "react"
 import {
+  AudioLines,
   ChevronsLeft,
   ChevronsRight,
   Compass,
+  Film,
   Flag,
   Keyboard,
+  Layers,
   Magnet,
   Maximize2,
   MousePointer2,
@@ -94,6 +97,8 @@ export interface TimelineToolbarProps {
   onAddMarker: () => void
   onAddMask: (mode: MaskClip["mode"]) => void
   onAddZoom?: (options?: { preset?: ZoomPreset; scale?: number }) => void
+  /** Adds a custom media or audio track (#14). */
+  onAddTrack?: (kind: "media" | "audio") => void
   onSplitAtPlayhead: () => void
   onRippleDeleteSelected: () => void
 }
@@ -125,6 +130,7 @@ export function TimelineToolbar({
   onAddMarker,
   onAddMask,
   onAddZoom,
+  onAddTrack,
   onSplitAtPlayhead,
   onRippleDeleteSelected,
 }: TimelineToolbarProps) {
@@ -401,6 +407,52 @@ export function TimelineToolbar({
             })}
           </DropdownMenuContent>
         </DropdownMenu>
+
+        {/* Add track (#14): media tracks hold b-roll/images/audio beds, audio
+            tracks hold music and voice-over. */}
+        {onAddTrack ? (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 gap-1.5 px-2 text-xs text-muted-foreground hover:bg-primary/10 hover:text-primary transition-all duration-fast"
+                aria-label="Add track"
+              >
+                <Layers className="size-3.5 text-primary" />
+                <span className="hidden md:inline font-medium">Track</span>
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" className="w-60 bg-surface border-border shadow-e2">
+              <DropdownMenuLabel className="text-xs font-semibold">Add track</DropdownMenuLabel>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                className="cursor-pointer py-1.5"
+                onClick={() => onAddTrack("media")}
+              >
+                <Film className="size-3.5 mr-2 shrink-0 text-primary" />
+                <div className="flex flex-col gap-0.5">
+                  <span className="text-xs font-medium">Media track</span>
+                  <span className="text-[10px] text-muted-foreground">
+                    B-roll video, images and extra audio
+                  </span>
+                </div>
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                className="cursor-pointer py-1.5"
+                onClick={() => onAddTrack("audio")}
+              >
+                <AudioLines className="size-3.5 mr-2 shrink-0 text-primary" />
+                <div className="flex flex-col gap-0.5">
+                  <span className="text-xs font-medium">Audio track</span>
+                  <span className="text-[10px] text-muted-foreground">
+                    Music, voice-over or a second take
+                  </span>
+                </div>
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        ) : null}
 
         {canRippleDelete ? (
           <IconButton

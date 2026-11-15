@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState } from "react"
-import type { ManualZoomSegment, ZoomTarget } from "@recordforge/contracts"
+import type { LoupeSettings, ManualZoomSegment, ZoomTarget } from "@recordforge/contracts"
 import {
   canonicalizeZoomTarget,
   clampZoomTarget,
@@ -7,6 +7,20 @@ import {
 } from "@recordforge/cursor-core"
 import { Badge, Button, IconButton, ToggleGroup, ToggleGroupItem, cn } from "@recordforge/ui"
 import { Crosshair, Lock, MousePointer, Move, Unlock, ZoomIn } from "lucide-react"
+import {
+  loupeOffsetAfterDrag,
+  loupeSizeAfterResize,
+  loupeSurfaceScale,
+  resolveLoupeSettings,
+} from "@recordforge/editor-core"
+
+/**
+ * Segment patch shape: `loupe` is a partial so a drag can patch one lens field
+ * without restating the whole settings object.
+ */
+type SegmentUpdate = Partial<Omit<ManualZoomSegment, "loupe">> & {
+  loupe?: Partial<LoupeSettings>
+}
 
 export interface ZoomCanvasOverlayProps {
   segment: ManualZoomSegment | null
@@ -27,7 +41,7 @@ export interface ZoomCanvasOverlayProps {
     options?: { phase?: "draft" | "commit" | "cancel" },
   ) => void
   onUpdateSegment?: (
-    update: Partial<ManualZoomSegment>,
+    update: SegmentUpdate,
     options?: { phase?: "draft" | "commit" | "cancel" },
   ) => void
 }
@@ -200,6 +214,25 @@ export function ZoomCanvasOverlay({
   )
 
   if (!segment || !segment.enabled) return null
+
+  // A Glass Loupe edits a lens, not a frame crop: the frame stays put, so the
+  // frame-target chrome (dim, crop handles, HUD) would be lying. Drag the lens
+  // itself instead.
+  if (segment.style === "loupe") {
+    return (
+      <LensHandle
+        segment={segment}
+        canvasWidth={canvasWidth}
+        canvasHeight={canvasHeight}
+        containerWidth={containerWidth}
+        containerHeight={containerHeight}
+        offsetX={offsetX}
+        offsetY={offsetY}
+        cursorPoint={cursorPointAtPlayhead}
+        onUpdate={onUpdateSegment}
+      />
+    )
+  }
 
   // Convert the canonical target to screen coordinates so the edit affordance
   // describes the same crop that preview and export actually render.
@@ -511,6 +544,179 @@ export function ZoomCanvasOverlay({
             </IconButton>
           </div>
         </div>
+      </div>
+    </div>
+  )
+}
+
+interface LensHandleProps {
+  segment: ManualZoomSegment
+  canvasWidth: number
+  canvasHeight: number
+  containerWidth: number
+  containerHeight: number
+  offsetX: number
+  offsetY: number
+  /** Cursor tip in canvas coords — the lens rides it, exactly like the pose. */
+  cursorPoint?: { x: number; y: number } | null
+  onUpdate?: ZoomCanvasOverlayProps["onUpdateSegment"]
+}
+
+interface LensGesture {
+  pointerId: number
+  mode: "move" | "resize"
+  startX: number
+  startY: number
+  /** `loupe.offset` when the drag began; the move gesture accumulates on it. */
+  offsetX: number
+  offsetY: number
+  sizePx: number
+  moved: boolean
+  last: SegmentUpdate
+}
+
+/**
+ * Direct manipulation for a Glass Loupe: the lens always rides the cursor, so
+ * dragging the lens writes a nudge onto `loupe.offset` (the pose's centre is
+ * cursor point plus offset) and dragging its corner handle resizes it
+ * (`loupe.size`). The focal point stays on the cursor; only the lens moves.
+ */
+function LensHandle({
+  segment,
+  canvasWidth,
+  canvasHeight,
+  containerWidth,
+  containerHeight,
+  offsetX,
+  offsetY,
+  cursorPoint,
+  onUpdate,
+}: LensHandleProps) {
+  const gestureRef = useRef<LensGesture | null>(null)
+  const settings = resolveLoupeSettings(segment.loupe)
+  const shortEdge = Math.max(1, Math.min(canvasWidth, canvasHeight))
+  const surfaceScale = loupeSurfaceScale(containerWidth, containerHeight, canvasWidth, canvasHeight)
+  const cssPerCanvasX = surfaceScale.x
+  const cssPerCanvasY = surfaceScale.y
+  const diameter = settings.size * shortEdge
+  // Same fallback chain `resolveLoupeAt` applies: cursor point, then
+  // `loupe.center`, then the canonical target's centre.
+  const base = cursorPoint ??
+    settings.center ?? {
+      x: segment.target.x + segment.target.width / 2,
+      y: segment.target.y + segment.target.height / 2,
+    }
+  const centreX = base.x + (settings.offset?.x ?? 0)
+  const centreY = base.y + (settings.offset?.y ?? 0)
+  const sizePx = Math.max(24, diameter * cssPerCanvasX)
+  const left = offsetX + centreX * cssPerCanvasX - sizePx / 2
+  const top = offsetY + centreY * cssPerCanvasY - sizePx / 2
+  const locked = Boolean(segment.locked)
+
+  function begin(event: React.PointerEvent<HTMLElement>, mode: "move" | "resize") {
+    if (locked || !onUpdate || event.button !== 0) return
+    event.stopPropagation()
+    event.preventDefault()
+    event.currentTarget.setPointerCapture(event.pointerId)
+    gestureRef.current = {
+      pointerId: event.pointerId,
+      mode,
+      startX: event.clientX,
+      startY: event.clientY,
+      offsetX: settings.offset?.x ?? 0,
+      offsetY: settings.offset?.y ?? 0,
+      sizePx,
+      moved: false,
+      last: {},
+    }
+  }
+
+  function move(event: React.PointerEvent<HTMLElement>) {
+    const gesture = gestureRef.current
+    if (!gesture || gesture.pointerId !== event.pointerId || !onUpdate) return
+    const dx = event.clientX - gesture.startX
+    const dy = event.clientY - gesture.startY
+    if (!gesture.moved && Math.abs(dx) < 2 && Math.abs(dy) < 2) return
+    gesture.moved = true
+    event.preventDefault()
+    const update: SegmentUpdate =
+      gesture.mode === "move"
+        ? {
+            loupe: {
+              offset: loupeOffsetAfterDrag(
+                { x: gesture.offsetX, y: gesture.offsetY },
+                { x: dx, y: dy },
+                surfaceScale,
+              ),
+            },
+          }
+        : {
+            loupe: {
+              size: loupeSizeAfterResize(gesture.sizePx, dx, surfaceScale.x, shortEdge),
+            },
+          }
+    gesture.last = update
+    onUpdate(update, { phase: "draft" })
+  }
+
+  function finish(event: React.PointerEvent<HTMLElement>) {
+    const gesture = gestureRef.current
+    if (!gesture || gesture.pointerId !== event.pointerId) return
+    gestureRef.current = null
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
+    if (!onUpdate) return
+    if (event.type === "pointercancel" || !gesture.moved) {
+      // Nothing moved: restore the offset/size the lens had before the drag.
+      onUpdate(
+        gesture.mode === "move"
+          ? { loupe: { offset: { x: gesture.offsetX, y: gesture.offsetY } } }
+          : { loupe: { size: loupeSizeAfterResize(gesture.sizePx, 0, surfaceScale.x, shortEdge) } },
+        { phase: "cancel" },
+      )
+      return
+    }
+    onUpdate(gesture.last, { phase: "commit" })
+  }
+
+  return (
+    <div className="pointer-events-none absolute inset-0 z-40">
+      <div
+        role="presentation"
+        aria-label="Glass Loupe lens"
+        className={cn(
+          "absolute rounded-full border-2 border-dashed border-primary/80 bg-primary/5",
+          locked ? "cursor-default" : "cursor-move",
+        )}
+        style={{
+          left: `${left}px`,
+          top: `${top}px`,
+          width: `${sizePx}px`,
+          height: `${sizePx}px`,
+          pointerEvents: locked ? "none" : "auto",
+          touchAction: "none",
+        }}
+        onPointerDown={(event) => begin(event, "move")}
+        onPointerMove={move}
+        onPointerUp={finish}
+        onPointerCancel={finish}
+      >
+        <span className="pointer-events-none absolute left-1/2 top-1 -translate-x-1/2 rounded bg-primary px-1 font-mono text-[9px] font-semibold uppercase tracking-wider text-primary-foreground">
+          loupe
+        </span>
+        {locked ? null : (
+          <span
+            role="presentation"
+            aria-label="Resize Glass Loupe"
+            className="absolute -bottom-1.5 -right-1.5 size-3 cursor-nwse-resize rounded-sm border border-primary bg-primary"
+            style={{ touchAction: "none" }}
+            onPointerDown={(event) => begin(event, "resize")}
+            onPointerMove={move}
+            onPointerUp={finish}
+            onPointerCancel={finish}
+          />
+        )}
       </div>
     </div>
   )

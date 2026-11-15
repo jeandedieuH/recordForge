@@ -518,6 +518,10 @@ pub fn whisper_threads() -> u32 {
 /// per-token `offsets` (ms) and confidence `p`; `-pp` prints
 /// `progress = NN%` on stderr; `-sns` suppresses non-speech tokens; `--vad`
 /// (+`-vm`) runs Silero VAD first so silence is skipped, not transcribed.
+///
+/// `prompt` is the initial-prompt text. Smart Cut's verbatim mode passes a
+/// per-language instruction to keep disfluencies ("um", "uh") in the
+/// transcript instead of polishing them away; `None` transcribes as before.
 pub fn transcribe_args(
     model: &Path,
     wav_path: &Path,
@@ -525,6 +529,7 @@ pub fn transcribe_args(
     language: &str,
     threads: u32,
     vad_model: Option<&Path>,
+    prompt: Option<&str>,
 ) -> Vec<std::ffi::OsString> {
     let mut args: Vec<std::ffi::OsString> = vec![
         "-m".into(),
@@ -546,7 +551,23 @@ pub fn transcribe_args(
         args.push("-vm".into());
         args.push(vad.as_os_str().into());
     }
+    if let Some(prompt) = prompt.filter(|prompt| !prompt.trim().is_empty()) {
+        args.push("--prompt".into());
+        args.push(prompt.into());
+    }
     args
+}
+
+/// Initial prompt for Smart Cut's verbatim mode (filler-word detection needs
+/// the disfluencies Whisper otherwise drops). Keyed by the transcription
+/// language; unknown languages fall back to English.
+pub fn verbatim_prompt(language: &str) -> &'static str {
+    match language {
+        "fr" => "Transcription mot à mot, en conservant les hésitations (euh, ben, bah).",
+        "es" => "Transcripción literal, conservando las muletillas (eh, este, pues).",
+        "de" => "Wörtliche Transkription, Füllwörter (äh, ähm, halt) beibehalten.",
+        _ => "Verbatim transcription, keeping filler words such as um, uh and erm.",
+    }
 }
 
 /// Parse a `-pp` stderr line like
@@ -672,12 +693,14 @@ fn for_each_pipe_line(reader: impl std::io::Read, mut on_line: impl FnMut(&str))
 /// it carries the transcript text — so it is redirected to null. The child is
 /// registered on `job` so `cancel_transcription` can kill it; the wait loop
 /// polls `try_wait` so the cancel path is never blocked on a held lock.
+#[allow(clippy::too_many_arguments)]
 pub fn run_whisper_transcribe(
     app_data_dir: &Path,
     model_id: &str,
     wav_path: &Path,
     out_base: &Path,
     language: &str,
+    prompt: Option<&str>,
     job: &std::sync::Arc<crate::transcript::TranscriptionJob>,
     on_progress: impl Fn(u8) + Send + 'static,
 ) -> Result<WhisperTranscribeOutput> {
@@ -706,6 +729,7 @@ pub fn run_whisper_transcribe(
         language,
         whisper_threads(),
         vad.as_deref(),
+        prompt,
     );
 
     let mut child = crate::process::create_command(&binary)
@@ -880,6 +904,7 @@ mod tests {
             "auto",
             4,
             None,
+            None,
         ));
         assert_eq!(
             args,
@@ -910,11 +935,31 @@ mod tests {
             "de",
             8,
             Some(Path::new("models/ggml-silero-v5.1.2.bin")),
+            None,
         ));
         assert!(args.contains(&"-l".to_string()));
         assert_eq!(args[args.iter().position(|a| a == "-l").unwrap() + 1], "de");
         let tail: Vec<&str> = args[args.len() - 3..].iter().map(String::as_str).collect();
         assert_eq!(tail, ["--vad", "-vm", "models/ggml-silero-v5.1.2.bin"]);
+    }
+
+    #[test]
+    fn verbatim_mode_passes_an_initial_prompt() {
+        let args = args_to_strings(&transcribe_args(
+            Path::new("models/ggml-base.bin"),
+            Path::new("work/audio.wav"),
+            Path::new("work/out"),
+            "en",
+            4,
+            None,
+            Some(verbatim_prompt("en")),
+        ));
+        let position = args.iter().position(|arg| arg == "--prompt").unwrap();
+        assert_eq!(args[position + 1], verbatim_prompt("en"));
+        // Per-language prompts keep the disfluencies Whisper would polish away.
+        assert!(verbatim_prompt("fr").contains("euh"));
+        assert!(verbatim_prompt("de").contains("äh"));
+        assert!(verbatim_prompt("unknown").contains("um"));
     }
 
     #[test]

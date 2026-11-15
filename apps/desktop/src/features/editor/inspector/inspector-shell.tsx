@@ -1,11 +1,13 @@
 import { useMemo, type ReactNode } from "react"
 import type {
   AnnotationClip,
+  CameraLayoutSegment,
   CursorEffectClip,
   ImageClip,
   MediaMetadata,
   TextClip,
   TimelineState,
+  VideoClip,
 } from "@recordforge/contracts"
 import {
   findClip,
@@ -14,6 +16,7 @@ import {
   createUpdateAnnotationClipCommand,
   createUpdateTextClipCommand,
   createUpdateImageClipCommand,
+  createUpdateVideoClipCommand,
 } from "@recordforge/editor-core"
 import { Monitor } from "lucide-react"
 import { Button } from "@recordforge/ui"
@@ -22,6 +25,7 @@ import { useTimelineStore } from "../../../stores/timeline-store"
 import { CanvasInspector } from "./canvas-inspector"
 import { MarkerInspector } from "./marker-inspector"
 import { ZoomSegmentInspector } from "./zoom-segment-inspector"
+import { CameraLayoutInspector } from "./camera-layout-inspector"
 import { CursorRangeInspector } from "./cursor-range-inspector"
 import { MultiSelectionInspector } from "./multi-selection-inspector"
 import { CameraClipInspector } from "./camera-clip-inspector"
@@ -31,6 +35,7 @@ import { MaskClipInspector } from "./mask-clip-inspector"
 import { AnnotationClipInspector } from "./annotation-clip-inspector"
 import { TextClipInspector } from "./text-clip-inspector"
 import { ImageClipInspector } from "./image-clip-inspector"
+import { VideoClipInspector } from "./video-clip-inspector"
 import { ClipPropertiesInspector } from "./clip-properties-inspector"
 
 interface InspectorShellProps {
@@ -64,6 +69,13 @@ export function InspectorShell({ metadata }: InspectorShellProps) {
     )
   }, [timeline, selection])
 
+  const selectedCameraLayout = useMemo(() => {
+    if (!timeline || selection?.kind !== "camera-layout") return null
+    return (
+      (timeline.cameraLayouts ?? []).find((segment) => segment.id === selection.segmentId) ?? null
+    )
+  }, [timeline, selection])
+
   function onClear() {
     setSelection(null)
   }
@@ -77,6 +89,7 @@ export function InspectorShell({ metadata }: InspectorShellProps) {
     selectedClipIds,
     selectedMarker,
     selectedZoom,
+    selectedCameraLayout,
     metadata,
     onClear,
     timeline?.canvas,
@@ -110,6 +123,7 @@ function buildContent(
   selectedClipIds: string[],
   selectedMarker: ReturnType<typeof findMarker> | null,
   selectedZoom: ReturnType<typeof getManualZoomSegments>[number] | null,
+  selectedCameraLayout: CameraLayoutSegment | null,
   metadata: MediaMetadata | null,
   onClear: () => void,
   canvas?: TimelineState["canvas"],
@@ -127,6 +141,14 @@ function buildContent(
       title: "Zoom segment",
       canClear: true,
       content: <ZoomSegmentInspector segment={selectedZoom} onClear={onClear} />,
+    }
+  }
+
+  if (selectedCameraLayout) {
+    return {
+      title: "Camera layout",
+      canClear: true,
+      content: <CameraLayoutInspector segment={selectedCameraLayout} onClear={onClear} />,
     }
   }
 
@@ -253,6 +275,22 @@ function buildContent(
             onChange={(update) => {
               const state = useTimelineStore.getState()
               state.execute(createUpdateImageClipCommand(clip.id, update))
+            }}
+          />
+        ),
+      }
+    }
+
+    if (clip.kind === "video") {
+      return {
+        title: "Video clip",
+        canClear: true,
+        content: (
+          <VideoClipInspector
+            clip={clip as VideoClip}
+            onChange={(update) => {
+              const state = useTimelineStore.getState()
+              state.execute(createUpdateVideoClipCommand(clip.id, update))
             }}
           />
         ),

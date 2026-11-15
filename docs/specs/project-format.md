@@ -123,7 +123,7 @@ sessions/{session_id}/
     "safeEdgePadding": 32,
     "targetScale": 1.5,
     "includeClicks": true,
-    "includeDwells": true
+    "includeDwells": true,
   },
   "exportSettings": {
     "preset": "default-mp4",
@@ -145,61 +145,75 @@ sessions/{session_id}/
 
 `canvas.borderWidth` draws a rim **inside** the screen rect, so it frames the recording instead of covering it. The other border fields are optional and only read when `borderWidth > 0`.
 
-| Field            | Type           | Default     | Description                                                                                       |
-| ---------------- | -------------- | ----------- | ------------------------------------------------------------------------------------------------- |
-| `borderWidth`    | number 0–200   | `0`         | Rim thickness in canvas px                                                                        |
-| `borderColor`    | string         | `#ffffff`   | Solid colour, and the tint for `glass`                                                            |
-| `borderOpacity`  | number 0–1     | `1`         | Multiplies the rim alpha                                                                          |
-| `borderStyle`    | enum           | `solid`     | `solid`, `gradient`, `double` (two strokes with a gap), or `glass` (tinted rim + inner highlight) |
-| `borderGradient` | object         | —           | `{ from, to, angle }` for `gradient`; `angle` is degrees clockwise from the top (default `135`)    |
+| Field            | Type         | Default   | Description                                                                                       |
+| ---------------- | ------------ | --------- | ------------------------------------------------------------------------------------------------- |
+| `borderWidth`    | number 0–200 | `0`       | Rim thickness in canvas px                                                                        |
+| `borderColor`    | string       | `#ffffff` | Solid colour, and the tint for `glass`                                                            |
+| `borderOpacity`  | number 0–1   | `1`       | Multiplies the rim alpha                                                                          |
+| `borderStyle`    | enum         | `solid`   | `solid`, `gradient`, `double` (two strokes with a gap), or `glass` (tinted rim + inner highlight) |
+| `borderGradient` | object       | —         | `{ from, to, angle }` for `gradient`; `angle` is degrees clockwise from the top (default `135`)   |
 
 Camera bubbles carry the same treatment per clip: `transform.borderStyle` and `transform.borderGradient` sit next to the existing `borderWidth`/`borderColor`/`borderOpacity`. Both renderers rasterize the same ring — a tiny-skia plate on the compatibility path, an analytic SDF ring in the GPU composite pass — so the preview, the GPU export and the FFmpeg export agree. The exception is a side-by-side camera layout that moves the screen rect mid-timeline: the compatibility renderer cannot follow it with a static plate, drops the canvas border, and reports a `canvas-border` downgrade on the job (ADR 020).
 
+### 2.2.2 Camera layout lane (view-only track)
+
+The camera layout lane (#5) is an effect lane like `zoomSegments`: the segments
+themselves live in the project's `cameraLayouts` array, and the lane row needs an
+anchor in `tracks` so it can be virtualized, renamed, reordered and locked like
+every other lane.
+
+That anchor is a `kind: "camera-layouts"` track with **no clips**, and it is
+created on load and **stripped on save** (`timelineToProject`). Keeping it out of
+the file means an older build that does not know the kind can still open the
+project; the lane simply reappears (empty-safe) the next time a current build
+opens it. Deleting the anchor is rejected by the command engine.
+
 ### 2.3 Checksum
+
 The `checksum` field holds `sha256:<hex>` where the hex value is the SHA-256 digest of the canonical JSON of the project object with the `checksum` field removed. Rust recomputes it on every atomic save and validates it on every load, falling back to `project.json.bak` when the primary file is corrupt.
 
-**Forward compatibility.** New optional fields (for example `exportSettings.resolution`, `frameRate` and `proresProfile`) are unknown to older app builds, and those builds strip unknown keys when they save a project. Editing the same project in an older version can therefore drop a newer field; the release notes call this out whenever a field ships, and defaults keep the older behaviour until the field is edited again.
+**Forward compatibility.** New optional fields (for example `exportSettings.resolution`, `frameRate` and `proresProfile`) are unknown to older app builds, and those builds strip unknown keys when they save a project. Editing the same project in an older version can therefore drop a newer field; the release notes call this out whenever a field ships, and defaults keep the older behaviour until the field is edited again. New **enum values** are not stripped the same way — a `media` track or a `video` clip written by M3+ is rejected outright by an older reader — so those only ship in a release whose notes call out the minimum app version. The camera layout lane avoids the issue entirely by never being persisted (§2.2.2).
 
 ---
 
 ### 2.4 Asset fields
 
-| Field              | Type      | Required | Description                                                                    |
-| ------------------ | --------- | -------- | ------------------------------------------------------------------------------ |
-| `id`               | string    | yes      | Durable id that clips use as `assetId`                                         |
-| `role`             | string    | yes      | Timeline purpose such as `music`, `graphic`, or `b_roll`                      |
-| `kind`             | string    | no       | Source kind: `audio`, `image`, `video`, `cursor`, or `caption`                |
-| `path`             | string    | yes      | Project-relative copied path, or canonical absolute path for a reference     |
-| `status`           | string    | no       | `available` (default), `missing`, or `relinked`                               |
-| `contentHash`      | string    | no       | SHA-256 source hash used for project-local deduplication                      |
-| `importStrategy`   | string    | no       | `copy` (default) or `reference`                                               |
-| `originalPath`     | string    | no       | Source path captured at import/relink time                                    |
-| `svgSafe`          | boolean   | no       | Whether an SVG passed script, event-handler, and external-reference checks   |
-| `derivatives`      | object    | no       | Derivative name to project-relative path map                                  |
-| `durationMs`       | integer   | no       | Cached source duration in milliseconds                                        |
-| `width`            | integer   | no       | Cached media width                                                            |
-| `height`           | integer   | no       | Cached media height                                                           |
-| `fps`              | float     | no       | Cached frame rate                                                             |
-| `hasAudio`         | boolean   | no       | Whether the source has at least one audio stream                              |
-| `streamIndex`      | integer   | no       | Optional FFmpeg stream index used for multi-stream files                     |
+| Field            | Type    | Required | Description                                                                |
+| ---------------- | ------- | -------- | -------------------------------------------------------------------------- |
+| `id`             | string  | yes      | Durable id that clips use as `assetId`                                     |
+| `role`           | string  | yes      | Timeline purpose such as `music`, `graphic`, or `b_roll`                   |
+| `kind`           | string  | no       | Source kind: `audio`, `image`, `video`, `cursor`, or `caption`             |
+| `path`           | string  | yes      | Project-relative copied path, or canonical absolute path for a reference   |
+| `status`         | string  | no       | `available` (default), `missing`, or `relinked`                            |
+| `contentHash`    | string  | no       | SHA-256 source hash used for project-local deduplication                   |
+| `importStrategy` | string  | no       | `copy` (default) or `reference`                                            |
+| `originalPath`   | string  | no       | Source path captured at import/relink time                                 |
+| `svgSafe`        | boolean | no       | Whether an SVG passed script, event-handler, and external-reference checks |
+| `derivatives`    | object  | no       | Derivative name to project-relative path map                               |
+| `durationMs`     | integer | no       | Cached source duration in milliseconds                                     |
+| `width`          | integer | no       | Cached media width                                                         |
+| `height`         | integer | no       | Cached media height                                                        |
+| `fps`            | float   | no       | Cached frame rate                                                          |
+| `hasAudio`       | boolean | no       | Whether the source has at least one audio stream                           |
+| `streamIndex`    | integer | no       | Optional FFmpeg stream index used for multi-stream files                   |
 
 ## 3. Asset Registry
 
 ### 3.1 Asset Roles
 
-| Role            | Description                          | Source                                    |
-| --------------- | ------------------------------------ | ----------------------------------------- |
-| `screen`        | Primary screen/window/region capture | Recording session                         |
-| `microphone`    | Independent mic audio track          | Native WASAPI capture                     |
-| `system_audio`  | Independent system audio track       | Native WASAPI loopback                    |
-| `webcam`        | Webcam sidecar video                 | Separate FFmpeg process                   |
-| `cursor_events` | Cursor position/click metadata       | Editor capture/editor integration         |
-| `music`         | Imported background music            | Project asset importer                    |
-| `audio_track`   | Imported non-music audio             | Project asset importer                    |
-| `graphic`       | Imported image or SVG overlay        | Project asset importer                    |
-| `b_roll`        | Imported video overlay source        | Project asset importer                    |
-| `image`         | Legacy user-imported image           | Manual import                             |
-| `caption`       | Text/subtitle data                   | User-created                              |
+| Role            | Description                          | Source                            |
+| --------------- | ------------------------------------ | --------------------------------- |
+| `screen`        | Primary screen/window/region capture | Recording session                 |
+| `microphone`    | Independent mic audio track          | Native WASAPI capture             |
+| `system_audio`  | Independent system audio track       | Native WASAPI loopback            |
+| `webcam`        | Webcam sidecar video                 | Separate FFmpeg process           |
+| `cursor_events` | Cursor position/click metadata       | Editor capture/editor integration |
+| `music`         | Imported background music            | Project asset importer            |
+| `audio_track`   | Imported non-music audio             | Project asset importer            |
+| `graphic`       | Imported image or SVG overlay        | Project asset importer            |
+| `b_roll`        | Imported video overlay source        | Project asset importer            |
+| `image`         | Legacy user-imported image           | Manual import                     |
+| `caption`       | Text/subtitle data                   | User-created                      |
 
 ### 3.2 Asset Resolution
 
@@ -316,10 +330,10 @@ CREATE INDEX idx_projects_recording ON projects(recording_id);
 
 A RecordForge project uses three coordinate systems for time:
 
-| Coordinate | Description | Source of truth |
-| ---------- | ----------- | --------------- |
-| Source     | A position in an immutable source asset (ms) | Asset file and `clip.sourceInMs` / `clip.sourceOutMs` |
-| Timeline   | A position in the editable project (ms) | `clip.startMs` and `clip.durationMs` on tracks |
+| Coordinate | Description                                          | Source of truth                                                 |
+| ---------- | ---------------------------------------------------- | --------------------------------------------------------------- |
+| Source     | A position in an immutable source asset (ms)         | Asset file and `clip.sourceInMs` / `clip.sourceOutMs`           |
+| Timeline   | A position in the editable project (ms)              | `clip.startMs` and `clip.durationMs` on tracks                  |
 | Output     | A position in the final rendered/previewed file (ms) | Render plan `outputStartMs` / `outputEndMs` or preview playhead |
 
 ### 8.1 Clip time model

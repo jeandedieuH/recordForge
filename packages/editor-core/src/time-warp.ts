@@ -1,9 +1,4 @@
-import type {
-  CaptionClip,
-  ManualZoomSegment,
-  TimelineClip,
-  TimelineState,
-} from "@recordforge/contracts"
+import type { CaptionClip, TimelineClip, TimelineState } from "@recordforge/contracts"
 
 /**
  * Timeline time-warp utility (spec 010 / modern-features F5).
@@ -126,13 +121,13 @@ function warpClip(
   return { ...clip, startMs: Math.max(0, clip.startMs + shift) }
 }
 
-function warpZoomSegment(
-  segment: ManualZoomSegment,
+function warpZoomSegment<T extends { startMs: number; durationMs: number; locked?: boolean }>(
+  segment: T,
   rangeStartMs: number,
   rangeEndMs: number,
   newDurationMs: number,
   ripple: boolean,
-): ManualZoomSegment {
+): T {
   if (segment.locked) return segment
   const startMs = segment.startMs
   const endMs = startMs + segment.durationMs
@@ -142,7 +137,7 @@ function warpZoomSegment(
     ...segment,
     startMs: nextStart,
     durationMs: Math.max(1, Math.round(warped.endMs) - nextStart),
-  }
+  } as T
 }
 
 /**
@@ -180,6 +175,11 @@ export function warpTimeline(
     warpZoomSegment(segment, rangeStartMs, rangeEndMs, newDurationMs, ripple),
   )
 
+  // Camera layout lanes follow the same remap as zoom segments (#5).
+  const cameraLayouts = (state.cameraLayouts ?? []).map((segment) =>
+    warpZoomSegment(segment, rangeStartMs, rangeEndMs, newDurationMs, ripple),
+  )
+
   const markers = state.markers.map((marker) => {
     if (marker.timeMs >= rangeEndMs) {
       return ripple ? { ...marker, timeMs: Math.max(0, marker.timeMs + shift) } : marker
@@ -195,6 +195,7 @@ export function warpTimeline(
     ...state,
     tracks,
     zoomSegments,
+    cameraLayouts,
     markers,
     updatedAt: new Date().toISOString(),
   }

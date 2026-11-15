@@ -1,11 +1,15 @@
 import { describe, expect, it } from "vitest"
-import type { TimelineState } from "@recordforge/contracts"
+import type { Project, TimelineState } from "@recordforge/contracts"
+import { defaultProjectExportSettings } from "@recordforge/contracts"
 import {
   clampOverlayStartMs,
+  ensureCameraLayoutTrack,
   getOverlayContentEndMs,
   getScreenContentEndMs,
   getTimelineContentEndMs,
   getTotalDuration,
+  projectToTimeline,
+  timelineToProject,
 } from "./timeline"
 
 function makeTimeline(): TimelineState {
@@ -96,5 +100,61 @@ describe("timeline duration", () => {
 
   it("leaves endpoints untouched when there is no rendered video", () => {
     expect(clampOverlayStartMs(8_000, 4_000, 0)).toBe(8_000)
+  })
+})
+
+describe("camera layout lane anchor", () => {
+  function withCamera(timeline: TimelineState): TimelineState {
+    return {
+      ...timeline,
+      tracks: [
+        timeline.tracks[0]!,
+        {
+          id: "camera",
+          kind: "camera",
+          name: "Camera",
+          muted: false,
+          locked: false,
+          solo: false,
+          volume: 1,
+          clips: [],
+        },
+        ...timeline.tracks.slice(1),
+      ],
+    }
+  }
+
+  it("inserts the lane right below the camera track and is idempotent", () => {
+    const state = ensureCameraLayoutTrack(withCamera(makeTimeline()))
+    const kinds = state.tracks.map((track) => track.kind)
+    expect(kinds).toEqual(["screen", "camera", "camera-layouts", "titles"])
+    const again = ensureCameraLayoutTrack(state)
+    expect(again).toBe(state)
+  })
+
+  it("is not persisted: saving strips the lane and loading re-adds it", () => {
+    const timeline = ensureCameraLayoutTrack(withCamera(makeTimeline()))
+    const project: Project = {
+      format: "recordforge.project",
+      version: 1,
+      id: timeline.id,
+      name: timeline.name,
+      recordingId: timeline.recordingId,
+      canvas: timeline.canvas,
+      assets: [],
+      tracks: timeline.tracks,
+      markers: timeline.markers,
+      zoomSegments: [],
+      cameraLayouts: [],
+      exportSettings: defaultProjectExportSettings,
+      createdAt: timeline.createdAt,
+      updatedAt: timeline.updatedAt,
+      checksum: "",
+    }
+    const saved = timelineToProject(timeline, project)
+    expect(saved.tracks.some((track) => track.kind === "camera-layouts")).toBe(false)
+
+    const reloaded = projectToTimeline({ ...project, tracks: saved.tracks })
+    expect(reloaded.tracks.some((track) => track.kind === "camera-layouts")).toBe(true)
   })
 })

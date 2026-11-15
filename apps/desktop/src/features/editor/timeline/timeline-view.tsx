@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import { useShallow } from "zustand/react/shallow"
-import { toAssetUrl } from "../../../lib/assets"
+import { importAssets, toAssetUrl } from "../../../lib/assets"
+import { isTauri } from "../../../lib/settings"
 import {
   type AnnotationClip,
   type CursorSmoothing,
@@ -9,6 +10,7 @@ import {
   type MaskClip,
   type MediaJob,
   type MediaVideoTrackOutput,
+  type ProjectAsset,
   type TextClip,
   type TimelineClip,
   type TimelineMarker,
@@ -18,12 +20,16 @@ import {
 import {
   buildSmartZoomSegment,
   createAddAnnotationClipCommand,
+  createAddCameraLayoutCommand,
   createAddExternalAudioClipCommand,
   createAddImageClipCommand,
   createAddMaskClipCommand,
   createAddMarkerCommand,
+  createAddTrackCommand,
+  createAddVideoClipCommand,
   createAddZoomSegmentCommand,
   createDeleteClipCommand,
+  createDeleteCameraLayoutCommand,
   createDeleteClipsCommand,
   createDeleteMarkerCommand,
   createDeleteRangeCommand,
@@ -47,6 +53,7 @@ import {
   createTrimClipCommand,
   createUngroupClipsCommand,
   createUpdateClipAudioCommand,
+  createUpdateCameraLayoutCommand,
   createUpdateCursorRangeCommand,
   createUpdateMarkerCommand,
   createUpdateTrackCommand,
@@ -58,6 +65,7 @@ import {
   getClipGroupId,
   getManualZoomSegments,
   mergeClipIds,
+  nextCameraLayoutKind,
   selectAllClipIds,
   toggleClipSelection,
   sourceToTimelineForTrack,
@@ -91,8 +99,13 @@ import { MaskPreview } from "./mask-preview"
 import { OverlayCanvas } from "../canvas/overlay-canvas"
 import { getAnnotationEditTime, type AnnotationDrawSettings } from "../annotations/annotation-tools"
 import { OverlaySelectionLayer } from "../canvas/overlay-selection-layer"
+import { VideoLayerOverlay, type VideoLayerPreviewItem } from "../canvas/video-layer-overlay"
 import { usePreRenderedBackground } from "../canvas/background-cache"
-import { assetDurationMs, createImageClipForAsset } from "../assets/asset-clip-factory"
+import {
+  assetDurationMs,
+  createImageClipForAsset,
+  createVideoClipForAsset,
+} from "../assets/asset-clip-factory"
 import { TimelineLanes, type CursorRangeAction, type ZoomSegmentAction } from "./timeline-lanes"
 import { TimelineToolbar, type TimelineTool } from "./timeline-toolbar"
 import { formatTimelineTime } from "./timeline-ruler"
@@ -343,6 +356,8 @@ export function TimelineView({
   const recording = useTimelineStore((state) => state.recording)
   const project = useTimelineStore((state) => state.project)
   const assetPaths = useTimelineStore((state) => state.assetPaths)
+  const syncProject = useTimelineStore((state) => state.syncProject)
+  const refreshAssetPaths = useTimelineStore((state) => state.refreshAssetPaths)
   const metadata = useTimelineStore((state) => state.metadata)
   const cursorTelemetry = useTimelineStore((state) => state.cursorTelemetry)
   const cursorEngine = useTimelineStore((state) => state.cursorEngine)
@@ -524,6 +539,22 @@ export function TimelineView({
         ) ?? [],
     [timeline],
   )
+  /**
+   * B-roll preview layers (#13) in paint order. Earlier tracks sit on top
+   * (`layerOrder`), so the list is built bottom-up for DOM painting.
+   */
+  const videoLayers = useMemo<VideoLayerPreviewItem[]>(() => {
+    const items: VideoLayerPreviewItem[] = []
+    for (const track of [...(timeline?.tracks ?? [])].reverse()) {
+      if (track.muted) continue
+      for (const clip of track.clips) {
+        if (clip.kind !== "video" || clip.enabled === false) continue
+        items.push({ clip, muted: track.muted, volume: clip.volume * track.volume })
+      }
+    }
+    return items
+  }, [timeline])
+  const videoClips = useMemo(() => videoLayers.map((layer) => layer.clip), [videoLayers])
   const overlayRenderPlan = useMemo(
     () => (timeline ? buildOverlayRenderPlan(timeline, project?.assets) : null),
     [project?.assets, timeline],
@@ -534,7 +565,10 @@ export function TimelineView({
         (project?.assets ?? [])
           .filter(
             (asset) =>
-              (asset.kind === "image" || asset.role === "graphic") && asset.status !== "missing",
+              // Images/graphics feed the overlay canvas; video assets feed the
+              // b-roll preview surface (#13).
+              (asset.kind === "image" || asset.kind === "video" || asset.role === "graphic") &&
+              asset.status !== "missing",
           )
           .flatMap((asset) => {
             const rawPath = assetPaths[asset.id] ?? asset.path
@@ -555,8 +589,51 @@ export function TimelineView({
   }, [isPreviewMuted, mediaUrl])
   const retryThumbnail = useCallback(() => {
     setThumbnailSpriteError(false)
+    // Retry every sprite source: the recording sprite plus the per-stream and
+    // per-asset manifests behind camera and b-roll filmstrips.
     thumbnailResource.retry()
-  }, [thumbnailResource])
+    videoThumbnailResources?.retry()
+  }, [thumbnailResource, videoThumbnailResources])
+
+  // One non-blocking retry surface when a clip sprite manifest cannot be read;
+  // the timeline itself keeps working without filmstrips.
+  const spriteRetryShownRef = useRef(false)
+  const videoThumbnailStatus = videoThumbnailResources?.status
+  const assetThumbnailsFailed = videoThumbnailResources?.byAsset
+  useEffect(() => {
+    if (videoThumbnailStatus === "error" && !spriteRetryShownRef.current) {
+      spriteRetryShownRef.current = true
+      // Name the assets that failed so the user knows which clip lost its strip.
+      const failingNames = [...(assetThumbnailsFailed?.entries() ?? [])]
+        .filter(([, resource]) => resource.status === "error")
+        .flatMap(([assetId]) => {
+          const asset = project?.assets.find((candidate) => candidate.id === assetId)
+          if (!asset) return []
+          const name = asset.path.split(/[\\/]/).pop()
+          return [name ?? asset.role]
+        })
+      toast({
+        title: "Clip thumbnails unavailable",
+        description:
+          failingNames.length > 0
+            ? `Could not load the filmstrip for ${failingNames.slice(0, 2).join(", ")}${
+                failingNames.length > 2 ? ` and ${failingNames.length - 2} more` : ""
+              }.`
+            : "A clip filmstrip could not load its sprite image.",
+        variant: "warning",
+        action: {
+          label: "Retry",
+          onClick: () => {
+            spriteRetryShownRef.current = false
+            retryThumbnail()
+          },
+        },
+      })
+    }
+    if (videoThumbnailStatus === "content" || videoThumbnailStatus === "missing") {
+      spriteRetryShownRef.current = false
+    }
+  }, [assetThumbnailsFailed, project?.assets, retryThumbnail, toast, videoThumbnailStatus])
 
   // Whether the playhead sits inside a side-by-side camera clip — tracked in a
   // ref and recomputed via an imperative playhead subscription so playback
@@ -1088,6 +1165,11 @@ export function TimelineView({
         setSelection(null)
         return
       }
+      if (selection.kind === "camera-layout") {
+        execute(createDeleteCameraLayoutCommand(selection.segmentId))
+        setSelection(null)
+        return
+      }
       if (selection.kind !== "clip") return
       if (selection.clipIds.length > 1) {
         execute(
@@ -1572,10 +1654,9 @@ export function TimelineView({
     }
   }
 
-  function addAssetAtTime(assetId: string, timeMs: number) {
-    if (!timeline || !project) return
-    const asset = project.assets.find((candidate) => candidate.id === assetId)
-    if (!asset || asset.status === "missing") return
+  /** Add one project asset (already resolved) to the timeline at `timeMs`. */
+  function addAssetRecordAtTime(asset: ProjectAsset, timeMs: number) {
+    if (!timeline) return
 
     if (asset.kind === "audio") {
       const durationMs = assetDurationMs(asset, 30_000)
@@ -1600,6 +1681,64 @@ export function TimelineView({
       if (execute(createAddImageClipCommand(clip, graphicsTrack?.id))) {
         setSelection({ kind: "clip", clipIds: [clip.id], primaryClipId: clip.id })
       }
+      return
+    }
+
+    if (asset.kind === "video") {
+      // B-roll (#13): dropped video assets become a media-track layer whose
+      // embedded audio mixes automatically.
+      const clip = createVideoClipForAsset(asset, timeMs, timeline.canvas)
+      const mediaTrack = timeline.tracks.find((track) => track.kind === "media")
+      if (execute(createAddVideoClipCommand(clip, mediaTrack?.id))) {
+        setSelection({ kind: "clip", clipIds: [clip.id], primaryClipId: clip.id })
+      }
+    }
+  }
+
+  function addAssetAtTime(assetId: string, timeMs: number) {
+    if (!timeline || !project) return
+    const asset = project.assets.find((candidate) => candidate.id === assetId)
+    if (!asset || asset.status === "missing") return
+    addAssetRecordAtTime(asset, timeMs)
+  }
+
+  /**
+   * Files dropped from the OS land here: import them into the project bin, then
+   * add each one at the drop time. Import is copy-by-default, matching the
+   * Import media dialog.
+   */
+  async function importPathsAtTime(paths: string[], timeMs: number) {
+    if (!recording || !timeline || paths.length === 0) return
+    if (!isTauri()) return
+    try {
+      const result = await importAssets({
+        recordingId: recording.id,
+        paths,
+        strategy: "copy",
+      })
+      syncProject(result.project)
+      await refreshAssetPaths()
+      for (const record of result.imported) {
+        addAssetRecordAtTime(record.asset, Math.round(timeMs))
+      }
+      if (result.imported.length > 0) {
+        toast({
+          title: `${result.imported.length} asset${result.imported.length === 1 ? "" : "s"} added`,
+          description: "Imported and placed at the drop point.",
+        })
+      }
+      if (result.skipped.length > 0) {
+        toast({
+          title: "Some files were skipped",
+          description: result.skipped.map((item) => `${item.sourceName}: ${item.reason}`).join(" "),
+        })
+      }
+    } catch (error) {
+      toast({
+        title: "Import failed",
+        description:
+          error instanceof Error ? error.message : "The dropped files could not be imported.",
+      })
     }
   }
 
@@ -2241,6 +2380,8 @@ export function TimelineView({
                   frameMs={frameMs}
                   canvasWidth={timeline.canvas.width}
                   canvasHeight={timeline.canvas.height}
+                  canvasPadding={timeline.canvas.padding}
+                  cameraLayouts={timeline.cameraLayouts}
                   previewScale={videoBounds?.scale ?? 1}
                   selectedClipId={
                     view.selection?.kind === "clip" ? view.selection.primaryClipId : null
@@ -2251,6 +2392,23 @@ export function TimelineView({
                   onUpdateTransform={(clipId, transform, options) =>
                     interaction.updateClipTransform(clipId, transform, options)
                   }
+                />
+              ) : null}
+
+              {/* B-roll / media-track video (#13). z-30: above the camera
+                  bubble and the screen, below the overlay items plate. */}
+              {videoLayers.length > 0 ? (
+                <VideoLayerOverlay
+                  layers={videoLayers}
+                  isPlaying={view.isPlaying}
+                  playbackRate={view.playbackRate}
+                  canvasWidth={timeline.canvas.width}
+                  canvasHeight={timeline.canvas.height}
+                  assetUrls={overlayAssetUrls}
+                  selectedClipId={
+                    view.selection?.kind === "clip" ? view.selection.primaryClipId : null
+                  }
+                  className="z-30"
                 />
               ) : null}
 
@@ -2300,7 +2458,8 @@ export function TimelineView({
                 />
               ) : null}
 
-              {overlayRenderPlan && (overlayRenderPlan.items.length > 0 || drawMode) ? (
+              {overlayRenderPlan &&
+              (overlayRenderPlan.items.length > 0 || drawMode || videoClips.length > 0) ? (
                 <>
                   <OverlayCanvas
                     renderPlan={overlayRenderPlan}
@@ -2338,7 +2497,7 @@ export function TimelineView({
                     className="z-35"
                   />
                   <OverlaySelectionLayer
-                    clips={[...annotationClips, ...textClips, ...imageClips]}
+                    clips={[...annotationClips, ...textClips, ...imageClips, ...videoClips]}
                     canvasWidth={timeline.canvas.width}
                     canvasHeight={timeline.canvas.height}
                     selectedClipId={
@@ -2431,6 +2590,12 @@ export function TimelineView({
           onZoomToFit={zoomToFit}
           onAddMarker={addMarker}
           onAddMask={addMask}
+          onAddTrack={(kind) => {
+            const name = kind === "media" ? "Media" : "Audio"
+            if (execute(createAddTrackCommand(kind, name))) {
+              toast({ title: `${name} track added` })
+            }
+          }}
           onAddZoom={handleAddZoom}
           onSplitAtPlayhead={splitSelected}
           onRippleDeleteSelected={() => deleteSelected(true)}
@@ -2468,12 +2633,54 @@ export function TimelineView({
           onAddZoomAtTime={handleAddZoom}
           onMoveZoomSegment={interaction.moveZoomSegment}
           onResizeZoomSegment={interaction.resizeZoomSegment}
+          onAddCameraLayoutAt={(timeMs) => {
+            const segments = [...(timeline.cameraLayouts ?? [])].sort(
+              (left, right) => left.startMs - right.startMs,
+            )
+            const startMs = Math.max(0, Math.round(timeMs))
+            const nextStart = segments.find((segment) => segment.startMs >= startMs)?.startMs
+            const endMs = Math.min(startMs + 4_000, nextStart ?? Number.POSITIVE_INFINITY)
+            if (endMs - startMs < 500) {
+              toast({
+                title: "No room for a camera layout",
+                description: "Move the playhead or shorten the next layout segment.",
+              })
+              return
+            }
+            execute(
+              createAddCameraLayoutCommand(startMs, endMs, "pip", {
+                pip: { corner: "br", sizeFraction: 0.24, shape: "rounded" },
+              }),
+            )
+          }}
+          onMoveCameraLayout={(segment, startMs, endMs) =>
+            execute(createUpdateCameraLayoutCommand(segment.id, { startMs, endMs }))
+          }
+          onResizeCameraLayout={(segment, startMs, endMs) =>
+            execute(createUpdateCameraLayoutCommand(segment.id, { startMs, endMs }))
+          }
+          onCycleCameraLayout={(segment) => {
+            const layout = nextCameraLayoutKind(segment.layout)
+            execute(
+              createUpdateCameraLayoutCommand(segment.id, {
+                layout,
+                ...(layout === "pip" && !segment.pip
+                  ? {
+                      pip: { corner: "br" as const, sizeFraction: 0.24, shape: "rounded" as const },
+                    }
+                  : {}),
+              }),
+            )
+          }}
+          onDeleteCameraLayout={(segment) => execute(createDeleteCameraLayoutCommand(segment.id))}
+          onSelectCameraLayout={(segmentId) => setSelection({ kind: "camera-layout", segmentId })}
           onDeleteSelection={deleteSelected}
           onDuplicateClip={duplicateClip}
           onSplitClip={splitClip}
           onDeleteClip={deleteClip}
           onSetClipSpeed={setClipSpeed}
           onAddAssetAtTime={addAssetAtTime}
+          onImportFilesAtTime={(paths, timeMs) => void importPathsAtTime(paths, timeMs)}
           onCursorRangeAction={onCursorRangeAction}
           onZoomSegmentAction={onZoomSegmentAction}
           onSplitAllAtTime={handleSplitAllAtTime}

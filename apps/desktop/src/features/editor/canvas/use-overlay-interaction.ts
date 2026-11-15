@@ -634,7 +634,13 @@ function getOverlayClip(clipId: string): OverlayClip | null {
   const timeline = useTimelineStore.getState().engine?.history.present
   if (!timeline) return null
   const found = timeline.tracks.flatMap((track) => track.clips).find((clip) => clip.id === clipId)
-  if (!found || (found.kind !== "annotation" && found.kind !== "text" && found.kind !== "image")) {
+  if (
+    !found ||
+    (found.kind !== "annotation" &&
+      found.kind !== "text" &&
+      found.kind !== "image" &&
+      found.kind !== "video")
+  ) {
     return null
   }
   return found

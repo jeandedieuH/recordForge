@@ -162,9 +162,18 @@ export const TimelineLaneRow = memo(function TimelineLaneRow({
   }, [laneTheme.labelMode, runLayout, visibleStartMs, visibleEndMs])
 
   // Camera clips resolve their sprite by stream index so each webcam stream
-  // shows its own frames; fall back to the first loaded manifest when the
-  // clip carries no index.
-  function cameraThumbnailFor(clip: TimelineClip) {
+  // shows its own frames; b-roll clips (#13) resolve the imported asset's own
+  // manifest by asset id. Camera clips fall back to the first loaded manifest
+  // when the clip carries no index.
+  function clipThumbnailsFor(clip: TimelineClip) {
+    if (clip.kind === "video") {
+      const resolved = videoThumbnailResources?.byAsset.get(clip.assetId)
+      if (!resolved || resolved.status !== "content") return null
+      return {
+        manifest: resolved.data,
+        spriteUrl: toAssetUrl(resolved.data.spritePath, workDir),
+      }
+    }
     if (!isCameraTrack || !videoThumbnailResources) return null
     const resources = [...videoThumbnailResources.byStream.entries()]
     const streamIndex = clip.kind === "camera" ? clip.streamIndex : undefined
@@ -255,7 +264,8 @@ export const TimelineLaneRow = memo(function TimelineLaneRow({
       {clips.map((clip) => {
         const runInfo = runLayout?.byClip.get(clip.id)
         const sublane = sublaneMap?.get(clip.id)
-        const clipThumbnails = isCameraTrack ? cameraThumbnailFor(clip) : null
+        const clipThumbnails =
+          clip.kind === "camera" || clip.kind === "video" ? clipThumbnailsFor(clip) : null
         const selected = selectedClipIds.has(clip.id)
         return (
           <TimelineClipItem

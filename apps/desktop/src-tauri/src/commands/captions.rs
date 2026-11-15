@@ -83,6 +83,9 @@ pub struct TranscribeRequest {
     pub stream_index: Option<i32>,
     /// Ignore the on-disk transcript cache.
     pub force: bool,
+    /// Verbatim mode: keep disfluencies ("um", "uh") so Smart Cut can remove
+    /// them. Changes the transcript, so it is part of the cache key.
+    pub verbatim: Option<bool>,
 }
 
 /// "auto" or a lowercase ISO-639 code. Never forward unvalidated strings to
@@ -208,6 +211,7 @@ pub async fn transcribe_audio(
         &request.model,
         &request.language,
         stream_index,
+        request.verbatim.unwrap_or(false),
     );
     if !request.force {
         if let Some(mut cached) =
@@ -235,6 +239,12 @@ pub async fn transcribe_audio(
     let model = request.model.clone();
     let job_id = request.job_id.clone();
     let app_for_events = app.clone();
+    // Smart Cut's filler detection needs the disfluencies Whisper otherwise
+    // polishes away; the initial prompt asks for them verbatim.
+    let verbatim_prompt = request
+        .verbatim
+        .unwrap_or(false)
+        .then(|| whisper::verbatim_prompt(&language));
 
     let transcript = tauri::async_runtime::spawn_blocking(move || {
         struct Cleanup(PathBuf);
@@ -270,6 +280,7 @@ pub async fn transcribe_audio(
             &wav_path,
             &out_base,
             &language,
+            verbatim_prompt,
             &job,
             move |percent| {
                 emit_progress(

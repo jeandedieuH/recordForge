@@ -3,6 +3,7 @@ import { useVirtualizer } from "@tanstack/react-virtual"
 import type {
   AudioClip,
   AudioVolumeKeyframe,
+  CameraLayoutSegment,
   CursorSmoothing,
   ManualZoomSegment,
   TimelineClip,
@@ -44,6 +45,8 @@ import { TimelineSnapBadge } from "./timeline-snap-badge"
 import { TimelineTrackHeader } from "./timeline-track-header"
 import type { TimelineTool } from "./timeline-toolbar"
 import { ZoomTrackRow } from "./zoom-track"
+import { CameraLayoutTrackRow } from "./camera-layout-track"
+import { useTauriFileDrop } from "../../../hooks/use-tauri-file-drop"
 import { useEdgeAutoScroll } from "./lanes/use-edge-auto-scroll"
 import { TimelineHoverLine, type TimelineHoverLineHandle } from "./lanes/timeline-hover-line"
 import { TimelineGestureOverlay, type TimelineGestureInfo } from "./lanes/timeline-gesture-overlay"
@@ -141,6 +144,23 @@ export interface TimelineLanesProps {
     endMs: number,
     options?: { phase?: "draft" | "commit" | "cancel" },
   ) => void
+  // Camera layout lane (#5).
+  onAddCameraLayoutAt?: (timeMs: number) => void
+  onMoveCameraLayout?: (
+    segment: CameraLayoutSegment,
+    startMs: number,
+    endMs: number,
+    options?: { phase?: "draft" | "commit" | "cancel" },
+  ) => void
+  onResizeCameraLayout?: (
+    segment: CameraLayoutSegment,
+    startMs: number,
+    endMs: number,
+    options?: { phase?: "draft" | "commit" | "cancel" },
+  ) => void
+  onCycleCameraLayout?: (segment: CameraLayoutSegment) => void
+  onDeleteCameraLayout?: (segment: CameraLayoutSegment) => void
+  onSelectCameraLayout?: (segmentId: string) => void
   onDeleteSelection: (ripple: boolean) => void
   onToggleTrackMuted: (track: TimelineTrack) => void
   onToggleTrackSolo: (track: TimelineTrack) => void
@@ -167,6 +187,8 @@ export interface TimelineLanesProps {
   onDeleteClip: (clip: TimelineClip, ripple?: boolean) => void
   onSetClipSpeed?: (clip: TimelineClip, speed: number) => void
   onAddAssetAtTime?: (assetId: string, timeMs: number) => void
+  /** Import OS-dropped files into the project and add them at the drop time. */
+  onImportFilesAtTime?: (paths: string[], timeMs: number) => void
   onCursorRangeAction?: (action: CursorRangeAction) => void
   onZoomSegmentAction?: (action: ZoomSegmentAction) => void
   showMinimap?: boolean
@@ -242,10 +264,17 @@ export function TimelineLanes({
   onDeleteClip,
   onSetClipSpeed,
   onAddAssetAtTime,
+  onImportFilesAtTime,
   onCursorRangeAction,
   onZoomSegmentAction,
   onMoveZoomSegment,
   onResizeZoomSegment,
+  onAddCameraLayoutAt,
+  onMoveCameraLayout,
+  onResizeCameraLayout,
+  onCycleCameraLayout,
+  onDeleteCameraLayout,
+  onSelectCameraLayout,
   onRippleDeleteRange,
   onSplitAllAtTime,
   onSplitAllAtPlayhead,
@@ -283,6 +312,8 @@ export function TimelineLanes({
   const selectedClipIds = new Set(view.selection?.kind === "clip" ? view.selection.clipIds : [])
   const selectedMarkerId = view.selection?.kind === "marker" ? view.selection.markerId : null
   const selectedZoomId = view.selection?.kind === "zoom" ? view.selection.segmentId : null
+  const selectedCameraLayoutId =
+    view.selection?.kind === "camera-layout" ? view.selection.segmentId : null
 
   const selectionCanGroup = selectedClipIds.size >= 2
   const selectionHasGroup = useMemo(() => {
@@ -325,6 +356,23 @@ export function TimelineLanes({
   }, [basePixelsPerMs, view.zoom])
 
   const pixelsPerMs = propPixelsPerMs ?? computedPixelsPerMs
+
+  // Native OS drops arrive as filesystem paths; scope them to the lanes rect and
+  // place each file at the drop time.
+  const pixelsPerMsRef = useRef(pixelsPerMs)
+  pixelsPerMsRef.current = pixelsPerMs
+  const importAtTimeRef = useRef(onImportFilesAtTime)
+  importAtTimeRef.current = onImportFilesAtTime
+  const lanesDropActive = useTauriFileDrop(scrollRef, (paths, position) => {
+    const handler = importAtTimeRef.current
+    const element = scrollRef.current
+    if (!handler || !element) return
+    const rect = element.getBoundingClientRect()
+    const ratio = window.devicePixelRatio || 1
+    const contentX = position.x / ratio - rect.left + element.scrollLeft
+    const timeMs = Math.max(0, contentX / Math.max(pixelsPerMsRef.current, 1e-6))
+    handler(paths, timeMs)
+  })
 
   const computedTimelineWidth = useMemo(() => {
     const effectiveWidth = Math.max(200, viewportWidth)
@@ -1002,6 +1050,13 @@ export function TimelineLanes({
                     onSetTrackHeight={onSetTrackHeight}
                     onRenameTrack={onRenameTrack}
                     onSelectTrackClips={onSelectTrackClips}
+                    subtitle={
+                      track.kind === "camera-layouts"
+                        ? `${timeline.cameraLayouts?.length ?? 0} ${
+                            (timeline.cameraLayouts?.length ?? 0) === 1 ? "layout" : "layouts"
+                          }`
+                        : undefined
+                    }
                   />
                 )
               })}
@@ -1015,6 +1070,7 @@ export function TimelineLanes({
           className={cn(
             "min-w-0 flex-1 overflow-auto outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary",
             tool === "split" && "cursor-crosshair",
+            lanesDropActive && "ring-2 ring-inset ring-primary/60",
           )}
           onScroll={handleScroll}
           onPointerDown={handlePointerDown}
@@ -1184,6 +1240,39 @@ export function TimelineLanes({
                 {/* Virtualized Track Rows */}
                 {visibleTrackRows.map(({ track, virtualTrack }) => {
                   if (!track) return null
+
+                  if (track.kind === "camera-layouts") {
+                    return (
+                      <div
+                        key={track.id}
+                        style={laneStyle("--color-track-webcam")}
+                        className="contents"
+                      >
+                        <CameraLayoutTrackRow
+                          timeline={timeline}
+                          track={track}
+                          top={virtualTrack.start}
+                          height={virtualTrack.size}
+                          pixelsPerMs={pixelsPerMs}
+                          visibleStartMs={visibleStartMs}
+                          visibleEndMs={visibleEndMs}
+                          snapTargets={snapTargets}
+                          snapEnabled={view.snapEnabled}
+                          snapThresholdMs={view.snapThresholdMs}
+                          selectedSegmentId={selectedCameraLayoutId}
+                          getTimelineTime={timelineTimeFromClientX}
+                          onSnapGuide={onSnapGuideCallback}
+                          onSelectCameraLayout={onSelectCameraLayout}
+                          onGestureHud={onGestureHud}
+                          onAddCameraLayoutAt={onAddCameraLayoutAt ?? (() => undefined)}
+                          onMoveCameraLayout={onMoveCameraLayout ?? (() => undefined)}
+                          onResizeCameraLayout={onResizeCameraLayout ?? (() => undefined)}
+                          onCycleCameraLayout={onCycleCameraLayout ?? (() => undefined)}
+                          onDeleteCameraLayout={onDeleteCameraLayout ?? (() => undefined)}
+                        />
+                      </div>
+                    )
+                  }
 
                   if (track.kind === "zoom") {
                     return (

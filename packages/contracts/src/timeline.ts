@@ -61,6 +61,72 @@ export type ZoomSource = z.infer<typeof zoomSourceSchema>
 export const zoomPresetSchema = recordingSmartZoomPresetSchema
 export type ZoomPreset = z.infer<typeof zoomPresetSchema>
 
+// ---------------------------------------------------------------------------
+// Zoom clarity (detail plane + sharpening) and Glass Loupe
+// ---------------------------------------------------------------------------
+
+/**
+ * How a zoom segment presents its magnification.
+ *
+ * - `frame` (default, every v1 segment) zooms the whole frame.
+ * - `loupe` leaves the frame at its current zoom and magnifies the target
+ *   inside a lens that floats over the recording.
+ */
+export const zoomStyleSchema = z.enum(["frame", "loupe"])
+export type ZoomStyle = z.infer<typeof zoomStyleSchema>
+
+/**
+ * Sharpening applied when a zoomed crop still has to be upscaled past the
+ * source resolution. `auto` derives the strength from the remaining upscale,
+ * `strong` doubles it, `off` keeps the plain resample.
+ */
+export const zoomSharpeningSchema = z.enum(["off", "auto", "strong"]).default("auto")
+export type ZoomSharpening = z.infer<typeof zoomSharpeningSchema>
+
+export const loupeShapeSchema = z.enum(["circle", "rounded-rect"])
+export type LoupeShape = z.infer<typeof loupeShapeSchema>
+
+/**
+ * Glass Loupe presentation. All lengths are canvas pixels except `size`,
+ * which is the lens diameter as a fraction of the canvas short edge, and
+ * `cornerRadius`, which is a fraction of the lens size.
+ */
+export const loupeSettingsSchema = z.object({
+  shape: loupeShapeSchema.default("circle"),
+  size: z.number().min(0.08).max(1).default(0.34),
+  cornerRadius: z.number().min(0).max(0.5).default(0.24),
+  ringWidth: z.number().min(0).max(64).default(6),
+  ringColor: z.string().default("#ffffff"),
+  ringOpacity: z.number().min(0).max(1).default(0.9),
+  /** Inner highlight plus rim refraction; off renders a flat ring. */
+  glass: z.boolean().default(true),
+  shadowBlur: z.number().min(0).max(200).default(36),
+  shadowOpacity: z.number().min(0).max(1).default(0.35),
+  /** Ride the cursor instead of staying on the segment target. */
+  followCursor: z.boolean().default(false),
+  /** Lens centre in canvas pixels; defaults to the segment target centre. */
+  center: z.object({ x: z.number(), y: z.number() }).optional(),
+  /** Nudge from the resolved centre (target centre or `center`). */
+  offset: z.object({ x: z.number().default(0), y: z.number().default(0) }).optional(),
+})
+export type LoupeSettings = z.infer<typeof loupeSettingsSchema>
+
+/**
+ * Per-motion-source shutter fractions. A frame interval is
+ * `1000 / canvas.fps` ms; `1` blurs across the whole interval (a 180° shutter),
+ * `0` disables blur for that source. Looks carry these too.
+ */
+export const motionBlurSettingsSchema = z.object({
+  enabled: z.boolean().default(false),
+  cursor: z.number().min(0).max(1).default(0.5),
+  zoom: z.number().min(0).max(1).default(0.5),
+  pan: z.number().min(0).max(1).default(0.5),
+})
+export type MotionBlurSettings = z.infer<typeof motionBlurSettingsSchema>
+export const defaultMotionBlurSettings: MotionBlurSettings = motionBlurSettingsSchema.parse({
+  enabled: true,
+})
+
 // Smart zoom settings for AI/deterministic suggestion generation from telemetry.
 export const smartZoomSettingsSchema = z.object({
   preset: zoomPresetSchema.default("product-demo"),
@@ -133,6 +199,10 @@ export const timelineCanvasSchema = z.object({
   borderOpacity: z.number().min(0).max(1).optional(),
   borderStyle: borderStyleSchema.optional(),
   borderGradient: borderGradientSchema.optional(),
+  // Zoom clarity (M2 #3): sharpening for the source-resolution detail plane,
+  // and cinematic motion blur for zoom/pan/cursor movement (Pro).
+  zoomSharpening: zoomSharpeningSchema.optional(),
+  motionBlur: motionBlurSettingsSchema.optional(),
   cursorSettings: cursorSettingsSchema.default(defaultCursorSettings),
 })
 
@@ -201,11 +271,55 @@ export const manualZoomSegmentSchema = z.object({
   // export consumes the baked motion plan only.
   followSpeed: z.enum(["relaxed", "balanced", "tight"]).optional(),
   label: z.string().optional(),
+  // Glass Loupe (#2). Absent/`frame` keeps every v1 segment zooming the frame.
+  style: zoomStyleSchema.optional(),
+  loupe: loupeSettingsSchema.optional(),
 })
 
 export type ManualZoomSegment = z.infer<typeof manualZoomSegmentSchema>
 export const zoomSegmentSchema = manualZoomSegmentSchema
 export type ZoomSegment = ManualZoomSegment
+
+// Camera layouts (modern-features #5) are a timeline-effect lane like zoom
+// segments: outside every segment the clip transform is the base layout, and a
+// segment animates the camera between layouts. Rects, radius and opacity are
+// interpolated so a circle can morph into a rectangle through the radius.
+export const cameraLayoutKindSchema = z.enum(["pip", "fullscreen", "hidden", "side-by-side"])
+export type CameraLayoutKind = z.infer<typeof cameraLayoutKindSchema>
+
+export const cameraLayoutCornerSchema = z.enum(["tl", "tr", "bl", "br", "custom"])
+export type CameraLayoutCorner = z.infer<typeof cameraLayoutCornerSchema>
+
+export const cameraLayoutPipSchema = z.object({
+  corner: cameraLayoutCornerSchema.default("br"),
+  // Camera height as a fraction of the canvas height (0.24 ≈ a classic PiP).
+  sizeFraction: z.number().min(0.05).max(0.6).default(0.24),
+  shape: z.enum(["rectangle", "rounded", "circle"]).default("rounded"),
+  // Canvas-fraction pin for `corner: "custom"`; ignored otherwise.
+  x: z.number().min(0).max(1).optional(),
+  y: z.number().min(0).max(1).optional(),
+})
+export type CameraLayoutPip = z.infer<typeof cameraLayoutPipSchema>
+
+export const cameraLayoutSourceSchema = z.enum(["manual", "silence"])
+export type CameraLayoutSource = z.infer<typeof cameraLayoutSourceSchema>
+
+export const cameraLayoutSegmentSchema = z.object({
+  id: z.string(),
+  startMs: z.number().transform(Math.round).pipe(z.number().int().min(0)),
+  durationMs: z.number().transform(Math.round).pipe(z.number().int().min(1)),
+  layout: cameraLayoutKindSchema,
+  pip: cameraLayoutPipSchema.optional(),
+  transitionInMs: z.number().int().min(0).max(10_000).default(400),
+  transitionOutMs: z.number().int().min(0).max(10_000).default(400),
+  easing: zoomEasingSchema.default("smooth"),
+  // `silence` segments come from hide-during-silence generation (#4d).
+  source: cameraLayoutSourceSchema.default("manual"),
+  enabled: z.boolean().default(true),
+  locked: z.boolean().default(false),
+  label: z.string().optional(),
+})
+export type CameraLayoutSegment = z.infer<typeof cameraLayoutSegmentSchema>
 
 // Core clip fields. Clips are non-destructive references into source media.
 export const timelineClipBaseSchema = z.object({
@@ -603,6 +717,53 @@ export const imageClipSchema = timelineClipBaseSchema.extend({
 
 export type ImageClip = z.infer<typeof imageClipSchema>
 
+// Video b-roll (modern-features #13): an external video asset composited over
+// the screen (or covering it in `fullscreen` mode). Embedded audio is mixed
+// from the same asset's audio stream.
+export const videoLayoutModeSchema = z.enum(["overlay", "fullscreen"])
+export type VideoLayoutMode = z.infer<typeof videoLayoutModeSchema>
+
+export const videoAnimationSchema = z.enum(["none", "fade", "scale", "slide"])
+export type VideoAnimation = z.infer<typeof videoAnimationSchema>
+
+export const videoClipSchema = timelineClipBaseSchema.extend({
+  kind: z.literal("video"),
+  x: z.number().default(0),
+  y: z.number().default(0),
+  width: z.number().min(10).default(1280),
+  height: z.number().min(10).default(720),
+  rotation: z.number().default(0),
+  anchorX: z.number().min(0).max(1).default(0.5),
+  anchorY: z.number().min(0).max(1).default(0.5),
+  zIndex: z.number().int().default(0),
+  opacity: z.number().min(0).max(1).default(1),
+  borderRadius: z.number().min(0).max(200).default(0),
+  borderWidth: z.number().min(0).max(64).default(0),
+  borderColor: z.string().default("#ffffff"),
+  borderStyle: borderStyleSchema.optional(),
+  borderGradient: borderGradientSchema.optional(),
+  shadowEnabled: z.boolean().default(false),
+  shadowColor: z.string().default("rgba(0, 0, 0, 0.5)"),
+  shadowBlur: z.number().min(0).max(100).default(10),
+  fit: imageFitSchema.default("contain"),
+  // Source-pixel crop applied before the fit (rotation metadata is honoured by
+  // the decode pass, so this is always in display orientation).
+  crop: boundsSchema.optional(),
+  layoutMode: videoLayoutModeSchema.default("overlay"),
+  animationIn: videoAnimationSchema.default("fade"),
+  animationOut: videoAnimationSchema.default("fade"),
+  // Animation ramp lengths; 0 disables the animated rect/opacity keyframes.
+  animationMs: z.number().int().min(0).max(10_000).default(400),
+  volume: z.number().min(0).max(2).default(1),
+  audioMuted: z.boolean().default(false),
+  fadeInMs: z.number().min(0).default(0),
+  fadeOutMs: z.number().min(0).default(0),
+  enabled: z.boolean().default(true),
+  locked: z.boolean().default(false),
+})
+
+export type VideoClip = z.infer<typeof videoClipSchema>
+
 // Discriminated union of all clip kinds.
 export const timelineClipSchema = z.discriminatedUnion("kind", [
   screenClipSchema,
@@ -614,6 +775,7 @@ export const timelineClipSchema = z.discriminatedUnion("kind", [
   annotationClipSchema,
   textClipSchema,
   imageClipSchema,
+  videoClipSchema,
 ])
 
 export type TimelineClip = z.infer<typeof timelineClipSchema>
@@ -631,6 +793,12 @@ export const timelineTrackKindSchema = z.enum([
   "titles",
   "graphics",
   "overlay",
+  // Custom media tracks (modern-features #14) accept video/image/audio clips and
+  // composite in track order.
+  "media",
+  // Camera layout lane (#5). A virtual track that anchors the lane row; the
+  // segments live in `TimelineState.cameraLayouts` exactly like zoom segments.
+  "camera-layouts",
 ])
 
 export type TimelineTrackKind = z.infer<typeof timelineTrackKindSchema>
@@ -674,6 +842,9 @@ export const timelineStateSchema = z.object({
   // Optional keeps projects created before Phase 6 valid while still making
   // manual and generated zoom ranges durable as soon as the user creates one.
   zoomSegments: z.array(manualZoomSegmentSchema).optional(),
+  // Camera layout lane (#5). Optional so projects saved before the lane existed
+  // keep loading with today's clip-transform layout.
+  cameraLayouts: z.array(cameraLayoutSegmentSchema).optional(),
   smartZoomSettings: smartZoomSettingsSchema.optional(),
   createdAt: z.string().datetime({ offset: true }),
   updatedAt: z.string().datetime({ offset: true }),
@@ -902,8 +1073,26 @@ export const renderPlanAudioSchema = z.object({
 
 export type RenderPlanAudio = z.infer<typeof renderPlanAudioSchema>
 
-// Picture-in-picture overlay settings for the final render.
+// One sampled layout pose in absolute output time. Renderers interpolate
+// linearly between adjacent keyframes, so a transition is a short run of
+// keyframes and a hold is two equal poses.
+export const renderPlanLayoutKeyframeSchema = z.object({
+  timeMs: z.number().transform(Math.round).pipe(z.number().int().min(0)),
+  x: z.number(),
+  y: z.number(),
+  width: z.number().min(0),
+  height: z.number().min(0),
+  radius: z.number().min(0).default(0),
+  opacity: z.number().min(0).max(1).default(1),
+})
+
+export type RenderPlanLayoutKeyframe = z.infer<typeof renderPlanLayoutKeyframeSchema>
+
+// Picture-in-picture overlay settings for the final render. This is the unified
+// video-layer record (F3): the camera bubble, b-roll video clips and media-track
+// video all cross the plan boundary through it.
 export const renderPlanOverlaySchema = z.object({
+  id: z.string().optional(),
   assetId: z.string(),
   streamIndex: z.number().int().min(0).optional(),
   sourceInMs: z.number().transform(Math.round).pipe(z.number().int().min(0)),
@@ -919,6 +1108,16 @@ export const renderPlanOverlaySchema = z.object({
   opacity: z.number().min(0).max(1).default(1),
   visible: z.boolean().default(true),
   shape: z.enum(["rectangle", "rounded", "circle"]).default("rectangle"),
+  // Corner radius in canvas px for `shape: "rounded"`.
+  radius: z.number().min(0).optional(),
+  // How the source fills the layer rect. Camera bubbles use `cover` (today's
+  // behaviour); b-roll defaults to `contain`.
+  fit: z.enum(["contain", "cover", "fill"]).optional(),
+  // Animated pose (fade/scale/slide in and out). When present the renderer uses
+  // these instead of the static x/y/width/height/opacity above.
+  keyframes: z.array(renderPlanLayoutKeyframeSchema).optional(),
+  // `camera` layers follow the camera layout lane; `video` layers are b-roll.
+  role: z.enum(["camera", "video", "image"]).optional(),
   borderWidth: z.number().min(0).optional(),
   borderColor: z.string().optional(),
   borderOpacity: z.number().min(0).max(1).optional(),
@@ -933,6 +1132,28 @@ export const renderPlanOverlaySchema = z.object({
 })
 
 export type RenderPlanOverlay = z.infer<typeof renderPlanOverlaySchema>
+
+// One camera-layout window (#5): the camera pose and (for side-by-side) the
+// screen pose across the segment. Poses are interpolated per frame.
+export const renderPlanCameraLayoutSchema = z.object({
+  id: z.string(),
+  startMs: z.number().transform(Math.round).pipe(z.number().int().min(0)),
+  endMs: z.number().transform(Math.round).pipe(z.number().int().positive()),
+  camera: z.array(renderPlanLayoutKeyframeSchema).min(1),
+  screen: z.array(renderPlanLayoutKeyframeSchema).min(1).optional(),
+})
+
+export type RenderPlanCameraLayout = z.infer<typeof renderPlanCameraLayoutSchema>
+
+// Unified visual layer stack (F4). Screen is pinned to the bottom and captions
+// and cursor stay on top; this records the order the renderers draw the middle
+// band in (video layers and the camera bubble alternate by track order).
+export const renderPlanLayerEntrySchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("camera"), id: z.string() }),
+  z.object({ kind: z.literal("video"), id: z.string() }),
+])
+
+export type RenderPlanLayerEntry = z.infer<typeof renderPlanLayerEntrySchema>
 
 const captionLayoutHexSchema = z.string().regex(/^#[0-9a-fA-F]{6}$/)
 
@@ -1127,6 +1348,10 @@ export const renderPlanZoomSegmentSchema = z
     label: z.string().optional(),
     fromTarget: zoomTargetSchema.optional(),
     fromScale: z.number().min(1).max(8).optional(),
+    // Glass Loupe (#2): `loupe` segments are resolved by `resolveLoupes` in the
+    // preview and by the loupe pass in both renderers, never as frame zooms.
+    style: zoomStyleSchema.optional(),
+    loupe: loupeSettingsSchema.optional(),
     // New follow-cursor exports prefer this compact path. `keyframes` remains
     // accepted for render-plan compatibility with older projects and callers.
     keyframes: z.array(renderPlanZoomKeyframeSchema).optional(),
@@ -1284,6 +1509,11 @@ export const renderPlanSchema = z
     chapterMode: renderChapterModeSchema.default("embed"),
     masks: z.array(renderPlanMaskSchema).default([]),
     zoomSegments: z.array(renderPlanZoomSegmentSchema).default([]),
+    // Camera layout lane (#5): per-frame camera/screen poses.
+    cameraLayouts: z.array(renderPlanCameraLayoutSchema).default([]),
+    // Draw order for the middle band (F3/F4): video layers and the camera
+    // bubble in track order. Absent means "camera first, then overlays".
+    layerOrder: z.array(renderPlanLayerEntrySchema).default([]),
     cursorEffects: z.array(renderPlanCursorEffectSchema).default([]),
     overlayRenderPlan: z.custom<OverlayRenderPlan>().optional(),
     annotations: z.array(renderPlanAnnotationSchema).default([]),
@@ -1342,6 +1572,7 @@ export const renderPlanSchema = z
       ["chapters", plan.chapters],
       ["masks", plan.masks],
       ["zoomSegments", plan.zoomSegments],
+      ["cameraLayouts", plan.cameraLayouts],
     ] as const) {
       effects.forEach((effect, index) => {
         if (effect.endMs > plan.durationMs || effect.endMs <= effect.startMs) {

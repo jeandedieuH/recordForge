@@ -47,6 +47,8 @@ interface TimelineTrackHeaderProps {
   onSetTrackHeight?: (track: TimelineTrack, height: number) => void
   onRenameTrack?: (track: TimelineTrack, name: string) => void
   onSelectTrackClips?: (track: TimelineTrack) => void
+  /** Overrides the "N clips" subtitle (e.g. the camera layout lane). */
+  subtitle?: string
 }
 
 const RESIZE_MIN = 36
@@ -73,6 +75,7 @@ export const TimelineTrackHeader = memo(function TimelineTrackHeader({
   onSetTrackHeight,
   onRenameTrack,
   onSelectTrackClips,
+  subtitle,
 }: TimelineTrackHeaderProps) {
   const theme = getTrackLaneTheme(track)
   const TrackIcon = theme.icon
@@ -222,7 +225,8 @@ export const TimelineTrackHeader = memo(function TimelineTrackHeader({
               {!collapsed ? (
                 <div className="flex items-center gap-1 text-[10px] text-subtle-foreground leading-none">
                   <span>
-                    {track.clips.length} {track.clips.length === 1 ? "clip" : "clips"}
+                    {subtitle ??
+                      `${track.clips.length} ${track.clips.length === 1 ? "clip" : "clips"}`}
                   </span>
                   {/* Active-state badges stay visible; buttons appear on hover */}
                   {track.muted ? (
@@ -249,41 +253,49 @@ export const TimelineTrackHeader = memo(function TimelineTrackHeader({
                 : "pointer-events-none opacity-0 group-hover/header:pointer-events-auto group-hover/header:opacity-100 group-focus-within/header:pointer-events-auto group-focus-within/header:opacity-100",
             )}
           >
-            <IconButton
-              label={track.muted ? `Unmute ${track.name}` : `Mute ${track.name}`}
-              tooltipSide="top"
-              className={cn(
-                "size-5 rounded transition-all duration-fast",
-                track.muted
-                  ? "bg-destructive/20 text-destructive border border-destructive/40"
-                  : "text-muted-foreground hover:bg-overlay hover:text-foreground",
-              )}
-              onClick={(e) => {
-                e.stopPropagation()
-                onToggleTrackMuted(track)
-              }}
-              aria-pressed={track.muted}
-            >
-              {track.muted ? <VolumeX className="size-2.5" /> : <Volume2 className="size-2.5" />}
-            </IconButton>
+            {track.kind !== "camera-layouts" ? (
+              <>
+                <IconButton
+                  label={track.muted ? `Unmute ${track.name}` : `Mute ${track.name}`}
+                  tooltipSide="top"
+                  className={cn(
+                    "size-5 rounded transition-all duration-fast",
+                    track.muted
+                      ? "bg-destructive/20 text-destructive border border-destructive/40"
+                      : "text-muted-foreground hover:bg-overlay hover:text-foreground",
+                  )}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onToggleTrackMuted(track)
+                  }}
+                  aria-pressed={track.muted}
+                >
+                  {track.muted ? (
+                    <VolumeX className="size-2.5" />
+                  ) : (
+                    <Volume2 className="size-2.5" />
+                  )}
+                </IconButton>
 
-            <IconButton
-              label={track.solo ? `Unsolo ${track.name}` : `Solo ${track.name}`}
-              tooltipSide="top"
-              className={cn(
-                "size-5 rounded transition-all duration-fast",
-                track.solo
-                  ? "bg-warning/20 text-warning border border-warning/40 font-bold"
-                  : "text-muted-foreground hover:bg-overlay hover:text-foreground",
-              )}
-              onClick={(e) => {
-                e.stopPropagation()
-                onToggleTrackSolo(track)
-              }}
-              aria-pressed={track.solo}
-            >
-              <Headphones className="size-2.5" />
-            </IconButton>
+                <IconButton
+                  label={track.solo ? `Unsolo ${track.name}` : `Solo ${track.name}`}
+                  tooltipSide="top"
+                  className={cn(
+                    "size-5 rounded transition-all duration-fast",
+                    track.solo
+                      ? "bg-warning/20 text-warning border border-warning/40 font-bold"
+                      : "text-muted-foreground hover:bg-overlay hover:text-foreground",
+                  )}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onToggleTrackSolo(track)
+                  }}
+                  aria-pressed={track.solo}
+                >
+                  <Headphones className="size-2.5" />
+                </IconButton>
+              </>
+            ) : null}
 
             <IconButton
               label={track.locked ? `Unlock ${track.name}` : `Lock ${track.name}`}

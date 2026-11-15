@@ -23,6 +23,8 @@ mod cursor;
 mod encoding;
 mod gpu;
 mod keystrokes;
+mod loupe;
+mod zoom_detail;
 
 pub(crate) use camera::build_zoompan_expressions;
 // Re-exported for tests and sibling modules that validate against the shared
@@ -433,6 +435,12 @@ pub struct RenderPlan {
     pub masks: Vec<RenderPlanMask>,
     #[serde(default)]
     pub zoom_segments: Vec<RenderPlanZoomSegment>,
+    /// Camera layout lane (#5): per-frame camera/screen poses.
+    #[serde(default)]
+    pub camera_layouts: Vec<RenderPlanCameraLayout>,
+    /// Middle-band draw order (#13/#14, F4).
+    #[serde(default)]
+    pub layer_order: Vec<RenderPlanLayerEntry>,
     #[serde(default)]
     pub cursor_effects: Vec<RenderPlanCursorEffect>,
     #[serde(default)]
@@ -502,6 +510,10 @@ pub struct RenderPlanMask {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RenderPlanOverlay {
+    /// Clip id; the frontend sends it so layer order and diagnostics can refer
+    /// to the same identity the editor uses.
+    #[serde(default)]
+    pub id: Option<String>,
     pub asset_id: String,
     pub stream_index: Option<i32>,
     pub source_in_ms: u64,
@@ -521,6 +533,21 @@ pub struct RenderPlanOverlay {
     pub visible: bool,
     #[serde(default = "default_overlay_shape")]
     pub shape: String,
+    /// Corner radius in canvas px for `shape: "rounded"` (video layers carry
+    /// their own border radius; the camera bubble keeps its proportional one).
+    #[serde(default)]
+    pub radius: Option<f64>,
+    /// How the source fills the layer rect: `contain`, `cover` (camera default)
+    /// or `fill`.
+    #[serde(default)]
+    pub fit: Option<String>,
+    /// Animated pose (fade/scale/slide in and out), absolute output ms. When
+    /// present it replaces the static rect/opacity for the frames it covers.
+    #[serde(default)]
+    pub keyframes: Vec<RenderLayoutKeyframe>,
+    /// `camera` for the camera bubble, `video` for b-roll / media-track video.
+    #[serde(default)]
+    pub role: Option<String>,
     pub border_width: Option<f64>,
     pub border_color: Option<String>,
     pub border_opacity: Option<f64>,
@@ -533,6 +560,42 @@ pub struct RenderPlanOverlay {
     pub shadow_offset_x: Option<f64>,
     pub shadow_offset_y: Option<f64>,
     pub preset: Option<String>,
+}
+
+/// One sampled layout pose (camera layouts, video layer animation). Renderers
+/// interpolate linearly between adjacent keyframes.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RenderLayoutKeyframe {
+    pub time_ms: u64,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    #[serde(default)]
+    pub radius: f64,
+    #[serde(default = "default_overlay_opacity")]
+    pub opacity: f64,
+}
+
+/// One camera-layout window (#5): per-frame camera and screen poses.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RenderPlanCameraLayout {
+    pub id: String,
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub camera: Vec<RenderLayoutKeyframe>,
+    #[serde(default)]
+    pub screen: Option<Vec<RenderLayoutKeyframe>>,
+}
+
+/// One entry in the middle-band draw order (F3/F4).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RenderPlanLayerEntry {
+    pub kind: String,
+    pub id: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -594,9 +657,68 @@ pub struct RenderPlanZoomSegment {
     pub keyframes: Option<Vec<RenderPlanZoomKeyframe>>,
     #[serde(default)]
     pub motion_plan: Option<RenderPlanZoomMotionPlan>,
+    /// `frame` (default) or `loupe`. A loupe segment magnifies inside a lens
+    /// and must never be resolved as a frame zoom (`camera::evaluate_zoom_transform`).
+    #[serde(default)]
+    pub style: Option<String>,
+    #[serde(default)]
+    pub loupe: Option<RenderLoupe>,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+/// Glass Loupe presentation (M2 #2). Lengths are canvas pixels except `size`
+/// (a fraction of the canvas short edge) and `corner_radius` (a fraction of
+/// the lens size).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+pub struct RenderLoupe {
+    pub shape: String,
+    pub size: f64,
+    pub corner_radius: f64,
+    pub ring_width: f64,
+    pub ring_color: String,
+    pub ring_opacity: f64,
+    /// Inner highlight plus rim refraction; false renders a flat ring.
+    pub glass: bool,
+    pub shadow_blur: f64,
+    pub shadow_opacity: f64,
+    pub follow_cursor: bool,
+    pub center: Option<RenderPoint>,
+    pub offset: Option<RenderPoint>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RenderPoint {
+    pub x: f64,
+    pub y: f64,
+}
+
+impl Default for RenderLoupe {
+    fn default() -> Self {
+        Self {
+            shape: "circle".into(),
+            size: 0.34,
+            corner_radius: 0.24,
+            ring_width: 6.0,
+            ring_color: "#ffffff".into(),
+            ring_opacity: 0.9,
+            glass: true,
+            shadow_blur: 36.0,
+            shadow_opacity: 0.35,
+            follow_cursor: false,
+            center: None,
+            offset: None,
+        }
+    }
+}
+
+impl RenderLoupe {
+    pub fn is_circle(&self) -> bool {
+        self.shape == "circle"
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RenderCropFloat {
     pub x: f64,
@@ -2633,7 +2755,10 @@ fn render_composition_window(
             }
         }
     }
-    let plan_has_zoom = plan.zoom_segments.iter().any(|segment| segment.enabled);
+    let plan_has_zoom = plan
+        .zoom_segments
+        .iter()
+        .any(|segment| segment.enabled && !camera::segment_is_loupe(segment));
     // Window-local zoom: a pass whose frames all sample the full canvas skips
     // `zoompan` entirely. Chunks fully outside every zoom region then run the
     // cached swscale pass below instead of zoompan's per-frame SwsContext
@@ -2837,6 +2962,19 @@ fn render_composition_window(
         && screen_y.abs() < 0.5;
 
     let base_label = "canvas_base";
+    // Zoom clarity (#3) on the compatibility renderer: a mild luma sharpening
+    // pass after the zoom stage, but only when the source actually carries more
+    // detail than the fitted plane (`r > 1.02`) — otherwise the zoom is a plain
+    // upscale and both renderers stay identical. The GPU path uses the
+    // RCAS-style pass instead; ADR 020 reports the difference as
+    // `zoom-sharpening`.
+    let zoom_has_detail =
+        screen_source.is_some_and(|(source_w, _)| source_w as f64 / screen_w.max(1.0) > 1.02);
+    let zoom_sharpening = if zoom_has_detail {
+        compat_zoom_sharpening(canvas)
+    } else {
+        None
+    };
     if can_direct_pad {
         filters.push(format!(
             "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},tpad=stop_mode=add:stop_duration={plan_duration}:color=black,trim=duration={plan_duration},setpts=PTS-STARTPTS{abs_pts},setsar=1[{base_label}]"
@@ -2847,10 +2985,15 @@ fn render_composition_window(
         filters.push(format!(
             "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},tpad=stop_mode=add:stop_duration={plan_duration}:color=black,trim=duration={plan_duration},setpts=PTS-STARTPTS{abs_pts},format=yuv420p[zoom_src]"
         ));
+        let zoom_label = if zoom_sharpening.is_some() {
+            "zoom_sharp"
+        } else {
+            base_label
+        };
         push_zoom_stage(
             &mut filters,
             "[zoom_src]",
-            base_label,
+            zoom_label,
             plan,
             canvas,
             window.first_frame,
@@ -2859,16 +3002,24 @@ fn render_composition_window(
             canvas.height as f64,
             &abs_pts,
         );
+        if let Some(sharpening) = &zoom_sharpening {
+            filters.push(format!("[{zoom_label}]{sharpening}[{base_label}]"));
+        }
     } else if can_pad_canvas && has_zoom {
         let canvas_w = canvas.width;
         let canvas_h = canvas.height;
         filters.push(format!(
             "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},tpad=stop_mode=add:stop_duration={plan_duration}:color=black,trim=duration={plan_duration},setpts=PTS-STARTPTS{abs_pts},format=yuv420p[zoom_src]"
         ));
+        let zoom_label = if zoom_sharpening.is_some() {
+            "zoom_sharp"
+        } else {
+            "zoom_fitted"
+        };
         push_zoom_stage(
             &mut filters,
             "[zoom_src]",
-            "zoom_fitted",
+            zoom_label,
             plan,
             canvas,
             window.first_frame,
@@ -2877,6 +3028,9 @@ fn render_composition_window(
             screen_h,
             &abs_pts,
         );
+        if let Some(sharpening) = &zoom_sharpening {
+            filters.push(format!("[{zoom_label}]{sharpening}[zoom_fitted]"));
+        }
         filters.push(format!(
             "[zoom_fitted]pad={canvas_w}:{canvas_h}:{screen_x:.0}:{screen_y:.0}:color={background},setsar=1[{base_label}]"
         ));
@@ -2924,10 +3078,15 @@ fn render_composition_window(
             filters.push(format!(
                 "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},tpad=stop_mode=add:stop_duration={plan_duration}:color=black,trim=duration={plan_duration},setpts=PTS-STARTPTS{abs_pts},format=yuv420p[zoom_src]"
             ));
+            let zoom_label = if zoom_sharpening.is_some() {
+                "zoom_sharp"
+            } else {
+                screen_base
+            };
             push_zoom_stage(
                 &mut filters,
                 "[zoom_src]",
-                screen_base,
+                zoom_label,
                 plan,
                 canvas,
                 window.first_frame,
@@ -2936,6 +3095,9 @@ fn render_composition_window(
                 screen_h,
                 &abs_pts,
             );
+            if let Some(sharpening) = &zoom_sharpening {
+                filters.push(format!("[{zoom_label}]{sharpening}[{screen_base}]"));
+            }
         } else {
             // A zoom-free chunk inside a zoomed timeline still carries the
             // same-size swscale pass identity `zoompan` performed, so its
@@ -4802,6 +4964,13 @@ fn overlay_visual_matches(left: &RenderPlanOverlay, right: &RenderPlanOverlay) -
         && same_optional_f64(left.shadow_offset_x, right.shadow_offset_x)
         && same_optional_f64(left.shadow_offset_y, right.shadow_offset_y)
         && left.preset == right.preset
+        && left.role == right.role
+        && left.fit == right.fit
+        && same_optional_f64(left.radius, right.radius)
+        // Animated layers carry absolute-time keyframes; two pieces of one clip
+        // never share them, so comparing them keeps Smart Cut pieces of the same
+        // animation in one track and different animations apart.
+        && left.keyframes == right.keyframes
 }
 
 /// Group contiguous camera overlays into render tracks. Only visible,
@@ -5825,6 +5994,19 @@ fn zoom_pieces_enabled() -> bool {
 /// branches) the whole window falls back to a single `zoompan`, which is the
 /// previous behavior.
 #[allow(clippy::too_many_arguments)]
+/// Zoom clarity (#3) on the compatibility renderer: a mild luma `unsharp` pass
+/// for zoomed frames. `auto` (and an absent field on older plans) sharpens
+/// gently, `strong` more, `off` returns `None` so the graph is untouched.
+/// ADR 020 reports the difference from the GPU RCAS pass as `zoom-sharpening`.
+fn compat_zoom_sharpening(canvas: &cursor::RenderCanvas) -> Option<String> {
+    match canvas.zoom_sharpening.as_deref() {
+        Some("off") => None,
+        Some("strong") => Some("unsharp=5:5:1.1:5:5".into()),
+        _ => Some("unsharp=5:5:0.6:5:5".into()),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn push_zoom_stage(
     filters: &mut Vec<String>,
     input_label: &str,
@@ -6498,6 +6680,19 @@ impl OverlayWorkerState {
             cached_plane: None,
             keys_pixmap: None,
         })
+    }
+
+    /// Canvas position of the cursor tip at `output_ms`, using the same
+    /// effect-window lookup `render_planes` does. The GPU compositor feeds
+    /// this to `resolve_loupe_at` so the Glass Loupe lens rides the exact
+    /// rendered tip — never the cursor plate's top-left origin.
+    fn cursor_canvas_point_at(&self, output_ms: f64) -> Option<(f64, f64)> {
+        self.renderers
+            .iter()
+            .find(|(start_ms, end_ms, _)| {
+                output_ms >= *start_ms as f64 && output_ms < *end_ms as f64
+            })
+            .and_then(|(_, _, renderer)| renderer.cursor_canvas_point(output_ms))
     }
 
     /// Render the logical frame planes for `frame_index`, reusing the cached
@@ -10387,6 +10582,8 @@ mod tests {
         };
         let plan = RenderPlan {
             project_id: "audio-window".into(),
+            camera_layouts: Vec::new(),
+            layer_order: Vec::new(),
             duration_ms: 5_000,
             segments: vec![RenderSegment {
                 asset_id: "screen".into(),
@@ -10731,6 +10928,11 @@ mod tests {
     fn camera_test_overlay(output_start_ms: u64, output_end_ms: u64) -> RenderPlanOverlay {
         RenderPlanOverlay {
             asset_id: "cam".into(),
+            id: None,
+            radius: None,
+            fit: None,
+            role: None,
+            keyframes: Vec::new(),
             stream_index: Some(0),
             source_in_ms: output_start_ms,
             source_out_ms: output_end_ms,
@@ -11125,6 +11327,8 @@ mod tests {
     fn valid_plan() -> RenderPlan {
         RenderPlan {
             project_id: "project-1".into(),
+            camera_layouts: Vec::new(),
+            layer_order: Vec::new(),
             duration_ms: 3_000,
             segments: vec![
                 RenderSegment {
@@ -11193,6 +11397,8 @@ mod tests {
     fn piecewise_zoom_graph_skips_zoompan_for_a_step_zoom() {
         let mut plan = valid_plan();
         plan.zoom_segments = vec![RenderPlanZoomSegment {
+            style: None,
+            loupe: None,
             id: "step".into(),
             start_ms: 1_000,
             end_ms: 3_000,
@@ -11252,6 +11458,8 @@ mod tests {
     fn piecewise_zoom_graph_keeps_animated_phases_on_zoompan() {
         let mut plan = valid_plan();
         plan.zoom_segments = vec![RenderPlanZoomSegment {
+            style: None,
+            loupe: None,
             id: "eased".into(),
             start_ms: 1_000,
             end_ms: 3_000,
@@ -11301,6 +11509,8 @@ mod tests {
     fn piecewise_zoom_graph_skips_the_split_for_a_whole_window_hold() {
         let mut plan = valid_plan();
         plan.zoom_segments = vec![RenderPlanZoomSegment {
+            style: None,
+            loupe: None,
             id: "steady".into(),
             start_ms: 0,
             end_ms: 10_000,
@@ -11503,6 +11713,8 @@ mod tests {
         let (z_expr, x_expr, y_expr) = build_zoompan_expressions(
             &RenderPlan {
                 zoom_segments: vec![RenderPlanZoomSegment {
+                    style: None,
+                    loupe: None,
                     id: "zoom".into(),
                     start_ms: 0,
                     end_ms: 1_000,
@@ -11564,6 +11776,8 @@ mod tests {
         let (z_expr, x_expr, y_expr) = build_zoompan_expressions(
             &RenderPlan {
                 zoom_segments: vec![RenderPlanZoomSegment {
+                    style: None,
+                    loupe: None,
                     id: "zoom".into(),
                     start_ms: 0,
                     end_ms: 1_000,
@@ -12613,6 +12827,11 @@ mod tests {
         // 1280x720 canvas with 40px padding (76% screen + 2% gap).
         let overlay = |source_in, source_out, out_start, out_end| RenderPlanOverlay {
             asset_id: "asset-camera".into(),
+            id: None,
+            radius: None,
+            fit: None,
+            role: None,
+            keyframes: Vec::new(),
             stream_index: Some(0),
             source_in_ms: source_in,
             source_out_ms: source_out,
@@ -12642,6 +12861,8 @@ mod tests {
 
         let plan = RenderPlan {
             project_id: "test-sbs-gap".into(),
+            camera_layouts: Vec::new(),
+            layer_order: Vec::new(),
             duration_ms: 6000,
             segments: vec![RenderSegment {
                 asset_id: "asset-screen".into(),
@@ -13419,6 +13640,8 @@ mod tests {
         let mut zoom_segments = Vec::new();
         for i in 0..30 {
             zoom_segments.push(RenderPlanZoomSegment {
+                style: None,
+                loupe: None,
                 id: format!("zoom-{i}"),
                 start_ms: i * 2000,
                 end_ms: i * 2000 + 1500,
@@ -13493,6 +13716,8 @@ mod tests {
             .collect();
         let plan = RenderPlan {
             zoom_segments: vec![RenderPlanZoomSegment {
+                style: None,
+                loupe: None,
                 id: "zoom-motion-plan".into(),
                 start_ms: 0,
                 end_ms: 3_200,
@@ -13594,6 +13819,8 @@ mod tests {
 
         let plan = RenderPlan {
             project_id: "test-zoom-dense-project".into(),
+            camera_layouts: Vec::new(),
+            layer_order: Vec::new(),
             duration_ms: 2000,
             segments: vec![RenderSegment {
                 asset_id: "asset-screen".into(),
@@ -13619,6 +13846,8 @@ mod tests {
             chapter_mode: "embed".into(),
             masks: Vec::new(),
             zoom_segments: vec![RenderPlanZoomSegment {
+                style: None,
+                loupe: None,
                 id: "zoom-dense-1".into(),
                 start_ms: 200,
                 end_ms: 1800,
@@ -13737,6 +13966,8 @@ mod tests {
 
         let plan = RenderPlan {
             project_id: "test-gif-project".into(),
+            camera_layouts: Vec::new(),
+            layer_order: Vec::new(),
             duration_ms: 1000,
             segments: vec![RenderSegment {
                 asset_id: "asset-screen".into(),
@@ -13874,6 +14105,8 @@ mod tests {
             let out_path = temp_dir.join(format!("out_{}.mp4", ratio.replace(':', "_")));
             let plan = RenderPlan {
                 project_id: format!("test-ratio-{}", ratio),
+                camera_layouts: Vec::new(),
+                layer_order: Vec::new(),
                 duration_ms: 500,
                 segments: vec![RenderSegment {
                     asset_id: "asset-screen".into(),
@@ -13979,6 +14212,8 @@ mod tests {
             let out_path = temp_dir.join("out_9_16_gradient.mp4");
             let plan = RenderPlan {
                 project_id: "test-ratio-9-16-gradient".into(),
+                camera_layouts: Vec::new(),
+                layer_order: Vec::new(),
                 duration_ms: 500,
                 segments: vec![RenderSegment {
                     asset_id: "asset-screen".into(),
@@ -14080,6 +14315,8 @@ mod tests {
             let out_path = temp_dir.join("out_9_16_zoom.mp4");
             let plan = RenderPlan {
                 project_id: "test-ratio-9-16-zoom".into(),
+                camera_layouts: Vec::new(),
+                layer_order: Vec::new(),
                 duration_ms: 500,
                 segments: vec![RenderSegment {
                     asset_id: "asset-screen".into(),
@@ -14099,6 +14336,8 @@ mod tests {
                 }],
                 overlays: Vec::new(),
                 zoom_segments: vec![RenderPlanZoomSegment {
+                    style: None,
+                    loupe: None,
                     id: "zoom-1".into(),
                     start_ms: 0,
                     end_ms: 500,
@@ -14206,6 +14445,8 @@ mod tests {
             let out_path = temp_dir.join("out_9_16_shadow_border.mp4");
             let plan = RenderPlan {
                 project_id: "test-ratio-9-16-shadow-border".into(),
+                camera_layouts: Vec::new(),
+                layer_order: Vec::new(),
                 duration_ms: 500,
                 segments: vec![RenderSegment {
                     asset_id: "asset-screen".into(),
@@ -14320,6 +14561,8 @@ mod tests {
             let out_path = temp_dir.join("out_9_16_image_bg.mp4");
             let plan = RenderPlan {
                 project_id: "test-ratio-9-16-image-bg".into(),
+                camera_layouts: Vec::new(),
+                layer_order: Vec::new(),
                 duration_ms: 500,
                 segments: vec![RenderSegment {
                     asset_id: "asset-screen".into(),
@@ -14465,6 +14708,8 @@ mod tests {
 
         let plan = RenderPlan {
             project_id: "test-webp-project".into(),
+            camera_layouts: Vec::new(),
+            layer_order: Vec::new(),
             duration_ms: 1000,
             segments: vec![RenderSegment {
                 asset_id: "asset-screen".into(),
@@ -14593,6 +14838,8 @@ mod tests {
 
         let plan = RenderPlan {
             project_id: "test-gif-downscale".into(),
+            camera_layouts: Vec::new(),
+            layer_order: Vec::new(),
             duration_ms: 1000,
             segments: vec![RenderSegment {
                 asset_id: "screen-1".into(),
@@ -14997,6 +15244,8 @@ mod tests {
 
         let plan = RenderPlan {
             project_id: "test-project-1".into(),
+            camera_layouts: Vec::new(),
+            layer_order: Vec::new(),
             duration_ms: 1000,
             segments: vec![RenderSegment {
                 asset_id: "asset-screen".into(),
@@ -15445,6 +15694,8 @@ mod tests {
 
         let plan = RenderPlan {
             project_id: "test-layering".into(),
+            camera_layouts: Vec::new(),
+            layer_order: Vec::new(),
             duration_ms: 1000,
             segments: vec![RenderSegment {
                 asset_id: "asset-screen".into(),
@@ -15467,6 +15718,11 @@ mod tests {
             // it is invisible, anything above it wins the frame.
             overlays: vec![RenderPlanOverlay {
                 asset_id: "asset-camera".into(),
+                id: None,
+                radius: None,
+                fit: None,
+                role: None,
+                keyframes: Vec::new(),
                 stream_index: None,
                 source_in_ms: 0,
                 source_out_ms: 1000,
@@ -15921,6 +16177,8 @@ mod tests {
 
         let plan = RenderPlan {
             project_id: "test-webcam-project".into(),
+            camera_layouts: Vec::new(),
+            layer_order: Vec::new(),
             duration_ms: 1000,
             segments: vec![RenderSegment {
                 asset_id: "asset-screen".into(),
@@ -15941,6 +16199,11 @@ mod tests {
             gaps: Vec::new(),
             overlays: vec![RenderPlanOverlay {
                 asset_id: "rec-1:webcam:2".into(),
+                id: None,
+                radius: None,
+                fit: None,
+                role: None,
+                keyframes: Vec::new(),
                 stream_index: Some(2), // synthetic project stream index
                 source_in_ms: 0,
                 source_out_ms: 1000,
@@ -16105,6 +16368,8 @@ mod tests {
 
         let plan = RenderPlan {
             project_id: "test-webcam-full-project".into(),
+            camera_layouts: Vec::new(),
+            layer_order: Vec::new(),
             duration_ms: 1000,
             segments: vec![RenderSegment {
                 asset_id: "asset-screen".into(),
@@ -16125,6 +16390,11 @@ mod tests {
             gaps: Vec::new(),
             overlays: vec![RenderPlanOverlay {
                 asset_id: "rec-1:webcam:2".into(),
+                id: None,
+                radius: None,
+                fit: None,
+                role: None,
+                keyframes: Vec::new(),
                 stream_index: Some(2),
                 source_in_ms: 0,
                 source_out_ms: 1000,
@@ -16319,6 +16589,8 @@ mod tests {
         // Include all 3 modes (redact, blur, pixelate) with odd coordinates to verify outward even snapping
         let plan = RenderPlan {
             project_id: "test-mask-export-project".into(),
+            camera_layouts: Vec::new(),
+            layer_order: Vec::new(),
             duration_ms: 1000,
             segments: vec![RenderSegment {
                 asset_id: "asset-screen".into(),
@@ -16522,6 +16794,8 @@ mod tests {
         // Canvas 4:5 (240x300) with two overlays having ODD dimensions and float coordinates
         let plan = RenderPlan {
             project_id: "test-cam-align".into(),
+            camera_layouts: Vec::new(),
+            layer_order: Vec::new(),
             duration_ms: 1000,
             segments: vec![RenderSegment {
                 asset_id: "screen-asset".into(),
@@ -16542,6 +16816,11 @@ mod tests {
             overlays: vec![
                 RenderPlanOverlay {
                     asset_id: "camera-asset".into(),
+                    id: None,
+                    radius: None,
+                    fit: None,
+                    role: None,
+                    keyframes: Vec::new(),
                     stream_index: Some(0),
                     source_in_ms: 0,
                     source_out_ms: 500,
@@ -16570,6 +16849,11 @@ mod tests {
                 },
                 RenderPlanOverlay {
                     asset_id: "camera-asset".into(),
+                    id: None,
+                    radius: None,
+                    fit: None,
+                    role: None,
+                    keyframes: Vec::new(),
                     stream_index: Some(0),
                     source_in_ms: 500,
                     source_out_ms: 1000,
@@ -16738,6 +17022,8 @@ mod tests {
 
         let plan = RenderPlan {
             project_id: "test-cam-render".into(),
+            camera_layouts: Vec::new(),
+            layer_order: Vec::new(),
             duration_ms: 1000,
             segments: vec![RenderSegment {
                 asset_id: "screen-asset".into(),
@@ -16757,6 +17043,11 @@ mod tests {
             }],
             overlays: vec![RenderPlanOverlay {
                 asset_id: "camera-asset".into(),
+                id: None,
+                radius: None,
+                fit: None,
+                role: None,
+                keyframes: Vec::new(),
                 stream_index: Some(0),
                 source_in_ms: 0,
                 source_out_ms: 1000,
@@ -16980,6 +17271,11 @@ mod tests {
             system_segments.push(segment("system-asset", output_start_ms, output_end_ms));
             overlays.push(RenderPlanOverlay {
                 asset_id: "camera-asset".into(),
+                id: None,
+                radius: None,
+                fit: None,
+                role: None,
+                keyframes: Vec::new(),
                 stream_index: Some(0),
                 source_in_ms,
                 source_out_ms,
@@ -17009,6 +17305,8 @@ mod tests {
         }
         let plan = RenderPlan {
             project_id: "dense-smart-cut".into(),
+            camera_layouts: Vec::new(),
+            layer_order: Vec::new(),
             duration_ms: output_ms,
             segments,
             gaps: Vec::new(),

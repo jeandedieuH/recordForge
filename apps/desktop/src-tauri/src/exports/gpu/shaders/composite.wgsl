@@ -37,6 +37,30 @@ struct FrameParams {
     border: vec4<f32>,
     border_from: vec4<f32>,
     border_to: vec4<f32>,
+    // Size of the decoded screen planes in px. Equal to the canvas unless a
+    // zoom detail plane is active (#3), in which case the whole screen chain
+    // decodes at detail resolution while the output stays canvas-sized.
+    plane_size: vec4<f32>,
+    // Motion blur (M2 #1): the zoom crop at the shutter's start, normalized
+    // exactly like `crop`.
+    blur_a: vec4<f32>,
+    // The zoom crop at the shutter's end, normalized like `crop`.
+    blur_b: vec4<f32>,
+    // Zoom clarity (M2 #3): x = blur tap count (1 = off), y = RCAS sharpening
+    // strength 0..1, z = 1 when `plane_size` is the source-resolution detail
+    // plane (the frame is then upscaled from real source detail).
+    detail: vec4<f32>,
+    // Glass Loupe (#2): xy = lens centre in canvas px, z = radius px, w =
+    // corner radius px (z <= 0.5 disables the lens).
+    loupe_lens: vec4<f32>,
+    // Magnified region in normalized content uv (same space as `crop`).
+    loupe_target: vec4<f32>,
+    // x = ring width px, y = ring opacity, rgb = ring colour.
+    loupe_ring: vec4<f32>,
+    loupe_ring_b: vec4<f32>,
+    // x = presence 0..1, y = shadow blur px, z = shadow opacity, w = 1 when
+    // the glass rim (refraction + inner highlight) is on.
+    loupe_style: vec4<f32>,
 };
 
 @group(0) @binding(0) var src_y: texture_2d<f32>;
@@ -155,10 +179,82 @@ fn border_ramp(canvas_px: vec2<f32>) -> vec3<f32> {
     return mix(frame.border_from.rgb, frame.border_to.rgb, t);
 }
 
+// --- Zoom clarity: detail-plane sampling and RCAS-style sharpening ----------
+
+// Normalized uv of the decoded plane for one crop and a content-local uv. The
+// planes are `plane_size` px (the canvas, or the zoom detail plane when #3 is
+// active) with the picture already fitted at `source_rect`.
+fn plane_uv(crop: vec4<f32>, content_uv: vec2<f32>) -> vec2<f32> {
+    let crop_uv = clamp(
+        crop.xy + content_uv * crop.zw,
+        vec2<f32>(0.0, 0.0),
+        vec2<f32>(1.0, 1.0),
+    );
+    return (frame.source_rect.xy + crop_uv * frame.source_rect.zw) / frame.plane_size.xy;
+}
+
+fn read_uv(uv: vec2<f32>) -> vec2<f32> {
+    let dims = vec2<i32>(textureDimensions(src_uv));
+    return sample_bicubic(src_uv, uv, dims).rg * 255.0;
+}
+
+fn read_y(uv: vec2<f32>) -> f32 {
+    let dims = vec2<i32>(textureDimensions(src_y));
+    return sample_bicubic(src_y, uv, dims).r * 255.0;
+}
+
+// One nearest luma tap, offset from `uv` by whole texels.
+fn luma_tap(uv: vec2<f32>, offset: vec2<i32>) -> f32 {
+    let dims = vec2<i32>(textureDimensions(src_y));
+    let coord = clamp(
+        vec2<i32>(uv * vec2<f32>(dims)) + offset,
+        vec2<i32>(0, 0),
+        dims - vec2<i32>(1, 1),
+    );
+    return textureLoad(src_y, coord, 0).r * 255.0;
+}
+
+// RCAS-style contrast-adaptive sharpening (#3). The correction is limited by
+// the local 4-neighbour contrast, so flat areas stay flat while text edges gain
+// acutance when the zoom still has to upscale past the source (`m > r`).
+// Strength 0 costs nothing.
+fn sharpen_luma(y_byte: f32, uv: vec2<f32>, strength: f32) -> f32 {
+    if (strength <= 0.0) {
+        return y_byte;
+    }
+    let left = luma_tap(uv, vec2<i32>(-1, 0));
+    let right = luma_tap(uv, vec2<i32>(1, 0));
+    let up = luma_tap(uv, vec2<i32>(0, -1));
+    let down = luma_tap(uv, vec2<i32>(0, 1));
+    let average = (left + right + up + down) * 0.25;
+    let delta = clamp((y_byte - average) * strength * 0.8, -14.0, 14.0);
+    return clamp(y_byte + delta, 0.0, 255.0);
+}
+
+// One screen sample (BT.601 limited luma + chroma) for a crop rect.
+fn sample_screen(crop: vec4<f32>, content_uv: vec2<f32>) -> vec4<f32> {
+    let uv = plane_uv(crop, content_uv);
+    return vec4<f32>(read_y(uv), read_uv(uv), 0.0);
+}
+
+// Signed distance to a rounded square lens of half-size `half` and corner
+// radius `corner` (all px). `corner == half` is a circle.
+fn lens_distance(point: vec2<f32>, half: f32, corner: f32) -> f32 {
+    let inner = max(half - corner, 0.0);
+    let q = abs(point) - vec2<f32>(inner, inner);
+    return length(max(q, vec2<f32>(0.0, 0.0))) + min(max(q.x, q.y), 0.0) - corner;
+}
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let canvas_px = in.uv * frame.canvas_size.xy;
     let bg = canvas_background(canvas_px);
+
+    // Timeline gaps (F2): no screen media covers this frame (b-roll over a hole),
+    // so the canvas shows its background plate only; layers draw after this pass.
+    if (frame.detail.w < 0.5) {
+        return vec4<f32>(bg, 1.0);
+    }
 
     // Signed distance to the content rect, in canvas pixels. Pixel centres sit
     // at +0.5, so a rect that covers the whole canvas stays fully inside.
@@ -172,24 +268,16 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         return vec4<f32>(bg, 1.0);
     }
 
-    // Content-local uv, then the zoom crop inside the *decoded* content rect,
-    // mapped back into canvas uv. The decoded planes are canvas-sized with the
-    // picture already fitted at `source_rect`, so the crop space is the source
-    // rect — never the current (possibly smaller side-by-side) destination.
+    // Content-local uv drives both the zoom crop and the shutter strip.
     let content_uv = local / frame.dest_rect.zw;
-    let crop_uv = clamp(
-        frame.crop.xy + content_uv * frame.crop.zw,
-        vec2<f32>(0.0, 0.0),
-        vec2<f32>(1.0, 1.0),
-    );
-    let sample_uv =
-        (frame.source_rect.xy + crop_uv * frame.source_rect.zw) / frame.canvas_size.xy;
 
     // 1:1 fast path: an identity crop on a full-canvas content rect makes every
     // luma fragment its own texel, which is exactly what the bicubic taps
     // produce at frac 0. Chroma stays on the bicubic path (it is subsampled, so
-    // the fragment sits between chroma texels by design).
+    // the fragment sits between chroma texels by design). The detail plane and
+    // the motion-blur strip never take it.
     let identity =
+        frame.detail.z < 0.5 && frame.detail.x < 1.5 &&
         frame.crop.x == 0.0 && frame.crop.y == 0.0 &&
         frame.crop.z == 1.0 && frame.crop.w == 1.0 &&
         abs(frame.dest_rect.x) < 0.5 && abs(frame.dest_rect.y) < 0.5 &&
@@ -200,15 +288,34 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         abs(frame.source_rect.z - frame.dest_rect.z) < 0.5 &&
         abs(frame.source_rect.w - frame.dest_rect.w) < 0.5;
 
-    let uv_dims = vec2<i32>(textureDimensions(src_uv));
-    let uv_byte = sample_bicubic(src_uv, sample_uv, uv_dims).rg * 255.0;
     var y_byte: f32;
-    if (identity) {
+    var uv_byte: vec2<f32>;
+    let taps = max(1u, u32(frame.detail.x + 0.5));
+    if (taps > 1u) {
+        // Motion blur (M2 #1): average the screen along the crop strip the
+        // shutter sweeps between `blur_a` and `blur_b`. Averaging in Y/UV keeps
+        // the sharpening pass below on one luma plane.
+        var y_sum = 0.0;
+        var uv_sum = vec2<f32>(0.0, 0.0);
+        for (var tap = 0u; tap < taps; tap++) {
+            let t = (f32(tap) + 0.5) / f32(taps);
+            let sample = sample_screen(mix(frame.blur_a, frame.blur_b, t), content_uv);
+            y_sum += sample.x;
+            uv_sum += sample.yz;
+        }
+        y_byte = y_sum / f32(taps);
+        uv_byte = uv_sum / f32(taps);
+    } else if (identity) {
         y_byte = textureLoad(src_y, vec2<i32>(canvas_px), 0).r * 255.0;
+        let uv_dims = vec2<i32>(textureDimensions(src_uv));
+        uv_byte = sample_bicubic(src_uv, plane_uv(frame.crop, content_uv), uv_dims).rg * 255.0;
     } else {
-        let y_dims = vec2<i32>(textureDimensions(src_y));
-        y_byte = sample_bicubic(src_y, sample_uv, y_dims).r * 255.0;
+        let sample = sample_screen(frame.crop, content_uv);
+        y_byte = sample.x;
+        uv_byte = sample.yz;
     }
+
+    y_byte = sharpen_luma(y_byte, plane_uv(frame.crop, content_uv), frame.detail.y);
     let screen = yuv_to_rgb(y_byte, uv_byte);
     var color = mix(bg, screen, coverage);
 
@@ -242,6 +349,63 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
                 }
             }
             color = mix(color, ring_color, clamp(ring, 0.0, 1.0) * opacity * coverage);
+        }
+    }
+
+    // Glass Loupe (#2): a lens over the composited frame that magnifies the
+    // segment's target. Drawn here so the cursor (the next pass) stays above it.
+    // A zero radius costs one comparison.
+    let lens_radius = frame.loupe_lens.z;
+    if (lens_radius > 0.5) {
+        let present = clamp(frame.loupe_style.x, 0.0, 1.0);
+        let lens_local = canvas_px - frame.loupe_lens.xy;
+        let lens_sdf = lens_distance(lens_local, lens_radius, frame.loupe_lens.w);
+        let inside = clamp(0.5 - lens_sdf, 0.0, 1.0);
+        // Soft SDF drop shadow underneath the lens.
+        let shadow_falloff = max(frame.loupe_style.y, 1.0);
+        let shadow = exp(-max(lens_sdf, 0.0) / shadow_falloff)
+            * clamp(frame.loupe_style.z, 0.0, 1.0)
+            * (1.0 - inside)
+            * present;
+        color = mix(color, vec3<f32>(0.0), clamp(shadow, 0.0, 0.85));
+
+        if (inside > 0.0) {
+            let lens_uv = clamp(
+                lens_local / (2.0 * lens_radius) + vec2<f32>(0.5, 0.5),
+                vec2<f32>(0.0, 0.0),
+                vec2<f32>(1.0, 1.0),
+            );
+            let radial = length(lens_local) / max(lens_radius, 1.0);
+            let rim = smoothstep(0.82, 1.0, radial);
+            let glass = frame.loupe_style.w > 0.5;
+            // Rim refraction: pull the sample slightly inward near the edge so
+            // the lens edge reads as curved glass rather than a flat crop.
+            let refract = select(0.0, rim * -0.014, glass);
+            let magnify_uv = clamp(
+                lens_uv + (lens_uv - vec2<f32>(0.5, 0.5)) * refract,
+                vec2<f32>(0.0, 0.0),
+                vec2<f32>(1.0, 1.0),
+            );
+            let magnified = sample_screen(frame.loupe_target, magnify_uv);
+            var lens_color = yuv_to_rgb(magnified.x, magnified.yz);
+            let highlight = select(0.0, rim * 0.35, glass);
+            lens_color = mix(lens_color, vec3<f32>(1.0), highlight);
+            color = mix(color, lens_color, inside * present);
+        }
+
+        // Ring: an anti-aliased annulus just inside the lens edge.
+        if (frame.loupe_ring.x > 0.0 && present > 0.0) {
+            let band = border_band(lens_sdf, lens_radius - frame.loupe_ring.x, lens_radius);
+            let ring_color = vec3<f32>(
+                frame.loupe_ring.z,
+                frame.loupe_ring.w,
+                frame.loupe_ring_b.x,
+            );
+            color = mix(
+                color,
+                ring_color,
+                clamp(band, 0.0, 1.0) * clamp(frame.loupe_ring.y, 0.0, 1.0) * present,
+            );
         }
     }
     return vec4<f32>(color, 1.0);

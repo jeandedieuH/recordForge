@@ -80,6 +80,9 @@ pub(super) struct PlaneFrame {
 pub(super) struct CameraFrame {
     pub index: usize,
     pub data: Vec<u8>,
+    /// Optional per-frame pose override (camera layouts, animated video layers):
+    /// canvas `(x, y, w, h)` plus opacity. `None` keeps the static geometry.
+    pub pose: Option<(f64, f64, f64, f64, f64)>,
 }
 
 /// Mask shape for a generated overlay/camera quad.
@@ -226,6 +229,9 @@ impl CanvasFrame {
 /// Everything one output frame needs, excluding the decoded screen frame.
 pub(super) struct FrameRequest {
     pub crop: Crop,
+    /// False on timeline-gap frames (F2): the composite pass paints the canvas
+    /// background only and skips the screen entirely.
+    pub has_screen: bool,
     /// Screen rect on the canvas for this frame (the full content rect, or the
     /// smaller side-by-side slot).
     pub dest: (f64, f64, f64, f64),
@@ -237,6 +243,13 @@ pub(super) struct FrameRequest {
     pub cursor: Option<PlaneFrame>,
     pub items: Option<PlaneFrame>,
     pub keys: Option<PlaneFrame>,
+    /// Motion-blur shutter strip for this frame (#1); `None` keeps the sharp
+    /// single-crop path.
+    pub blur: Option<CropStrip>,
+    /// Glass Loupe pose for this frame (#2); `None` draws no lens.
+    pub loupe: Option<LoupeFrame>,
+    /// RCAS sharpening strength for this frame (0 on identity/hold frames).
+    pub sharpening: f32,
     pub cameras: Vec<CameraFrame>,
     /// Indices into [`CompositorSpec::masks`] active this frame, in plan order.
     pub masks: Vec<usize>,
@@ -260,6 +273,80 @@ struct FrameParams {
     border: [f32; 4],
     border_from: [f32; 4],
     border_to: [f32; 4],
+    // xy = decoded plane size in px (canvas size unless a zoom detail plane is
+    // active), zw unused.
+    plane_size: [f32; 4],
+    // x = motion-blur tap count (1 = off), yzw = shutter-start crop (normalized).
+    blur_a: [f32; 4],
+    // x = 1 when the shutter strip is live, yzw = shutter-end crop (normalized).
+    blur_b: [f32; 4],
+    // x = blur tap count (1 = off), y = RCAS sharpening strength 0..1,
+    // z = 1 when the planes hold a zoom detail plane (#3).
+    detail: [f32; 4],
+    // Glass Loupe (#2): xy = lens centre canvas px, z = radius, w = corner.
+    loupe_lens: [f32; 4],
+    // Magnified region in normalized content uv.
+    loupe_target: [f32; 4],
+    // x = ring width, y = ring opacity, rgb = ring colour.
+    loupe_ring: [f32; 4],
+    loupe_ring_b: [f32; 4],
+    // x = presence, y = shadow blur, z = shadow opacity, w = glass rim.
+    loupe_style: [f32; 4],
+}
+
+/// Motion-blur shutter strip: the zoom crop at the start and end of the shutter
+/// window. The compositor averages the screen along the strip between them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct CropStrip {
+    pub start: Crop,
+    pub end: Crop,
+    /// Tap count, already resolved from the swept pixel distance.
+    pub taps: u32,
+}
+
+/// One frame's Glass Loupe (#2) pose, in compositor-ready form.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct LoupeFrame {
+    /// Lens centre in canvas px.
+    pub center: (f32, f32),
+    pub radius: f32,
+    pub corner_radius: f32,
+    /// Magnified region in normalized content uv.
+    pub target: [f32; 4],
+    pub ring_width: f32,
+    pub ring_opacity: f32,
+    pub ring_color: [f32; 3],
+    pub presence: f32,
+    pub shadow_blur: f32,
+    pub shadow_opacity: f32,
+    pub glass: bool,
+}
+
+impl LoupeFrame {
+    fn rows(&self) -> [[f32; 4]; 5] {
+        [
+            [
+                self.center.0,
+                self.center.1,
+                self.radius,
+                self.corner_radius,
+            ],
+            self.target,
+            [
+                self.ring_width,
+                self.ring_opacity,
+                self.ring_color[0],
+                self.ring_color[1],
+            ],
+            [self.ring_color[2], 0.0, 0.0, 0.0],
+            [
+                self.presence,
+                self.shadow_blur,
+                self.shadow_opacity,
+                f32::from(self.glass),
+            ],
+        ]
+    }
 }
 
 #[repr(C)]
@@ -408,6 +495,9 @@ pub(super) struct Compositor {
     queue: wgpu::Queue,
     width: u32,
     height: u32,
+    /// Decoded plane size: the canvas, or the zoom detail plane (#3).
+    plane_width: u32,
+    plane_height: u32,
     src_y: wgpu::Texture,
     src_uv: wgpu::Texture,
     _stage: [wgpu::Texture; 2],
@@ -448,29 +538,33 @@ impl Compositor {
     pub(super) fn new(
         width: u32,
         height: u32,
+        plane: (u32, u32),
         frame: &CanvasFrame,
         spec: &CompositorSpec,
+        sharpening: f32,
     ) -> Result<Self> {
         if width == 0 || height == 0 || !width.is_multiple_of(4) || !height.is_multiple_of(2) {
             return Err(gpu_error(
                 "GPU compositor needs an even canvas width divisible by 4",
             ));
         }
+        let plane_width = plane.0.max(4) & !3;
+        let plane_height = plane.1.max(2) & !1;
         let shared = shared_gpu()?;
         let device = shared.device.clone();
         let queue = shared.queue.clone();
 
         let src_y = create_plane(
             &device,
-            width,
-            height,
+            plane_width,
+            plane_height,
             wgpu::TextureFormat::R8Unorm,
             "gpu-export-y",
         );
         let src_uv = create_plane(
             &device,
-            width / 2,
-            height / 2,
+            plane_width / 2,
+            plane_height / 2,
             wgpu::TextureFormat::Rg8Unorm,
             "gpu-export-uv",
         );
@@ -558,15 +652,33 @@ impl Compositor {
                 1.0 - f32::from(full_plate),
             ],
             corner: [frame.radius as f32, 0.0, 0.0, 0.0],
+            // The decoded planes are `plane` px with the picture fitted at the
+            // same rect scaled by the plane/canvas ratio.
             source_rect: [
-                frame.rect.0 as f32,
-                frame.rect.1 as f32,
-                frame.rect.2.max(1.0) as f32,
-                frame.rect.3.max(1.0) as f32,
+                (frame.rect.0 * plane_width as f64 / width as f64) as f32,
+                (frame.rect.1 * plane_height as f64 / height as f64) as f32,
+                (frame.rect.2.max(1.0) * plane_width as f64 / width as f64) as f32,
+                (frame.rect.3.max(1.0) * plane_height as f64 / height as f64) as f32,
             ],
             border: border_params[0],
             border_from: border_params[1],
             border_to: border_params[2],
+            plane_size: [plane_width as f32, plane_height as f32, 0.0, 0.0],
+            // Row defaults: one tap (no motion blur) and no detail plane.
+            blur_a: [0.0, 0.0, 1.0, 1.0],
+            blur_b: [0.0, 0.0, 1.0, 1.0],
+            detail: [
+                1.0,
+                sharpening.clamp(0.0, 1.0),
+                f32::from(plane_width != width || plane_height != height),
+                0.0,
+            ],
+            // No lens until a frame asks for one (zero radius disables it).
+            loupe_lens: [0.0; 4],
+            loupe_target: [0.0, 0.0, 1.0, 1.0],
+            loupe_ring: [0.0; 4],
+            loupe_ring_b: [0.0; 4],
+            loupe_style: [0.0; 4],
         };
         let mut sbs_params = params;
         sbs_params.background[3] = 1.0 - f32::from(sbs_plate);
@@ -1042,6 +1154,8 @@ impl Compositor {
             queue,
             width,
             height,
+            plane_width,
+            plane_height,
             src_y,
             src_uv,
             _stage: stage,
@@ -1219,8 +1333,35 @@ impl Compositor {
             request.crop.height as f32 / full.3.max(1.0) as f32,
         ];
         self.params.corner[0] = radius as f32;
+        // Sharpening follows the frame's own crop: an identity frame in a zoom
+        // plan must keep its pixels.
+        self.params.detail[1] = request.sharpening.clamp(0.0, 1.0);
+        // Timeline gaps (F2): the composite pass draws the background only.
+        self.params.detail[3] = if request.has_screen { 1.0 } else { 0.0 };
+        // Motion blur (M2 #1): the shutter strip is expressed in the same
+        // content-pixel space as `crop`, so it normalizes identically.
+        let normalize = |crop: &Crop| -> [f32; 4] {
+            [
+                crop.x as f32 / full.2.max(1.0) as f32,
+                crop.y as f32 / full.3.max(1.0) as f32,
+                crop.width as f32 / full.2.max(1.0) as f32,
+                crop.height as f32 / full.3.max(1.0) as f32,
+            ]
+        };
+        match request.blur {
+            Some(strip) if strip.taps > 1 => {
+                self.params.blur_a = normalize(&strip.start);
+                self.params.blur_b = normalize(&strip.end);
+                self.params.detail[0] = strip.taps as f32;
+            }
+            _ => {
+                self.params.blur_a = self.params.crop;
+                self.params.blur_b = self.params.crop;
+                self.params.detail[0] = 1.0;
+            }
+        }
         // The two bind groups keep their own plate-presence flag; only the
-        // per-frame rect/crop/radius rows are rewritten here.
+        // per-frame rect/crop/radius/blur rows are rewritten here.
         let row = std::mem::size_of::<[f32; 4]>() as u64;
         for buffer in [&self.params_full, &self.params_sbs] {
             self.queue
@@ -1229,6 +1370,21 @@ impl Compositor {
                 .write_buffer(buffer, row * 2, pod_bytes(&self.params.crop));
             self.queue
                 .write_buffer(buffer, row * 4, pod_bytes(&self.params.corner));
+            self.queue
+                .write_buffer(buffer, row * 10, pod_bytes(&self.params.blur_a));
+            self.queue
+                .write_buffer(buffer, row * 11, pod_bytes(&self.params.blur_b));
+            self.queue
+                .write_buffer(buffer, row * 12, pod_bytes(&self.params.detail));
+            // Glass Loupe rows: one lens per frame, zeros when there is none.
+            let loupe_rows = request
+                .loupe
+                .map(|loupe| loupe.rows())
+                .unwrap_or([[0.0; 4]; 5]);
+            for (offset, values) in loupe_rows.iter().enumerate() {
+                self.queue
+                    .write_buffer(buffer, row * (13 + offset as u64), pod_bytes(values));
+            }
         }
 
         let mut encoder = self
@@ -1254,12 +1410,33 @@ impl Compositor {
             let Some(resources) = self.cameras.get(camera.index) else {
                 continue;
             };
-            if let Some(shadow) = &resources.shadow {
-                self.draw_quad(&mut encoder, &self.stage_views[stage], shadow);
+            // Camera layouts / video-layer animation rewrite the quad rect (and
+            // opacity) per frame. The generated border and shadow plates keep
+            // their baked geometry, so they are skipped while the pose moves;
+            // the video quad itself is always correct.
+            let posed = camera.pose.is_some();
+            if let Some((x, y, w, h, opacity)) = camera.pose {
+                self.write_quad_dest(
+                    &resources.camera,
+                    (
+                        x.max(0.0).round() as u32,
+                        y.max(0.0).round() as u32,
+                        w.max(1.0).round() as u32,
+                        h.max(1.0).round() as u32,
+                    ),
+                );
+                self.write_quad_opacity(&resources.camera, opacity.clamp(0.0, 1.0) as f32);
+            }
+            if !posed {
+                if let Some(shadow) = &resources.shadow {
+                    self.draw_quad(&mut encoder, &self.stage_views[stage], shadow);
+                }
             }
             self.draw_quad(&mut encoder, &self.stage_views[stage], &resources.camera);
-            if let Some(border) = &resources.border {
-                self.draw_quad(&mut encoder, &self.stage_views[stage], border);
+            if !posed {
+                if let Some(border) = &resources.border {
+                    self.draw_quad(&mut encoder, &self.stage_views[stage], border);
+                }
             }
         }
         for index in &request.masks {
@@ -1497,7 +1674,7 @@ impl Compositor {
     }
 
     fn upload(&mut self, frame: &Nv12Frame) {
-        let luma_len = self.width as usize * self.height as usize;
+        let luma_len = self.plane_width as usize * self.plane_height as usize;
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.src_y,
@@ -1508,12 +1685,12 @@ impl Compositor {
             &frame.data[..luma_len],
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(self.width),
-                rows_per_image: Some(self.height),
+                bytes_per_row: Some(self.plane_width),
+                rows_per_image: Some(self.plane_height),
             },
             wgpu::Extent3d {
-                width: self.width,
-                height: self.height,
+                width: self.plane_width,
+                height: self.plane_height,
                 depth_or_array_layers: 1,
             },
         );
@@ -1598,6 +1775,16 @@ impl Compositor {
                 dest.2.max(1) as f32,
                 dest.3.max(1) as f32,
             ]),
+        );
+    }
+
+    /// Rewrite one quad's layer opacity (row 3, `x`). The format id in `y` stays
+    /// 0 (NV12), so video layers keep their sampling path.
+    fn write_quad_opacity(&self, quad: &Quad, opacity: f32) {
+        self.queue.write_buffer(
+            &quad.uniform,
+            (std::mem::size_of::<[f32; 4]>() * 3) as u64,
+            pod_bytes(&[opacity.max(0.0), 0.0, 0.0, 0.0]),
         );
     }
 }
@@ -2770,7 +2957,14 @@ mod tests {
     }
 
     fn compositor_for(width: u32, height: u32, frame: CanvasFrame) -> Option<Compositor> {
-        match Compositor::new(width, height, &frame, &CompositorSpec::default()) {
+        match Compositor::new(
+            width,
+            height,
+            (width, height),
+            &frame,
+            &CompositorSpec::default(),
+            0.0,
+        ) {
             Ok(compositor) => Some(compositor),
             Err(error) => {
                 eprintln!("skipping GPU compositor test: {error}");
@@ -2782,6 +2976,10 @@ mod tests {
     fn request(width: u32, height: u32, crop: Crop) -> FrameRequest {
         FrameRequest {
             crop,
+            has_screen: true,
+            blur: None,
+            loupe: None,
+            sharpening: 0.0,
             dest: (0.0, 0.0, width as f64, height as f64),
             radius: 0,
             side_by_side: false,
@@ -3076,9 +3274,15 @@ mod tests {
             }],
             ..Default::default()
         };
-        let Some(mut compositor) =
-            Compositor::new(width, height, &plain_frame(width, height), &spec).ok()
-        else {
+        let Some(mut compositor) = Compositor::new(
+            width,
+            height,
+            (width, height),
+            &plain_frame(width, height),
+            &spec,
+            0.0,
+        )
+        .ok() else {
             return;
         };
         let mut req = request(
@@ -3123,9 +3327,15 @@ mod tests {
             }],
             ..Default::default()
         };
-        let Some(mut compositor) =
-            Compositor::new(width, height, &plain_frame(width, height), &spec).ok()
-        else {
+        let Some(mut compositor) = Compositor::new(
+            width,
+            height,
+            (width, height),
+            &plain_frame(width, height),
+            &spec,
+            0.0,
+        )
+        .ok() else {
             return;
         };
         let mut req = request(
@@ -3163,9 +3373,15 @@ mod tests {
             }],
             ..Default::default()
         };
-        let Some(mut compositor) =
-            Compositor::new(width, height, &plain_frame(width, height), &spec).ok()
-        else {
+        let Some(mut compositor) = Compositor::new(
+            width,
+            height,
+            (width, height),
+            &plain_frame(width, height),
+            &spec,
+            0.0,
+        )
+        .ok() else {
             return;
         };
         let mut req = request(
@@ -3216,9 +3432,15 @@ mod tests {
             }],
             ..Default::default()
         };
-        let Some(mut compositor) =
-            Compositor::new(width, height, &plain_frame(width, height), &spec).ok()
-        else {
+        let Some(mut compositor) = Compositor::new(
+            width,
+            height,
+            (width, height),
+            &plain_frame(width, height),
+            &spec,
+            0.0,
+        )
+        .ok() else {
             return;
         };
         let mut req = request(
@@ -3297,9 +3519,15 @@ mod tests {
             }),
             ..Default::default()
         };
-        let Some(mut compositor) =
-            Compositor::new(width, height, &plain_frame(width, height), &spec).ok()
-        else {
+        let Some(mut compositor) = Compositor::new(
+            width,
+            height,
+            (width, height),
+            &plain_frame(width, height),
+            &spec,
+            0.0,
+        )
+        .ok() else {
             return;
         };
         // Opaque white tile, every plane byte at full value (white Y, neutral

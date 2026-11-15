@@ -4,6 +4,8 @@ import {
   AudioLines,
   Captions,
   FileImage,
+  Film,
+  LayoutTemplate,
   Monitor,
   MousePointer2,
   Music,
@@ -64,6 +66,14 @@ export function getTrackLaneTheme(track: TimelineTrack): LaneTheme {
       return { colorVar: "--color-track-graphic", icon: FileImage, labelMode: "clip" }
     case "overlay":
       return { colorVar: "--color-track-overlay", icon: FileImage, labelMode: "clip" }
+    case "media":
+      // Custom media tracks (#14) reuse the graphic accent until they get a
+      // dedicated token; items label per clip like the other item lanes.
+      return { colorVar: "--color-track-graphic", icon: Film, labelMode: "clip" }
+    case "camera-layouts":
+      // Camera layout lane (#5): no clips, segments in `state.cameraLayouts`.
+      // Reuses the camera accent so the lane reads as part of the bubble.
+      return { colorVar: "--color-track-webcam", icon: LayoutTemplate, labelMode: "clip" }
   }
 }
 
@@ -94,6 +104,7 @@ export function getClipIcon(clip: TimelineClip, track: TimelineTrack): LucideIco
   if (clip.kind === "annotation") return Shapes
   if (clip.kind === "text") return Type
   if (clip.kind === "image") return FileImage
+  if (clip.kind === "video") return Film
   if (clip.kind === "audio" && clip.role === "music") return Music
   if (track.kind === "audio") return Volume2
   return AudioLines

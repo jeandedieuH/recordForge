@@ -32,6 +32,7 @@ import {
   NativeSelect,
   Progress,
   Skeleton,
+  Switch,
   useToast,
 } from "@recordforge/ui"
 import { useLicenseStore } from "../../../stores/license-store"
@@ -144,6 +145,9 @@ export function AiCaptionsCard() {
   const [pendingImport, setPendingImport] = useState<PendingImport | null>(null)
   const [importDialogOpen, setImportDialogOpen] = useState(false)
   const [sourceKey, setSourceKey] = useState<string | null>(null)
+  // Verbatim transcripts keep "um"/"uh" so Smart Cut's filler removal has
+  // something to find; it is a separate cache entry, so toggling re-transcribes.
+  const [keepFillers, setKeepFillers] = useState(false)
   // Live job handle so unmount can cancel + unsubscribe mid-run.
   const jobRef = useRef<{ jobId: string; unlisten: () => void; cancelled: boolean } | null>(null)
 
@@ -379,6 +383,7 @@ export function AiCaptionsCard() {
         language,
         streamIndex: source.streamIndex ?? undefined,
         force: false,
+        verbatim: keepFillers || undefined,
       })
       const design = captionTrack ? resolveCaptionDesign(captionTrack) : DEFAULT_CAPTION_DESIGN
       const result = buildCaptionCuesFromTranscript({
@@ -562,6 +567,14 @@ export function AiCaptionsCard() {
               </p>
             ) : (
               <>
+                <label className="flex items-center justify-between gap-2 text-[11px] text-subtle-foreground">
+                  <span>Keep filler words (verbatim)</span>
+                  <Switch
+                    checked={keepFillers}
+                    onCheckedChange={setKeepFillers}
+                    aria-label="Keep filler words in the transcript"
+                  />
+                </label>
                 <div className="flex items-center gap-2">
                   <Button size="sm" onClick={handleTranscribe} disabled={!recording || !source}>
                     {staleCount > 0 ? "Regenerate captions" : "Transcribe audio"}

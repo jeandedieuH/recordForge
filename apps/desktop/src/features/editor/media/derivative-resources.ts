@@ -207,12 +207,21 @@ export function useWaveformResources(
 
 export interface VideoTrackThumbnailResources {
   byStream: Map<number, DerivativeResource<ThumbnailManifest>>
+  // Imported video assets carry no stream index; their sprite manifest comes
+  // from the asset derivative job and is looked up by asset id (#13 filmstrip).
+  byAsset: Map<string, DerivativeResource<ThumbnailManifest>>
   status: DerivativeResource<null>["status"]
   retry: () => void
 }
 
+export interface AssetThumbnailRequest {
+  assetId: string
+  path: string
+}
+
 export function useVideoTrackThumbnailResources(
   outputs: MediaVideoTrackOutput[],
+  assetManifests: AssetThumbnailRequest[] = [],
   workDir?: string | null,
 ): VideoTrackThumbnailResources {
   const requests = useMemo(
@@ -225,26 +234,39 @@ export function useVideoTrackThumbnailResources(
         })),
     [outputs],
   )
+  const assetRequests = useMemo(
+    () => assetManifests.filter((request) => Boolean(request.path)),
+    [assetManifests],
+  )
   const requestsKey = useMemo(
-    () => requests.map((request) => `${request.streamIndex}:${request.path}`).join("|"),
-    [requests],
+    () =>
+      [
+        requests.map((request) => `s${request.streamIndex}:${request.path}`),
+        assetRequests.map((request) => `a${request.assetId}:${request.path}`),
+      ].join("|"),
+    [requests, assetRequests],
   )
   // Same churn-kill fix as useWaveformResources: run on the content key and
   // read the latest arrays via a ref, or spurious re-runs drop in-flight loads.
-  const latestRequestsRef = useRef(requests)
-  latestRequestsRef.current = requests
+  const latestRequestsRef = useRef({ requests, assetRequests })
+  latestRequestsRef.current = { requests, assetRequests }
 
   const [retryToken, setRetryToken] = useState(0)
   const [byStream, setByStream] = useState<Map<number, DerivativeResource<ThumbnailManifest>>>(
     () => new Map(),
   )
+  const [byAsset, setByAsset] = useState<Map<string, DerivativeResource<ThumbnailManifest>>>(
+    () => new Map(),
+  )
   const retry = useCallback(() => setRetryToken((value) => value + 1), [])
 
   useEffect(() => {
-    const currentRequests = latestRequestsRef.current
+    const { requests: currentRequests, assetRequests: currentAssetRequests } =
+      latestRequestsRef.current
     let isMounted = true
-    if (currentRequests.length === 0) {
+    if (currentRequests.length === 0 && currentAssetRequests.length === 0) {
       setByStream(new Map())
+      setByAsset(new Map())
       return () => {
         isMounted = false
       }
@@ -253,6 +275,11 @@ export function useVideoTrackThumbnailResources(
     setByStream(
       new Map(
         currentRequests.map((request) => [request.streamIndex, { status: "loading" as const }]),
+      ),
+    )
+    setByAsset(
+      new Map(
+        currentAssetRequests.map((request) => [request.assetId, { status: "loading" as const }]),
       ),
     )
 
@@ -270,6 +297,20 @@ export function useVideoTrackThumbnailResources(
     ).then((entries) => {
       if (isMounted) setByStream(new Map(entries))
     })
+    void Promise.all(
+      currentAssetRequests.map(
+        async (request): Promise<[string, DerivativeResource<ThumbnailManifest>]> => {
+          try {
+            const data = await fetchDerivative(request.path, thumbnailManifestSchema, workDir)
+            return [request.assetId, { status: "content", data }]
+          } catch {
+            return [request.assetId, { status: "error", message: derivativeError() }]
+          }
+        },
+      ),
+    ).then((entries) => {
+      if (isMounted) setByAsset(new Map(entries))
+    })
 
     return () => {
       isMounted = false
@@ -278,15 +319,15 @@ export function useVideoTrackThumbnailResources(
   }, [requestsKey, workDir, retryToken])
 
   const status = useMemo<VideoTrackThumbnailResources["status"]>(() => {
-    if (requests.length === 0) return "missing"
-    const states = [...byStream.values()]
+    if (requests.length === 0 && assetRequests.length === 0) return "missing"
+    const states = [...byStream.values(), ...byAsset.values()]
     if (states.length === 0 || states.some((state) => state.status === "loading")) return "loading"
     if (states.some((state) => state.status === "content")) return "content"
     if (states.some((state) => state.status === "error")) return "error"
     return "missing"
-  }, [byStream, requests.length])
+  }, [byStream, byAsset, requests.length, assetRequests.length])
 
-  return { byStream, status, retry }
+  return { byStream, byAsset, status, retry }
 }
 
 export type { ThumbnailManifest, WaveformData }

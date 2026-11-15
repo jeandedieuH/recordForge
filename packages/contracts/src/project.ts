@@ -3,6 +3,7 @@ import { cursorDpiScaleSchema, cursorTelemetryTimebaseSchema } from "./cursor"
 import { boundsSchema } from "./recording"
 import { mediaKindSchema, projectAssetImportStrategySchema, projectAssetRoleSchema } from "./media"
 import {
+  cameraLayoutSegmentSchema,
   manualZoomSegmentSchema,
   smartZoomSettingsSchema,
   timelineCanvasSchema,
@@ -253,6 +254,8 @@ const projectSchemaBase = z.object({
   // Optional for projects created before Phase 6. New edits persist the
   // collection so manual and generated zoom behavior survives reopen.
   zoomSegments: z.array(manualZoomSegmentSchema).optional(),
+  // Camera layout lane (#5); optional so pre-M3 projects load unchanged.
+  cameraLayouts: z.array(cameraLayoutSegmentSchema).optional(),
   smartZoomSettings: smartZoomSettingsSchema.optional(),
   exportSettings: projectExportSettingsSchema,
   createdAt: z.string().datetime({ offset: true }),

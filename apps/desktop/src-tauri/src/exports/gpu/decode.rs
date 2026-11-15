@@ -161,7 +161,10 @@ pub(super) fn plan(
     }
 
     let mut filters: Vec<String> = Vec::new();
-    let mut labels: Vec<String> = Vec::new();
+    // Screen pieces in decode order: (first frame, last frame, filter label,
+    // is_gap). Sorted before the concat so a mid-timeline gap lands between the
+    // right segments.
+    let mut pieces: Vec<(u64, u64, String, bool)> = Vec::new();
     for job in &segment_jobs {
         // Same frame-grid snapping as the compatibility renderer, so both
         // paths emit the identical number of frames per segment.
@@ -201,8 +204,62 @@ pub(super) fn plan(
             frames,
             &label,
         ));
-        labels.push(format!("[{label}]"));
+        pieces.push((start_frame, end_frame, format!("[{label}]"), false));
     }
+
+    // Timeline gaps (F2): every uncovered span becomes a solid black source, so
+    // a b-roll / custom-track plan keeps the GPU path instead of falling back to
+    // FFmpeg. The compositor reports these frames as `has_screen = 0` and paints
+    // only the background plate.
+    let push_black = |filters: &mut Vec<String>,
+                      pieces: &mut Vec<(u64, u64, String, bool)>,
+                      start_frame: u64,
+                      end_frame: u64,
+                      label: String| {
+        let frames = end_frame - start_frame;
+        if frames == 0 {
+            return;
+        }
+        filters.push(format!(
+            "color=c=black:s={width}x{height}:r={fps}:d={},format=nv12,trim=end_frame={frames},setpts=PTS-STARTPTS[{label}]",
+            // One spare frame of headroom so float rounding in `d` can never
+            // produce a short block; the trim pins the exact count.
+            fmt_secs((frames + 1) as f64 / fps.max(1) as f64),
+        ));
+        pieces.push((start_frame, end_frame, format!("[{label}]"), true));
+    };
+    for (gap_index, gap) in plan.gaps.iter().enumerate() {
+        // A trailing gap is the freeze-frame overlay tail, not a hole: the
+        // `tpad=clone` hold below repeats the last screen frame across it.
+        if gap.end_ms >= plan.duration_ms {
+            continue;
+        }
+        let gap_start = (gap.start_ms as f64).clamp(win_start_ms, win_end_ms);
+        let gap_end = (gap.end_ms as f64).clamp(win_start_ms, win_end_ms);
+        if gap_end <= gap_start {
+            continue;
+        }
+        if let Some((start_frame, end_frame)) =
+            window_frame_span(window, fps as f64, gap_start, gap_end)
+        {
+            push_black(
+                &mut filters,
+                &mut pieces,
+                start_frame,
+                end_frame,
+                format!("gap{gap_index}"),
+            );
+        }
+    }
+
+    if pieces.is_empty() {
+        return Err(InternalError::Media(
+            "GPU decode window covers no screen frames or gaps".into(),
+        )
+        .into());
+    }
+    pieces.sort_by_key(|(start_frame, _, _, _)| *start_frame);
+    let labels: Vec<String> = pieces.into_iter().map(|(_, _, label, _)| label).collect();
 
     let video_input = if labels.len() == 1 {
         labels[0].clone()
@@ -311,6 +368,37 @@ pub(super) struct CameraPlan {
 /// Plan one camera track's decode chain. Each piece is trimmed, retimed and
 /// frame-snapped exactly like the compatibility renderer, then the pieces are
 /// concatenated and the shared geometry applied once.
+/// Decode plane size shared by the camera decode pass and the compositor's
+/// camera inventory, so a frame's buffer always matches the quad it is uploaded
+/// into. The plane covers the largest rect the track reaches (layout keyframes
+/// can grow a PiP to fullscreen) and is even-snapped for chroma.
+pub(super) fn camera_decode_size(
+    track: &CameraTrack,
+    overlays: &[RenderPlanOverlay],
+    max_rect: Option<(f64, f64)>,
+) -> (u32, u32) {
+    let first = &overlays[track.first_overlay()];
+    let mut decode_w = first.width.max(0.0);
+    let mut decode_h = first.height.max(0.0);
+    for &overlay_index in &track.pieces {
+        let overlay = &overlays[overlay_index];
+        decode_w = decode_w.max(overlay.width);
+        decode_h = decode_h.max(overlay.height);
+        for keyframe in &overlay.keyframes {
+            decode_w = decode_w.max(keyframe.width);
+            decode_h = decode_h.max(keyframe.height);
+        }
+    }
+    if let Some((layout_w, layout_h)) = max_rect {
+        decode_w = decode_w.max(layout_w);
+        decode_h = decode_h.max(layout_h);
+    }
+    (
+        ((decode_w.round() as u32) / 2 * 2).max(2),
+        ((decode_h.round() as u32) / 2 * 2).max(2),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn plan_camera(
     project_id: &str,
@@ -320,14 +408,16 @@ pub(super) fn plan_camera(
     shared: &CompositionShared,
     duration_ms: u64,
     fps: u32,
+    // Largest rect the layer reaches (camera layouts can grow a PiP to
+    // fullscreen), so a fullscreen moment is not upscaled from PiP pixels.
+    max_rect: Option<(f64, f64)>,
 ) -> Result<Option<CameraPlan>> {
     let first = &overlays[track.first_overlay()];
     let asset_path = asset_paths
         .get(&first.asset_id)
         .cloned()
         .ok_or_else(|| InternalError::Media("camera overlay references an unknown asset".into()))?;
-    let width = ((first.width.round() as u32) / 2 * 2).max(2);
-    let height = ((first.height.round() as u32) / 2 * 2).max(2);
+    let (width, height) = camera_decode_size(track, overlays, max_rect);
 
     let mut clamps = Vec::new();
     for &overlay_index in &track.pieces {
@@ -411,9 +501,21 @@ trim=end_frame={frames},setpts=PTS-STARTPTS[{label}]",
             crop.width, crop.height, crop.x, crop.y
         )
     } else {
-        format!(
-            ",scale={width}:{height}:force_original_aspect_ratio=increase:force_divisible_by=2:threads=auto,crop={width}:{height}:(iw-ow)/2:(ih-oh)/2"
-        )
+        match first.fit.as_deref() {
+            // B-roll letterboxes inside its rect (transparent where it does not
+            // cover, matching the editor preview's `object-fit: contain`).
+            Some("contain") => format!(
+                ",scale={width}:{height}:force_original_aspect_ratio=decrease:force_divisible_by=2:threads=auto,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black@0"
+            ),
+            // `fill` stretches the source across the rect.
+            Some("fill") => {
+                format!(",scale={width}:{height}:force_divisible_by=2:threads=auto")
+            }
+            // Camera bubble and `cover` b-roll: fill the plane and crop.
+            _ => format!(
+                ",scale={width}:{height}:force_original_aspect_ratio=increase:force_divisible_by=2:threads=auto,crop={width}:{height}:(iw-ow)/2:(ih-oh)/2"
+            ),
+        }
     };
     filters.push(format!(
         "{joined}{},format=nv12[vout]",

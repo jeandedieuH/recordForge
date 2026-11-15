@@ -31,6 +31,12 @@ pub(crate) struct ZoomTransformState {
     pub crop_h: f64,
 }
 
+/// True when the segment is a Glass Loupe: it magnifies inside a lens and must
+/// never be resolved as a frame zoom (`resolveLoupes` handles it instead).
+pub(crate) fn segment_is_loupe(segment: &RenderPlanZoomSegment) -> bool {
+    segment.style.as_deref() == Some("loupe")
+}
+
 pub(crate) fn ease_progress(progress: f64, easing: &str) -> f64 {
     let p = progress.clamp(0.0, 1.0);
     match easing {
@@ -175,6 +181,7 @@ pub(crate) fn evaluate_zoom_transform(
         .iter()
         .filter(|segment| {
             segment.enabled
+                && !segment_is_loupe(segment)
                 && output_ms >= segment.start_ms as f64
                 && output_ms < segment.end_ms as f64
         })
@@ -331,7 +338,11 @@ pub(crate) fn window_needs_zoom(
     first_frame: u64,
     frame_count: u64,
 ) -> bool {
-    if frame_count == 0 || !zoom_segments.iter().any(|segment| segment.enabled) {
+    if frame_count == 0
+        || !zoom_segments
+            .iter()
+            .any(|segment| segment.enabled && !segment_is_loupe(segment))
+    {
         return false;
     }
     let fps = canvas.fps.max(1) as f64;
@@ -481,10 +492,9 @@ pub(crate) fn zoom_region_frame_edges(
 ) -> Vec<u64> {
     let fps = fps.max(1) as f64;
     let mut edges = Vec::new();
-    for segment in zoom_segments
-        .iter()
-        .filter(|segment| segment.enabled && segment.end_ms > segment.start_ms)
-    {
+    for segment in zoom_segments.iter().filter(|segment| {
+        segment.enabled && !segment_is_loupe(segment) && segment.end_ms > segment.start_ms
+    }) {
         let start = (segment.start_ms as f64 / 1000.0 * fps).round() as u64;
         let end = (segment.end_ms as f64 / 1000.0 * fps).round() as u64;
         edges.push(start.min(total_frames));
@@ -1042,7 +1052,7 @@ fn collect_zoompan_segment_exprs(
     let mut zoom_segments = plan
         .zoom_segments
         .iter()
-        .filter(|segment| segment.enabled)
+        .filter(|segment| segment.enabled && !segment_is_loupe(segment))
         .collect::<Vec<_>>();
     // Build the expression in ascending order so a later overlapping segment
     // is the outer condition, matching preview and cursor export.
@@ -1651,6 +1661,8 @@ mod tests {
     fn test_plan(zoom_segments: Vec<RenderPlanZoomSegment>) -> RenderPlan {
         RenderPlan {
             project_id: "camera-test".into(),
+            camera_layouts: Vec::new(),
+            layer_order: Vec::new(),
             duration_ms: 5_000,
             segments: vec![super::super::RenderSegment {
                 asset_id: "asset-screen".into(),
@@ -1707,6 +1719,8 @@ mod tests {
         from_target: Option<RenderCropFloat>,
     ) -> RenderPlanZoomSegment {
         RenderPlanZoomSegment {
+            style: None,
+            loupe: None,
             id: id.into(),
             start_ms,
             end_ms,
@@ -2170,6 +2184,8 @@ mod tests {
 
         for case in &fixture.cases {
             let segment = RenderPlanZoomSegment {
+                style: None,
+                loupe: None,
                 id: format!("fixture-{}", case.name),
                 start_ms: case.segment.start_ms,
                 end_ms: case.segment.start_ms + case.segment.duration_ms,

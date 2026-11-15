@@ -26,8 +26,10 @@ interface CameraShotCacheEntry {
 const cameraShotCache = new WeakMap<TimelineState, CameraShotCacheEntry>()
 
 function computeCameraShots(state: TimelineState, cursorEngine: CursorEngine | null): CameraShot[] {
+  // Loupe segments (#2) magnify inside a lens and never move the frame, so the
+  // camera model ignores them; `resolveLoupes` handles them separately.
   const shots: CameraShot[] = (state.zoomSegments ?? [])
-    .filter((segment) => segment.enabled)
+    .filter((segment) => segment.enabled && segment.style !== "loupe")
     .map((segment) => ({ ...segment }))
     .sort((left, right) => left.startMs - right.startMs || left.id.localeCompare(right.id))
 

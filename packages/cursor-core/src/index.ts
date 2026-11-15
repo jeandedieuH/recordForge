@@ -484,9 +484,16 @@ export function zoomSegmentBadges(segment: ManualZoomSegment): ZoomSegmentBadge[
   const badges: ZoomSegmentBadge[] = []
   if (segment.locked) badges.push({ key: "locked", label: "Locked", variant: "secondary" })
 
-  if (segment.mode === "follow-cursor") {
+  if (segment.style === "loupe") {
+    badges.push({ key: "style", label: "Glass Loupe", variant: "default" })
+  }
+
+  // A lens always rides the cursor itself — the camera mode is irrelevant to
+  // it, so a mode badge would be misleading on a loupe segment.
+  const isLoupe = segment.style === "loupe"
+  if (!isLoupe && segment.mode === "follow-cursor") {
     badges.push({ key: "mode", label: "Follow cursor", variant: "default" })
-  } else if (segment.mode === "smooth-pan") {
+  } else if (!isLoupe && segment.mode === "smooth-pan") {
     badges.push({ key: "mode", label: "Pan", variant: "default" })
   }
 

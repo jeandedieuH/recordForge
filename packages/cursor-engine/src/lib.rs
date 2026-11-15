@@ -1207,6 +1207,43 @@ impl CursorEngine {
         packed
     }
 
+    /// Cursor positions across one shutter window, for motion blur (M2 #1).
+    ///
+    /// `shutter` is the shutter fraction of a frame interval (`1.0` = a 180°
+    /// shutter covering the whole `frame_duration_ms`), and the samples are the
+    /// evenly spaced poses the cursor sweeps through while the frame is open.
+    /// Positions come from the same spline the single-time evaluation uses, so
+    /// a blurred cursor sits exactly on the path the sharp one would take —
+    /// including across telemetry segment boundaries.
+    pub fn evaluate_motion_samples(
+        &self,
+        time_ms: f64,
+        frame_duration_ms: f64,
+        shutter: f64,
+        samples: usize,
+        settings: &CursorSettings,
+    ) -> Vec<(f64, f64)> {
+        let count = samples.clamp(1, 32);
+        if self.prepared.is_empty() || !time_ms.is_finite() {
+            return vec![(0.0, 0.0); count];
+        }
+        let half = (frame_duration_ms.max(0.0) * shutter.clamp(0.0, 1.0)) / 2.0;
+        let mut positions = Vec::with_capacity(count);
+        for index in 0..count {
+            // Centre the samples in their sub-intervals so a single sample is
+            // exactly `time_ms`.
+            let progress = if count == 1 {
+                0.5
+            } else {
+                index as f64 / (count - 1) as f64
+            };
+            let sample_ms = time_ms - half + 2.0 * half * progress;
+            let event_index = self.find_event_index(sample_ms);
+            positions.push(self.evaluate_spline_position(event_index, sample_ms, settings));
+        }
+        positions
+    }
+
     fn ensure_smoothed_positions(&self, seg_start: usize, seg_end: usize, alpha: f64) {
         let key = (seg_start, alpha.to_bits());
         if self.smoothing_cache.borrow().iter().any(|(k, _)| *k == key) {

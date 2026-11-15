@@ -9,6 +9,7 @@ import { NumberInputField, ScrollArea, Skeleton, Slider, Switch } from "@recordf
 import { useTimelineStore } from "../../../stores/timeline-store"
 import type { WaveformResources } from "../media/derivative-resources"
 import { SmartCutCard } from "./smart-cut/smart-cut-card"
+import { FillerCutCard } from "./smart-cut/filler-cut-card"
 
 interface AudioPanelProps {
   waveformResources: WaveformResources
@@ -86,6 +87,10 @@ export function AudioPanel({ waveformResources }: AudioPanelProps) {
 
       <div className="border-t border-border pt-3">
         <SmartCutCard waveformResources={waveformResources} />
+      </div>
+
+      <div className="border-t border-border pt-3">
+        <FillerCutCard />
       </div>
     </div>
   )

@@ -39,6 +39,8 @@ import { GradientBackgroundPicker } from "./layout/gradient-background-picker"
 import { ImageBackgroundPicker } from "./layout/image-background-picker"
 import { ShadowControls } from "./layout/shadow-controls"
 import { BorderControls } from "./layout/border-controls"
+import { EffectsControls } from "./layout/effects-controls"
+import { CameraLayoutsCard } from "./layout/camera-layouts-card"
 
 const PADDING_PRESETS = [0, 24, 48, 64, 96]
 const RADIUS_PRESETS = [
@@ -366,6 +368,15 @@ export function LayoutPanel() {
         canvas={canvas}
         onChange={(updates) => execute(createUpdateCanvasCommand(updates))}
       />
+
+      {/* Zoom clarity + motion blur */}
+      <EffectsControls
+        canvas={canvas}
+        onChange={(updates) => execute(createUpdateCanvasCommand(updates))}
+      />
+
+      {/* Camera layout lane (#5) */}
+      <CameraLayoutsCard />
 
       {/* Footer Reset Action */}
       <div className="mt-auto flex flex-col gap-2 pt-2 border-t border-border">

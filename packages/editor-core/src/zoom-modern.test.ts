@@ -378,6 +378,177 @@ describe("Modern Zoom System", () => {
       expect(updated.easing).toBe("spring") // preserved
     })
 
+    it("merges partial loupe settings and clears the lens centre when reset", () => {
+      const initial = makeState()
+      initial.zoomSegments = [
+        {
+          id: "loupe-zoom",
+          startMs: 1_000,
+          durationMs: 2_000,
+          target: { x: 200, y: 100, width: 960, height: 540 },
+          scale: 2,
+          easing: "smooth",
+          enabled: true,
+          locked: false,
+          mode: "manual",
+          style: "loupe",
+          loupe: {
+            shape: "rounded-rect",
+            size: 0.5,
+            cornerRadius: 0.2,
+            ringWidth: 8,
+            ringColor: "#ffffff",
+            ringOpacity: 0.9,
+            glass: true,
+            shadowBlur: 36,
+            shadowOpacity: 0.35,
+            followCursor: false,
+            center: { x: 400, y: 300 },
+            offset: { x: 10, y: -10 },
+          },
+        },
+      ]
+
+      // A partial patch updates one field and keeps the rest.
+      const patchResult = executeCommand(
+        createEngine(initial),
+        createUpdateZoomSegmentCommand("loupe-zoom", { loupe: { ringWidth: 12 } }),
+      )
+      expect(patchResult.ok).toBe(true)
+      if (!patchResult.ok) return
+      const patched = getManualZoomSegments(patchResult.value.history.present)[0]
+      expect(patched.loupe?.ringWidth).toBe(12)
+      expect(patched.loupe?.size).toBe(0.5)
+      expect(patched.loupe?.center).toEqual({ x: 400, y: 300 })
+
+      // "Reset lens position" clears centre/offset by patching them to
+      // undefined — the spread + re-parse merge must actually drop them.
+      const resetResult = executeCommand(
+        patchResult.value,
+        createUpdateZoomSegmentCommand("loupe-zoom", {
+          loupe: { center: undefined, offset: undefined },
+        }),
+      )
+      expect(resetResult.ok).toBe(true)
+      if (!resetResult.ok) return
+      const reset = getManualZoomSegments(resetResult.value.history.present)[0]
+      expect(reset.loupe?.center).toBeUndefined()
+      expect(reset.loupe?.offset).toBeUndefined()
+      expect(reset.loupe?.ringWidth).toBe(12)
+    })
+
+    it("bumps a flat frame zoom to 2x when it becomes a loupe", () => {
+      const initial = makeState()
+      initial.zoomSegments = [
+        {
+          id: "flat-zoom",
+          startMs: 1_000,
+          durationMs: 2_000,
+          target: { x: 200, y: 100, width: 960, height: 540 },
+          scale: 1,
+          easing: "smooth",
+          enabled: true,
+          locked: false,
+          mode: "manual",
+          style: "frame",
+        },
+      ]
+
+      const result = executeCommand(
+        createEngine(initial),
+        createUpdateZoomSegmentCommand("flat-zoom", { style: "loupe" }),
+      )
+      expect(result.ok).toBe(true)
+      if (!result.ok) return
+      const segment = getManualZoomSegments(result.value.history.present)[0]
+      expect(segment.style).toBe("loupe")
+      expect(segment.scale).toBe(2)
+
+      // Switching back to frame keeps the lens magnification — the bump is
+      // only a loupe default, not a scale reset.
+      const back = executeCommand(
+        result.value,
+        createUpdateZoomSegmentCommand("flat-zoom", { style: "frame" }),
+      )
+      expect(back.ok).toBe(true)
+      if (!back.ok) return
+      expect(getManualZoomSegments(back.value.history.present)[0].scale).toBe(2)
+    })
+
+    it("bumps a flat loupe to 2x on add but leaves magnified loupes alone", () => {
+      const added = executeCommand(
+        createEngine(makeState()),
+        createAddZoomSegmentCommand(
+          500,
+          3_500,
+          { x: 200, y: 150, width: 960, height: 540 },
+          { style: "loupe", scale: 1 },
+        ),
+      )
+      expect(added.ok).toBe(true)
+      if (!added.ok) return
+      expect(getManualZoomSegments(added.value.history.present)[0].scale).toBe(2)
+
+      // An existing loupe keeps its scale: neither a loupe settings update nor
+      // a restated style bumps it.
+      const initial = makeState()
+      initial.zoomSegments = [
+        {
+          id: "loupe-zoom",
+          startMs: 1_000,
+          durationMs: 2_000,
+          target: { x: 200, y: 100, width: 960, height: 540 },
+          scale: 2.5,
+          easing: "smooth",
+          enabled: true,
+          locked: false,
+          mode: "manual",
+          style: "loupe",
+        },
+      ]
+      const engine = createEngine(initial)
+      const restyled = executeCommand(
+        engine,
+        createUpdateZoomSegmentCommand("loupe-zoom", { style: "loupe" }),
+      )
+      expect(restyled.ok).toBe(true)
+      if (!restyled.ok) return
+      expect(getManualZoomSegments(restyled.value.history.present)[0].scale).toBe(2.5)
+
+      const updated = executeCommand(
+        restyled.value,
+        createUpdateZoomSegmentCommand("loupe-zoom", { loupe: { ringWidth: 10 } }),
+      )
+      expect(updated.ok).toBe(true)
+      if (!updated.ok) return
+      expect(getManualZoomSegments(updated.value.history.present)[0].scale).toBe(2.5)
+    })
+
+    it("does not touch a frame zoom's scale", () => {
+      const initial = makeState()
+      initial.zoomSegments = [
+        {
+          id: "frame-zoom",
+          startMs: 1_000,
+          durationMs: 2_000,
+          target: { x: 200, y: 100, width: 960, height: 540 },
+          scale: 1,
+          easing: "smooth",
+          enabled: true,
+          locked: false,
+          mode: "manual",
+          style: "frame",
+        },
+      ]
+      const result = executeCommand(
+        createEngine(initial),
+        createUpdateZoomSegmentCommand("frame-zoom", { enabled: false }),
+      )
+      expect(result.ok).toBe(true)
+      if (!result.ok) return
+      expect(getManualZoomSegments(result.value.history.present)[0].scale).toBe(1)
+    })
+
     it("can disable an automatic zoom without deleting its editable range", () => {
       const initial = makeState()
       initial.zoomSegments = [

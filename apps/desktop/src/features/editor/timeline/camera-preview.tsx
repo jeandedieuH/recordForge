@@ -1,11 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import type {
   CameraClip,
+  CameraLayoutSegment,
   ClipTransform,
   MediaVideoTrackOutput,
   TimelineClip,
 } from "@recordforge/contracts"
-import { buildPreviewSegments, type PreviewSegment } from "@recordforge/editor-core"
+import {
+  buildPreviewSegments,
+  resolveCameraLayoutPoseAt,
+  type PreviewSegment,
+} from "@recordforge/editor-core"
 import { cn } from "@recordforge/ui"
 import { Circle, Square } from "lucide-react"
 import { toAssetUrl } from "../media/derivative-resources"
@@ -22,6 +27,10 @@ interface CameraPreviewProps {
   frameMs: number
   canvasWidth: number
   canvasHeight: number
+  /** Canvas padding, so camera layouts resolve the fitted screen rect. */
+  canvasPadding?: number
+  /** Camera layout lane (#5); an active window overrides the clip transform. */
+  cameraLayouts?: CameraLayoutSegment[]
   /** CSS px per canvas px in the preview, so border widths match the render. */
   previewScale?: number
   selectedClipId?: string | null
@@ -169,6 +178,8 @@ interface CameraStreamSurfaceProps {
   frameMs: number
   canvasWidth: number
   canvasHeight: number
+  canvasPadding?: number
+  cameraLayouts?: CameraLayoutSegment[]
   previewScale?: number
   selectedClipId?: string | null
   onSelectClip?: (clipId: string) => void
@@ -187,6 +198,8 @@ function CameraStreamSurface({
   frameMs,
   canvasWidth,
   canvasHeight,
+  canvasPadding = 0,
+  cameraLayouts,
   previewScale = 1,
   selectedClipId,
   onSelectClip,
@@ -253,7 +266,29 @@ function CameraStreamSurface({
     group.clips.find(
       (clip) => isClipActive(clip, playheadMs) && clip.transform.visible !== false,
     ) ?? null
-  const transform = activeClip?.transform ?? group.clips[0]?.transform
+  // Camera layout lane (#5): an active window owns the camera geometry, so the
+  // preview shows exactly what the export plan will render.
+  const layoutPose =
+    activeClip && cameraLayouts && cameraLayouts.length > 0
+      ? (resolveCameraLayoutPoseAt(
+          { width: canvasWidth, height: canvasHeight, padding: canvasPadding },
+          cameraLayouts,
+          playheadMs,
+          activeClip.transform,
+        )?.pose ?? null)
+      : null
+  let transform = activeClip?.transform ?? group.clips[0]?.transform
+  if (activeClip && layoutPose) {
+    transform = {
+      ...activeClip.transform,
+      x: layoutPose.camera.x,
+      y: layoutPose.camera.y,
+      width: layoutPose.camera.width,
+      height: layoutPose.camera.height,
+      opacity: layoutPose.opacity,
+      shape: layoutPose.shape,
+    }
+  }
   if (!transform) return null
   const isActive = activeClip !== null
   const isLocked = transform.locked === true
@@ -284,6 +319,9 @@ function CameraStreamSurface({
   ) {
     if (!activeClip) return
     onSelectClip?.(activeClip.id)
+    // A layout window owns the geometry: dragging the bubble would fight the
+    // lane, so only selection is allowed while one is active.
+    if (layoutPose) return
     if (!onUpdateTransform || event.button !== 0 || transform.locked) return
     event.stopPropagation()
     event.preventDefault()
@@ -651,6 +689,8 @@ export function CameraPreview({
   frameMs,
   canvasWidth,
   canvasHeight,
+  canvasPadding,
+  cameraLayouts,
   previewScale,
   selectedClipId,
   onSelectClip,
@@ -671,6 +711,8 @@ export function CameraPreview({
           frameMs={frameMs}
           canvasWidth={canvasWidth}
           canvasHeight={canvasHeight}
+          canvasPadding={canvasPadding}
+          cameraLayouts={cameraLayouts}
           previewScale={previewScale}
           selectedClipId={selectedClipId}
           onSelectClip={onSelectClip}

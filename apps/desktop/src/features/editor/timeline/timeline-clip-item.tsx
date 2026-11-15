@@ -147,6 +147,7 @@ function getClipLabel(clip: TimelineClip, track: TimelineTrack): string {
     return clip.text ? `${clip.annotationType} (${clip.text})` : `${clip.annotationType} shape`
   if (clip.kind === "text") return clip.primaryText || "Title"
   if (clip.kind === "image") return "Graphic overlay"
+  if (clip.kind === "video") return "Video clip"
   if (clip.kind === "audio" && clip.role === "music") return "Music Track"
   return track.name
 }

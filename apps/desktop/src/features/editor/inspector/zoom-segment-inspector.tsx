@@ -5,6 +5,7 @@ import { zoomSegmentBadges, zoomTargetForCursorPoint } from "@recordforge/cursor
 import {
   createDeleteZoomSegmentCommand,
   createSplitZoomSegmentCommand,
+  resolveLoupeSettings,
 } from "@recordforge/editor-core"
 import { Lock, Unlock, ZoomIn } from "lucide-react"
 import {
@@ -110,6 +111,10 @@ export function ZoomSegmentInspector({ segment, onClear }: ZoomSegmentInspectorP
   const canvasHeight = timeline?.canvas.height ?? 1080
   const currentScale = Math.max(1, Math.min(8, canvasWidth / Math.max(1, segment.target.width)))
   const isFollowMode = segment.mode === "follow-cursor"
+  // A loupe never zooms the frame — the frame-follow controls below are
+  // hidden for it; the lens always rides the cursor instead.
+  const isLoupe = segment.style === "loupe"
+  const loupe = resolveLoupeSettings(segment.loupe)
 
   function applyScalePreset(targetScale: number) {
     const safeScale = Math.max(1.05, Math.min(8, targetScale))
@@ -231,54 +236,58 @@ export function ZoomSegmentInspector({ segment, onClear }: ZoomSegmentInspectorP
 
       {/* Camera */}
       <div className="flex flex-col gap-3 rounded-xl border border-border bg-surface p-3">
-        <div className="flex flex-col gap-1.5">
-          <span className="text-[11px] font-semibold text-foreground">Camera mode</span>
-          <ToggleGroup
-            type="single"
-            aria-label="Camera mode"
-            value={isFollowMode ? "follow-cursor" : "static"}
-            disabled={segment.locked}
-            onValueChange={(value) => {
-              if (!value) return
-              handleUpdate({ mode: value as "follow-cursor" | "static" })
-            }}
-            className="flex w-full rounded-md border border-border"
-          >
-            <ToggleGroupItem value="follow-cursor" className="h-7 flex-1 px-2 text-[11px]">
-              Follow cursor
-            </ToggleGroupItem>
-            <ToggleGroupItem value="static" className="h-7 flex-1 px-2 text-[11px]">
-              Fixed focus
-            </ToggleGroupItem>
-          </ToggleGroup>
-        </div>
-
-        {isFollowMode ? (
-          <div className="flex flex-col gap-1.5">
-            <span className="text-[11px] text-subtle-foreground">Follow speed</span>
-            <ToggleGroup
-              type="single"
-              aria-label="Follow speed"
-              value={segment.followSpeed ?? "balanced"}
-              disabled={segment.locked}
-              onValueChange={(value) => {
-                if (!value) return
-                handleUpdate({ followSpeed: value as FollowSpeed })
-              }}
-              className="flex w-full rounded-md border border-border"
-            >
-              {FOLLOW_SPEED_OPTIONS.map((option) => (
-                <ToggleGroupItem
-                  key={option.value}
-                  value={option.value}
-                  className="h-7 flex-1 px-2 text-[11px]"
-                >
-                  {option.label}
+        {isLoupe ? null : (
+          <>
+            <div className="flex flex-col gap-1.5">
+              <span className="text-[11px] font-semibold text-foreground">Camera mode</span>
+              <ToggleGroup
+                type="single"
+                aria-label="Camera mode"
+                value={isFollowMode ? "follow-cursor" : "static"}
+                disabled={segment.locked}
+                onValueChange={(value) => {
+                  if (!value) return
+                  handleUpdate({ mode: value as "follow-cursor" | "static" })
+                }}
+                className="flex w-full rounded-md border border-border"
+              >
+                <ToggleGroupItem value="follow-cursor" className="h-7 flex-1 px-2 text-[11px]">
+                  Follow cursor
                 </ToggleGroupItem>
-              ))}
-            </ToggleGroup>
-          </div>
-        ) : null}
+                <ToggleGroupItem value="static" className="h-7 flex-1 px-2 text-[11px]">
+                  Fixed focus
+                </ToggleGroupItem>
+              </ToggleGroup>
+            </div>
+
+            {isFollowMode ? (
+              <div className="flex flex-col gap-1.5">
+                <span className="text-[11px] text-subtle-foreground">Follow speed</span>
+                <ToggleGroup
+                  type="single"
+                  aria-label="Follow speed"
+                  value={segment.followSpeed ?? "balanced"}
+                  disabled={segment.locked}
+                  onValueChange={(value) => {
+                    if (!value) return
+                    handleUpdate({ followSpeed: value as FollowSpeed })
+                  }}
+                  className="flex w-full rounded-md border border-border"
+                >
+                  {FOLLOW_SPEED_OPTIONS.map((option) => (
+                    <ToggleGroupItem
+                      key={option.value}
+                      value={option.value}
+                      className="h-7 flex-1 px-2 text-[11px]"
+                    >
+                      {option.label}
+                    </ToggleGroupItem>
+                  ))}
+                </ToggleGroup>
+              </div>
+            ) : null}
+          </>
+        )}
 
         <div className="flex items-center justify-between gap-2 text-[11px] text-subtle-foreground">
           <span>Zoom feel</span>
@@ -347,6 +356,144 @@ export function ZoomSegmentInspector({ segment, onClear }: ZoomSegmentInspectorP
           <span>Magnification</span>
           <span className="font-mono tabular-nums">{currentScale.toFixed(2)}×</span>
         </div>
+      </div>
+
+      {/* Presentation — "frame" zooms the recorded frame; "loupe" keeps the
+          frame untouched and floats a magnifying lens over the target. */}
+      <div className="flex flex-col gap-3 rounded-xl border border-border bg-surface p-3">
+        <div className="flex flex-col gap-1.5">
+          <span className="text-[11px] font-semibold text-foreground">Presentation</span>
+          <ToggleGroup
+            type="single"
+            aria-label="Presentation"
+            value={isLoupe ? "loupe" : "frame"}
+            disabled={segment.locked}
+            onValueChange={(value) => {
+              if (value === "frame" || value === "loupe") handleUpdate({ style: value })
+            }}
+            className="flex w-full rounded-md border border-border"
+          >
+            <ToggleGroupItem value="frame" className="h-7 flex-1 px-2 text-[11px]">
+              Zoom frame
+            </ToggleGroupItem>
+            <ToggleGroupItem value="loupe" className="h-7 flex-1 px-2 text-[11px]">
+              <span className="flex items-center justify-center gap-1">
+                Glass Loupe
+                <span className="rounded-sm bg-primary/15 px-1 py-0.5 font-mono text-[9px] font-semibold uppercase tracking-wider text-primary">
+                  Pro
+                </span>
+              </span>
+            </ToggleGroupItem>
+          </ToggleGroup>
+        </div>
+
+        {isLoupe ? (
+          <>
+            <div className="flex flex-col gap-1.5">
+              <span className="text-[11px] text-subtle-foreground">Lens shape</span>
+              <ToggleGroup
+                type="single"
+                aria-label="Lens shape"
+                value={loupe.shape}
+                disabled={segment.locked}
+                onValueChange={(value) => {
+                  if (value === "circle" || value === "rounded-rect") {
+                    handleUpdate({ loupe: { shape: value } })
+                  }
+                }}
+                className="flex w-full rounded-md border border-border"
+              >
+                <ToggleGroupItem value="circle" className="h-7 flex-1 px-2 text-[11px]">
+                  Circle
+                </ToggleGroupItem>
+                <ToggleGroupItem value="rounded-rect" className="h-7 flex-1 px-2 text-[11px]">
+                  Rounded
+                </ToggleGroupItem>
+              </ToggleGroup>
+            </div>
+
+            <div className="flex flex-col gap-1.5">
+              <div className="flex justify-between text-[11px] text-subtle-foreground">
+                <span>Lens size</span>
+                <span className="font-mono tabular-nums">{Math.round(loupe.size * 100)}%</span>
+              </div>
+              <DebouncedSlider
+                value={[loupe.size * 100]}
+                min={8}
+                max={100}
+                step={1}
+                disabled={segment.locked}
+                onValueCommit={([value]) => handleUpdate({ loupe: { size: value / 100 } })}
+                aria-label="Lens size"
+              />
+            </div>
+
+            {loupe.shape === "rounded-rect" ? (
+              <div className="flex flex-col gap-1.5">
+                <div className="flex justify-between text-[11px] text-subtle-foreground">
+                  <span>Corner radius</span>
+                  <span className="font-mono tabular-nums">
+                    {Math.round(loupe.cornerRadius * 100)}%
+                  </span>
+                </div>
+                <DebouncedSlider
+                  value={[loupe.cornerRadius * 100]}
+                  min={0}
+                  max={50}
+                  step={1}
+                  disabled={segment.locked}
+                  onValueCommit={([value]) =>
+                    handleUpdate({ loupe: { cornerRadius: value / 100 } })
+                  }
+                  aria-label="Lens corner radius"
+                />
+              </div>
+            ) : null}
+
+            <div className="flex flex-col gap-1.5">
+              <div className="flex justify-between text-[11px] text-subtle-foreground">
+                <span>Ring width</span>
+                <span className="font-mono tabular-nums">{Math.round(loupe.ringWidth)}</span>
+              </div>
+              <DebouncedSlider
+                value={[loupe.ringWidth]}
+                min={0}
+                max={64}
+                step={1}
+                disabled={segment.locked}
+                onValueCommit={([value]) => handleUpdate({ loupe: { ringWidth: value } })}
+                aria-label="Lens ring width"
+              />
+            </div>
+
+            <div className="flex items-center justify-between text-[11px] text-subtle-foreground">
+              <span>Glass rim</span>
+              <Switch
+                checked={loupe.glass}
+                disabled={segment.locked}
+                onCheckedChange={(glass) => handleUpdate({ loupe: { glass } })}
+                aria-label="Glass rim"
+              />
+            </div>
+
+            {/* The lens always rides the cursor tip; canvas drags only nudge
+                it via `loupe.offset`, so "reset" clears that nudge (and any
+                legacy parked `center`). */}
+            <p className="text-[11px] leading-relaxed text-subtle-foreground">
+              The lens always follows the cursor — drag it on the canvas to nudge its position.
+            </p>
+
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 text-[10px]"
+              disabled={segment.locked || (loupe.center === undefined && loupe.offset === undefined)}
+              onClick={() => handleUpdate({ loupe: { center: undefined, offset: undefined } })}
+            >
+              Reset lens position
+            </Button>
+          </>
+        ) : null}
       </div>
 
       {/* 2D Canvas Mini-map Focal Repositioner */}

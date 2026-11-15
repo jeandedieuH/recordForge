@@ -104,6 +104,19 @@ export function analyzeProFeatureUsage(
     push("keystroke-overlay", 1, "keystroke badges")
   }
 
+  // M2 effects (ADR 020). Motion blur and Glass Loupe are Pro; zoom clarity
+  // (#3) is Free and deliberately absent here.
+  if (timeline.canvas.motionBlur?.enabled) {
+    push("motion-blur", 1, "Motion blur")
+  }
+
+  const loupes = (timeline.zoomSegments ?? []).filter(
+    (segment) => segment.enabled && segment.style === "loupe",
+  )
+  if (loupes.length > 0) {
+    push("glass-loupe", loupes.length, pluralize(loupes.length, "Glass Loupe zoom"))
+  }
+
   return {
     features,
     requiresPro: features.length > 0,
