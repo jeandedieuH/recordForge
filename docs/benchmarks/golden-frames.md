@@ -1,0 +1,79 @@
+# Golden-frame export parity
+
+The unit and render-smoke tests prove that a plan draws _something_; they do not
+prove the exported pixels are unchanged. The golden-frame suite closes that gap
+by comparing decoded frames of a real MP4 against checked-in PNG goldens with
+FFmpeg's PSNR and SSIM filters.
+
+## What it covers
+
+`golden-spec.ts` builds the canonical fixture: a designed title, a filled
+annotation and a shadowed curved connector, plus a one-second overlay-only tail.
+The `3500.png` golden therefore pins the freeze-frame tail as well as the
+overlay raster paths that have regressed before. `--long-tail` additionally
+emits a 20 s chunked export whose tail spans several default chunks; the
+`long-tail/` goldens prove the held frame survives chunk boundaries. `--gpu`
+emits the same plan for the wgpu compositor, which exercises the GPU decode
+pass's last-frame hold. The `items` ablation from `export-synth-spec.ts` remains
+available for a broader fixture; prefer small, deterministic ones so goldens
+stay reviewable.
+
+## Create or refresh goldens
+
+The dedicated fixture is a 480x270 / 3 s screen plus a real `ExportHarnessSpec`
+that carries a designed title, a filled annotation and a shadowed curved
+connector. Run this only after reviewing the render (the compatibility renderer
+with a single pass, so encoder rate control cannot couple frames):
+
+```bash
+bun run --cwd tooling/benchmarks benchmark:golden:spec -- --long-tail --gpu
+cd apps/desktop/src-tauri
+cargo build --features export-harness --bin export_harness
+./target/debug/export_harness.exe ../../../tooling/benchmarks/out/golden/spec_golden.json
+./target/debug/export_harness.exe ../../../tooling/benchmarks/out/golden/spec_longtail.json
+./target/debug/export_harness.exe ../../../tooling/benchmarks/out/golden/spec_gpu_golden.json
+./target/debug/export_harness.exe ../../../tooling/benchmarks/out/golden/spec_longtail_gpu.json
+cd ../../..
+bun run --cwd tooling/benchmarks benchmark:golden \
+  out/golden/render_golden.mp4 golden/items --update
+bun run --cwd tooling/benchmarks benchmark:golden \
+  out/golden/render_longtail.mp4 golden/long-tail --times 10000,18000 --update
+```
+
+(`--release` works too; a debug harness keeps the fixture run inexpensive. On
+Windows the binary has an `.exe` suffix.)
+
+`export-synth-spec.ts` remains the broader parity matrix; its `items` ablation
+also works with `--times 2000,7000,12000,21000` if a larger fixture is wanted.
+
+Commit the generated `tooling/benchmarks/golden/items/*.png` files with the
+change that produced them, and note the encoder/compositor in the commit body.
+The default timestamps (`500,1500,2500,3500`) cover the early title/annotation
+state, the steady state, the late exit and the freeze-frame overlay tail. Pass
+`--times` for another spec.
+
+## Verify a candidate
+
+```bash
+bun run --cwd tooling/benchmarks benchmark:golden out/golden/render_golden.mp4 golden/items
+bun run --cwd tooling/benchmarks benchmark:golden \
+  out/golden/render_longtail.mp4 golden/long-tail --times 10000,18000
+# GPU candidates: same frames, resampler budget instead of identity.
+bun run --cwd tooling/benchmarks benchmark:golden \
+  out/golden/render_gpu_golden.mp4 golden/items --min-psnr 28 --min-ssim 0.9
+bun run --cwd tooling/benchmarks benchmark:golden \
+  out/golden/render_longtail_gpu.mp4 golden/long-tail --times 10000,18000 \
+  --min-psnr 28 --min-ssim 0.9
+```
+
+The command exits non-zero when a golden is missing or a frame falls below
+`--min-psnr 35` / `--min-ssim 0.98`. Exact or near-exact frames are expected for
+the software single-pass path; the same thresholds work for the GPU renderer's
+`renderer` parity budget.
+
+## Why not compare against the browser preview?
+
+The preview is a canvas 2D rasterization, not the export compositor. The
+maintainable contract is "the export still produces the approved pixels"; the
+shared Rust scene and the preview/export parity unit tests cover the
+preview-side geometry.
