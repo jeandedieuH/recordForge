@@ -1,5 +1,11 @@
-import { useId, useState } from "react"
-import { createApplyLookCommand, lookValuesSchema, type LookValues } from "@recordforge/editor-core"
+import { useId, useRef, useState } from "react"
+import {
+  applyLookToState,
+  createApplyLookCommand,
+  lookValuesSchema,
+  type LookValues,
+} from "@recordforge/editor-core"
+import type { TimelineState } from "@recordforge/contracts"
 import { Button, Input, Skeleton, Switch, cn, useToast } from "@recordforge/ui"
 import { Save, Sparkles } from "lucide-react"
 import { useTimelineStore } from "../../../../stores/timeline-store"
@@ -22,8 +28,30 @@ export function LooksCard() {
   const [includeAspectRatio, setIncludeAspectRatio] = useState(false)
   const [saveName, setSaveName] = useState("")
   const nameId = useId()
+  // Tracks the draft we installed for hover preview so we never clear a
+  // draft that belongs to an in-progress drag gesture.
+  const previewDraft = useRef<TimelineState | null>(null)
+
+  // Hover preview: push the applied look through `draftTimeline` — the same
+  // transient channel gestures use — so canvas, camera and cursor changes
+  // show in the real preview without touching undo history.
+  function previewLook(look: LookValues) {
+    if (!timeline) return
+    const draft = applyLookToState(timeline, look, { includeAspectRatio })
+    previewDraft.current = draft
+    useTimelineStore.getState().setDraftTimeline(draft)
+  }
+
+  function endLookPreview() {
+    const draft = previewDraft.current
+    previewDraft.current = null
+    if (!draft) return
+    const store = useTimelineStore.getState()
+    if (store.draftTimeline === draft) store.clearDraft()
+  }
 
   function applyLook(look: LookValues, name: string) {
+    endLookPreview()
     const ok = execute(
       createApplyLookCommand(look, { name: `Apply look: ${name}`, includeAspectRatio }),
     )
@@ -56,6 +84,9 @@ export function LooksCard() {
     )?.pip
     const values: LookValues = lookValuesSchema.parse({
       version: 1,
+      // Custom image backgrounds are `data:` URLs, so they travel inside the
+      // look record itself — portable across projects with no app-data copy
+      // step and no new filesystem surface.
       canvas: {
         background: canvas.background,
         padding: canvas.padding,
@@ -171,6 +202,10 @@ export function LooksCard() {
                   ? openUpgradeDialog(["custom-looks"])
                   : applyLook(preset.definition, preset.name)
               }
+              onMouseEnter={() => previewLook(preset.definition)}
+              onMouseLeave={endLookPreview}
+              onFocus={() => previewLook(preset.definition)}
+              onBlur={endLookPreview}
               className={cn(
                 "flex flex-col items-start gap-1 rounded-lg border border-border/60 bg-surface p-2 text-left transition-colors",
                 "hover:border-primary/50 hover:bg-surface-hover",

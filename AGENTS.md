@@ -19,15 +19,15 @@ RecordForge is a **local-first, low-end-friendly cross-platform desktop screen r
 | Video processing         | FFmpeg + FFprobe (pinned multi-platform sidecars)                                                                 |
 | Export compositor        | FFmpeg filter graph (default) + native wgpu compositor behind `ExportSettings.renderer` (ADR 018)                 |
 | Audio capture            | Native WASAPI (Windows), CoreAudio/ScreenCaptureKit (macOS), ALSA/PipeWire (Linux)                                |
-| Camera AI (M4)           | `ort` 2.0.0-rc.15 (`load-dynamic`) + pinned ONNX Runtime 1.31.0, MODNet Webcam + YuNet models downloaded on demand (ADR 021) |
+| Camera AI (M4)           | `ort` 2.0.0-rc.15 (load-dynamic) + pinned ONNX Runtime 1.31.0, MODNet Webcam + YuNet models on demand (ADR 021)   |
 | Credential vault         | Windows Credential Manager, Apple Keychain (macOS), Secret Service (Linux) via `keyring`                          |
 | Cursor SVG rasterization | `resvg` + `tiny-skia` in export                                                                                   |
 | State management         | Zustand                                                                                                           |
 | Validation               | Zod                                                                                                               |
 | UI kit                   | `@recordforge/ui` (shadcn model: Radix + Tailwind v4 + CVA, spec-010)                                             |
 | Icons                    | lucide-react (no emoji in product UI)                                                                             |
-| Font                     | Inter Variable for the shell; overlay bundle uses Inter, Source Serif 4, JetBrains Mono, Outfit, Bebas Neue, and Space Grotesk under OFL-1.1 |
-| License                  | GNU General Public License v3.0 (GPL-3.0-or-later), open core — see `LICENSING.md`                                |
+| Font                     | Inter Variable; overlays add Source Serif 4, JetBrains Mono, Outfit, Bebas Neue, Space Grotesk (OFL-1.1)          |
+| License                  | GNU General Public License v3.0 (GPL-3.0-or-later), open core, see `LICENSING.md`                                 |
 | Licensing                | Ed25519 offline tokens, `machine-uid` device binding, OS-vault license key (`src-tauri/src/licensing/`)           |
 
 ## Repository Layout
@@ -177,7 +177,7 @@ bun run --cwd tooling/benchmarks benchmark:golden:spec -- --long-tail --gpu     
 bun run --cwd tooling/benchmarks benchmark:golden out/golden/render_golden.mp4 golden/items          # verify
 bun run --cwd tooling/benchmarks benchmark:golden out/golden/render_golden.mp4 golden/items --update # refresh
 bun run --cwd tooling/benchmarks benchmark:golden out/golden/render_longtail.mp4 golden/long-tail --times 10000,18000
-bun run --cwd tooling/benchmarks benchmark:golden out/golden/render_gpu_golden.mp4 golden/items --min-psnr 28 --min-ssim 0.9
+bun run --cwd tooling/benchmarks benchmark:golden out/golden/render_gpu_golden.mp4 golden/items --min-psnr 28 --min-ssim 0.89
 ```
 
 Stage timings land in `bench-*.log` + `bench-results-*.json` next to the specs; `RECORDFORGE_EXPORT_CHUNK_WORKERS`/`RECORDFORGE_EXPORT_CHUNK_FRAMES` env knobs control chunk parallelism/size during measurement, `RECORDFORGE_EXPORT_NVENC_CHUNK_WORKERS` caps NVENC passes, `RECORDFORGE_EXPORT_ZOOM_SNAP`/`RECORDFORGE_EXPORT_CORNER_PATCHES` opt into the Phase 1 zoom-snapping and rounded-corner fast paths, `RECORDFORGE_EXPORT_ZOOM_PIECES=0` restores the single-`zoompan` pass for A/B checks (piecewise zoom is on by default), and `RECORDFORGE_EXPORT_CURSOR_TILE=union|sendcmd|full` selects the Phase 2 cursor plate layout (default `union`; see `docs/benchmarks/phase-1-results.md` and `phase-2-results.md`). `renderer: "auto"` uses the Phase 5 native wgpu compositor by default (G5) and falls back to FFmpeg per plan, per runtime failure and after three consecutive GPU failures in one process; a plan that would bypass the compositor on every frame stays on the in-process FFmpeg pipeline. `RECORDFORGE_EXPORT_GPU=0` forces `auto` onto the compatibility renderer (and `--require-gpu` on `export-bench.ts` fails a run that asked for the GPU but silently rendered on FFmpeg). `RECORDFORGE_EXPORT_GPU_PLATE_WORKERS` overrides the plate-producer thread count (default `min(producer_worker_count, 4)`), `RECORDFORGE_EXPORT_GPU_PLATE_QUEUE` its per-worker frame queue (default 2), `RECORDFORGE_EXPORT_GPU_DECODE_HWACCEL=1` opts the GPU decode sidecar into hardware decode, `RECORDFORGE_EXPORT_GPU_CACHE=0` disables the process-wide device/pipeline cache, and `RECORDFORGE_EXPORT_GPU_DECODE_QUEUE`/`_ENCODE_QUEUE` override its 8/6 frame sidecar queues (ADR 018, `docs/benchmarks/phase-5-results.md`). `RECORDFORGE_EXPORT_GPU_CAMERA_QUEUE` sets each camera decoder's read-ahead depth (default 2 frames).

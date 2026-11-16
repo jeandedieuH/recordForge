@@ -105,7 +105,27 @@ const plan = {
       height: 90,
       presetId: "text-clean",
       category: "title",
-      titleDesign: { version: 1, template: "clean-text", motion: "subtle" },
+      // v2 design exercising the new raster paths: gradient fill, stroke,
+      // shadow, and an emphasis span — the v1 payload migrated to this shape.
+      titleDesign: {
+        version: 2,
+        template: "hook-emphasis",
+        emphasis: { text: "Golden", style: "marker" },
+        fill: {
+          kind: "gradient",
+          gradientAngle: 135,
+          gradientStops: [
+            { offset: 0, color: "#ffffff" },
+            { offset: 1, color: "#93c5fd" },
+          ],
+        },
+        stroke: { color: "#0f172a", width: 1.5 },
+        shadow: { color: "rgba(0,0,0,0.5)", blur: 14, offsetX: 0, offsetY: 4 },
+        animation: {
+          in: { preset: "rise", durationMs: 400 },
+          out: { preset: "fade", durationMs: 300 },
+        },
+      },
       backdropStyle: "solid",
       backdropColor: "#0f172a",
       backdropOpacity: 0.75,
