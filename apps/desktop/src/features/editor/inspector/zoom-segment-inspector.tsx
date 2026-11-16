@@ -487,7 +487,9 @@ export function ZoomSegmentInspector({ segment, onClear }: ZoomSegmentInspectorP
               variant="outline"
               size="sm"
               className="h-7 text-[10px]"
-              disabled={segment.locked || (loupe.center === undefined && loupe.offset === undefined)}
+              disabled={
+                segment.locked || (loupe.center === undefined && loupe.offset === undefined)
+              }
               onClick={() => handleUpdate({ loupe: { center: undefined, offset: undefined } })}
             >
               Reset lens position

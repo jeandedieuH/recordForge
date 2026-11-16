@@ -134,23 +134,10 @@ export const titleFontFamilySchema = z.enum([
 ])
 export type TitleFontFamily = z.infer<typeof titleFontFamilySchema>
 
-export const titleFontWeightSchema = z.enum([
-  "300",
-  "400",
-  "500",
-  "600",
-  "700",
-  "800",
-  "900",
-])
+export const titleFontWeightSchema = z.enum(["300", "400", "500", "600", "700", "800", "900"])
 export type TitleFontWeight = z.infer<typeof titleFontWeightSchema>
 
-export const titleTextTransformSchema = z.enum([
-  "none",
-  "uppercase",
-  "lowercase",
-  "capitalize",
-])
+export const titleTextTransformSchema = z.enum(["none", "uppercase", "lowercase", "capitalize"])
 export type TitleTextTransform = z.infer<typeof titleTextTransformSchema>
 
 export const titleTextAlignSchema = z.enum(["left", "center", "right"])
@@ -230,13 +217,7 @@ export const titleGlowSchema = z.object({
 })
 export type TitleGlow = z.infer<typeof titleGlowSchema>
 
-export const titleEmphasisStyleSchema = z.enum([
-  "color",
-  "marker",
-  "underline",
-  "strike",
-  "box",
-])
+export const titleEmphasisStyleSchema = z.enum(["color", "marker", "underline", "strike", "box"])
 export type TitleEmphasisStyle = z.infer<typeof titleEmphasisStyleSchema>
 
 export const titleEmphasisSchema = z.object({
@@ -454,32 +435,102 @@ function designedAnimationIn(template: TitleTemplate): z.input<typeof titleAnima
     case "kinetic":
     case "hook":
     case "hook-emphasis":
-      return { preset: "scale-pop", unit: "word", durationMs: 480, staggerMs: 70, easing: "back-out", direction: "normal" }
+      return {
+        preset: "scale-pop",
+        unit: "word",
+        durationMs: 480,
+        staggerMs: 70,
+        easing: "back-out",
+        direction: "normal",
+      }
     case "terminal":
-      return { preset: "typewriter", unit: "char", durationMs: 700, staggerMs: 24, easing: "linear", direction: "normal" }
+      return {
+        preset: "typewriter",
+        unit: "char",
+        durationMs: 700,
+        staggerMs: 24,
+        easing: "linear",
+        direction: "normal",
+      }
     case "highlight":
-      return { preset: "highlight-sweep", unit: "line", durationMs: 520, staggerMs: 120, easing: "expo-out", direction: "normal" }
+      return {
+        preset: "highlight-sweep",
+        unit: "line",
+        durationMs: 520,
+        staggerMs: 120,
+        easing: "expo-out",
+        direction: "normal",
+      }
     case "countdown":
-      return { preset: "counter", unit: "block", durationMs: 600, staggerMs: 0, easing: "expo-out", direction: "normal" }
+      return {
+        preset: "counter",
+        unit: "block",
+        durationMs: 600,
+        staggerMs: 0,
+        easing: "expo-out",
+        direction: "normal",
+      }
     case "stat":
     case "stat-before-after":
-      return { preset: "counter", unit: "block", durationMs: 900, staggerMs: 0, easing: "expo-out", direction: "normal" }
+      return {
+        preset: "counter",
+        unit: "block",
+        durationMs: 900,
+        staggerMs: 0,
+        easing: "expo-out",
+        direction: "normal",
+      }
     case "lower-third-bar":
     case "lower-third-glass":
     case "lower-third-line":
-      return { preset: "slide-left", unit: "block", durationMs: 380, staggerMs: 80, easing: "expo-out", direction: "normal" }
+      return {
+        preset: "slide-left",
+        unit: "block",
+        durationMs: 380,
+        staggerMs: 80,
+        easing: "expo-out",
+        direction: "normal",
+      }
     case "checklist":
     case "agenda":
-      return { preset: "rise", unit: "line", durationMs: 400, staggerMs: 110, easing: "expo-out", direction: "normal" }
+      return {
+        preset: "rise",
+        unit: "line",
+        durationMs: 400,
+        staggerMs: 110,
+        easing: "expo-out",
+        direction: "normal",
+      }
     case "banner":
-      return { preset: "mask-wipe", unit: "block", durationMs: 500, staggerMs: 0, easing: "expo-out", direction: "normal" }
+      return {
+        preset: "mask-wipe",
+        unit: "block",
+        durationMs: 500,
+        staggerMs: 0,
+        easing: "expo-out",
+        direction: "normal",
+      }
     default:
-      return { preset: "rise", unit: "line", durationMs: 460, staggerMs: 90, easing: "expo-out", direction: "normal" }
+      return {
+        preset: "rise",
+        unit: "line",
+        durationMs: 460,
+        staggerMs: 90,
+        easing: "expo-out",
+        direction: "normal",
+      }
   }
 }
 
 function designedAnimationOut(): z.input<typeof titleAnimationSpecSchema> {
-  return { preset: "fade", unit: "block", durationMs: 260, staggerMs: 0, easing: "expo-in", direction: "normal" }
+  return {
+    preset: "fade",
+    unit: "block",
+    durationMs: 260,
+    staggerMs: 0,
+    easing: "expo-in",
+    direction: "normal",
+  }
 }
 
 export interface TitleDesignV1ClipContext {

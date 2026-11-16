@@ -35,16 +35,7 @@ interface RingProps {
  * centred on it, matching the export plates and the GPU compositor's analytic
  * ring, so the preview and the render agree on where the ink lands.
  */
-function BorderRing({
-  width,
-  height,
-  radius,
-  circular,
-  lo,
-  hi,
-  stroke,
-  strokeOpacity,
-}: RingProps) {
+function BorderRing({ width, height, radius, circular, lo, hi, stroke, strokeOpacity }: RingProps) {
   const strokeWidth = Math.max(0.5, hi - lo)
   const mid = (lo + hi) / 2
   if (circular) {

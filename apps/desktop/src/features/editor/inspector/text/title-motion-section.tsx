@@ -194,8 +194,7 @@ export function TitleMotionSection({ clip, onChange }: TitleSectionProps) {
         </>
       ) : (
         <p className="text-xs text-muted-foreground">
-          This title uses legacy motion. Fine-tune its intro, outro, timing, and easing in
-          Advanced.
+          This title uses legacy motion. Fine-tune its intro, outro, timing, and easing in Advanced.
         </p>
       )}
       <Button variant="outline" size="sm" onClick={replay} className="gap-2">

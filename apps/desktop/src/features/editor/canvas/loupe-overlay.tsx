@@ -52,12 +52,7 @@ function drawLoupe(
     return
   }
 
-  const scale = loupeSurfaceScale(
-    videoBounds.width,
-    videoBounds.height,
-    canvasWidth,
-    canvasHeight,
-  )
+  const scale = loupeSurfaceScale(videoBounds.width, videoBounds.height, canvasWidth, canvasHeight)
 
   // Letterbox-aware picture rect inside the element's object-contain box.
   const elementWidth = video.clientWidth || videoBounds.width
@@ -104,17 +99,7 @@ function drawLoupe(
   ctx.clip(lensPath)
   ctx.imageSmoothingEnabled = true
   ctx.imageSmoothingQuality = "high"
-  ctx.drawImage(
-    video,
-    sourceX,
-    sourceY,
-    sourceWidth,
-    sourceHeight,
-    0,
-    0,
-    lensWidth,
-    lensHeight,
-  )
+  ctx.drawImage(video, sourceX, sourceY, sourceWidth, sourceHeight, 0, 0, lensWidth, lensHeight)
 
   // Glass rim brightening approximates the shader's smoothstep(0.82, 1)
   // radial ramp; the edge refraction pull stays GPU-only.

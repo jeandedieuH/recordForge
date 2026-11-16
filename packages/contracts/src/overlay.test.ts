@@ -42,9 +42,9 @@ describe("overlay transport contract", () => {
         titleDesignSchema.safeParse({ version: 1, template: "metric", ...invalid }).success,
       ).toBe(false)
     }
-    expect(
-      titleDesignSchema.safeParse({ version: 1, template: "bogus-template" }).success,
-    ).toBe(false)
+    expect(titleDesignSchema.safeParse({ version: 1, template: "bogus-template" }).success).toBe(
+      false,
+    )
   })
 
   it("provides stable defaults for the engine boundary", () => {

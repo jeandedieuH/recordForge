@@ -56,8 +56,7 @@ export function applyLookToState(
       ? { ...state.canvas.cursorSettings, ...definedFields(look.cursor) }
       : state.canvas.cursorSettings
   const cameraScope = scope === "all" || scope === "camera"
-  const { layout: lookLayout, color: lookColor, cutout: lookCutout, ...lookTransform } =
-    look.camera
+  const { layout: lookLayout, color: lookColor, cutout: lookCutout, ...lookTransform } = look.camera
   const tracks = cameraScope
     ? state.tracks.map((track) => ({
         ...track,

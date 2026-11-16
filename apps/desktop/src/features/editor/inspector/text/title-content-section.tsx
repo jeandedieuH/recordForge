@@ -71,48 +71,48 @@ export function TitleContentSection({ clip, onChange }: TitleSectionProps) {
         (design.template === "stat" ||
           design.template === "stat-before-after" ||
           design.template === "countdown") && (
-        <>
-          <div className="grid grid-cols-2 gap-2">
-            <NumberField
-              label="Count from"
-              value={design.metric.from}
-              min={-1_000_000_000}
-              max={1_000_000_000}
-              onChange={(from) =>
-                onChange({ titleDesign: { ...design, metric: { ...design.metric, from } } })
-              }
-            />
-            <NumberField
-              label="Count to"
-              value={design.metric.to}
-              min={-1_000_000_000}
-              max={1_000_000_000}
-              onChange={(to) =>
-                onChange({ titleDesign: { ...design, metric: { ...design.metric, to } } })
-              }
-            />
-            <NumberField
-              label="Decimal places"
-              value={design.metric.decimals}
-              min={0}
-              max={3}
-              step={1}
-              onChange={(decimals) =>
-                onChange({
-                  titleDesign: {
-                    ...design,
-                    metric: { ...design.metric, decimals: Math.round(decimals) },
-                  },
-                })
-              }
-            />
-          </div>
-          <div className="grid grid-cols-2 gap-2">
-            {text("prefix", "Prefix", false, 20)}
-            {text("suffix", "Suffix", false, 20)}
-          </div>
-        </>
-      )}
+          <>
+            <div className="grid grid-cols-2 gap-2">
+              <NumberField
+                label="Count from"
+                value={design.metric.from}
+                min={-1_000_000_000}
+                max={1_000_000_000}
+                onChange={(from) =>
+                  onChange({ titleDesign: { ...design, metric: { ...design.metric, from } } })
+                }
+              />
+              <NumberField
+                label="Count to"
+                value={design.metric.to}
+                min={-1_000_000_000}
+                max={1_000_000_000}
+                onChange={(to) =>
+                  onChange({ titleDesign: { ...design, metric: { ...design.metric, to } } })
+                }
+              />
+              <NumberField
+                label="Decimal places"
+                value={design.metric.decimals}
+                min={0}
+                max={3}
+                step={1}
+                onChange={(decimals) =>
+                  onChange({
+                    titleDesign: {
+                      ...design,
+                      metric: { ...design.metric, decimals: Math.round(decimals) },
+                    },
+                  })
+                }
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              {text("prefix", "Prefix", false, 20)}
+              {text("suffix", "Suffix", false, 20)}
+            </div>
+          </>
+        )}
       {design?.template === "terminal" && (
         <p className="text-xs text-muted-foreground">
           Designed motion types the command automatically. Set the in animation to None to show it

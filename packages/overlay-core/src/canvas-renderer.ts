@@ -497,7 +497,13 @@ function renderText(
 
 function titleGradient(
   context: CanvasRenderingContext2D,
-  gradient: { x0: number; y0: number; x1: number; y1: number; stops: Array<{ offset: number; color: string }> },
+  gradient: {
+    x0: number
+    y0: number
+    x1: number
+    y1: number
+    stops: Array<{ offset: number; color: string }>
+  },
 ): CanvasGradient {
   const g = context.createLinearGradient(gradient.x0, gradient.y0, gradient.x1, gradient.y1)
   for (const stop of gradient.stops) {
