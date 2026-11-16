@@ -44,7 +44,13 @@ import {
   trackAllowsOverlap,
   validateNoOverlap,
 } from "@recordforge/domain"
+import {
+  cameraColorSchema,
+  cameraCutoutSchema,
+  cameraFaceTrackingSchema,
+} from "@recordforge/contracts"
 import { canvasSizeForAspectRatio, clampZoomTarget, getManualZoomSegments } from "./composition"
+import { buildCameraSilenceLayouts } from "./camera-silence"
 import { partitionAudioEnvelope } from "./audio-envelope"
 import { resolveCaptionDesign } from "./captions/caption-layout"
 import {
@@ -98,6 +104,7 @@ import type {
   DeleteZoomSegmentsCommand,
   DuplicateClipCommand,
   DuplicateClipsCommand,
+  GenerateCameraSilenceLayoutsCommand,
   GroupClipsCommand,
   UngroupClipsCommand,
   ImportCaptionCuesCommand,
@@ -112,6 +119,7 @@ import type {
   ResizeCameraLayoutCommand,
   ResizeCursorRangeCommand,
   ResizeZoomSegmentCommand,
+  SetCameraEffectsCommand,
   SetClipSpeedCommand,
   RippleDeleteClipCommand,
   RippleDeleteClipsCommand,
@@ -506,6 +514,22 @@ export function canApplyCommand(state: TimelineState, command: CommandRecord): C
             ok: false,
             error: editorError("invalid_move", "Clip kind does not match target track"),
           }
+        }
+      }
+      return { ok: true, value: undefined }
+    }
+    case "set-camera-effects": {
+      const found = findClip(state, command.clipId)
+      if (!found) return { ok: false, error: editorError("clip_not_found", "Clip not found") }
+      const trackResult = checkTrackLocked(found.track)
+      if (!trackResult.ok) return trackResult
+      if (isClipLocked(found.clip)) {
+        return { ok: false, error: editorError("clip_locked", "Clip is locked") }
+      }
+      if (found.clip.kind !== "camera") {
+        return {
+          ok: false,
+          error: editorError("invalid_clip", "Camera effects need a camera clip"),
         }
       }
       return { ok: true, value: undefined }
@@ -1082,6 +1106,21 @@ export function canApplyCommand(state: TimelineState, command: CommandRecord): C
       }
       return { ok: true, value: undefined }
     }
+    case "generate-camera-silence-layouts": {
+      if (cameraLayoutLaneLocked(state)) {
+        return {
+          ok: false,
+          error: editorError("camera_layout_lane_locked", "The camera layouts lane is locked"),
+        }
+      }
+      if (command.durationMs <= 0) {
+        return {
+          ok: false,
+          error: editorError("invalid_camera_layout", "Timeline has no duration"),
+        }
+      }
+      return { ok: true, value: undefined }
+    }
     case "update-canvas":
       return { ok: true, value: undefined }
     case "update-smart-zoom-settings":
@@ -1180,6 +1219,8 @@ export function applyCommand(
       return applyUpdateClipAudio(state, command)
     case "update-clip-transform":
       return applyUpdateClipTransform(state, command)
+    case "set-camera-effects":
+      return applySetCameraEffects(state, command)
     case "add-caption-clip":
       return applyAddCaptionClip(state, command)
     case "update-caption-clip":
@@ -1258,6 +1299,8 @@ export function applyCommand(
       return applyDeleteCameraLayout(state, command)
     case "delete-camera-layouts":
       return applyDeleteCameraLayouts(state, command)
+    case "generate-camera-silence-layouts":
+      return applyGenerateCameraSilenceLayouts(state, command)
     case "trim-timeline-ends":
       return applyTrimTimelineEnds(state, command)
     default:
@@ -2936,6 +2979,35 @@ function applyUpdateClipTransform(
   return { ok: true, value: replaceClipInState(state, track.id, command.clipId, next) }
 }
 
+function applySetCameraEffects(
+  state: TimelineState,
+  command: SetCameraEffectsCommand,
+): CommandResult<TimelineState> {
+  const found = findClip(state, command.clipId)
+  if (!found) {
+    return { ok: false, error: editorError("clip_not_found", "Clip not found") }
+  }
+  if (found.clip.kind !== "camera") {
+    return { ok: false, error: editorError("invalid_clip", "Camera effects need a camera clip") }
+  }
+  const next: CameraClip = { ...found.clip }
+  if (command.color !== undefined) {
+    next.color = command.color === null ? undefined : cameraColorSchema.parse(command.color)
+  }
+  if (command.cutout !== undefined) {
+    next.cutout = command.cutout === null ? undefined : cameraCutoutSchema.parse(command.cutout)
+  }
+  if (command.faceTracking !== undefined) {
+    next.faceTracking =
+      command.faceTracking === null
+        ? undefined
+        : cameraFaceTrackingSchema.parse(command.faceTracking)
+  }
+  return {
+    ok: true,
+    value: replaceClipInState(state, found.track.id, command.clipId, next),
+  }
+}
 function applyAddCaptionClip(
   state: TimelineState,
   command: AddCaptionClipCommand,
@@ -4484,6 +4556,27 @@ function applyDeleteCameraLayouts(
   }
 }
 
+function applyGenerateCameraSilenceLayouts(
+  state: TimelineState,
+  command: GenerateCameraSilenceLayoutsCommand,
+): CommandResult<TimelineState> {
+  const cameraLayouts = buildCameraSilenceLayouts(
+    getCameraLayoutSegments(state),
+    command.ranges,
+    {
+      minSilenceMs: command.minSilenceMs,
+      padMs: command.padMs,
+      transitionMs: command.transitionMs,
+      fps: command.fps ?? state.canvas.fps,
+      durationMs: command.durationMs,
+    },
+    () => crypto.randomUUID(),
+  )
+  const valid = validateCameraLayoutSegments(cameraLayouts)
+  if (!valid.ok) return valid
+  return { ok: true, value: { ...state, cameraLayouts: valid.value, updatedAt: now() } }
+}
+
 function zoomSegmentsOverlap(left: ManualZoomSegment, right: ManualZoomSegment): boolean {
   return (
     left.startMs < right.startMs + right.durationMs &&
@@ -5188,6 +5281,32 @@ export function createDeleteCameraLayoutsCommand(segmentIds: string[]): CommandR
   }
 }
 
+/** #4d: one undoable replacement of every silence-generated camera layout. */
+export function createGenerateCameraSilenceLayoutsCommand(
+  ranges: Array<{ startMs: number; endMs: number }>,
+  options: {
+    durationMs: number
+    minSilenceMs?: number
+    padMs?: number
+    transitionMs?: number
+    fps?: number
+  },
+): CommandRecord {
+  return {
+    kind: "generate-camera-silence-layouts",
+    name: "Hide camera during silence",
+    ranges: ranges.map((range) => ({
+      startMs: Math.max(0, Math.round(range.startMs)),
+      endMs: Math.max(0, Math.round(range.endMs)),
+    })),
+    minSilenceMs: options.minSilenceMs ?? 2500,
+    padMs: options.padMs ?? 150,
+    transitionMs: options.transitionMs ?? 400,
+    durationMs: Math.max(0, Math.round(options.durationMs)),
+    fps: options.fps,
+  }
+}
+
 export function createRegenerateZoomSuggestionsCommand(
   segments: ManualZoomSegment[],
 ): CommandRecord {
@@ -5244,6 +5363,26 @@ export function createUpdateClipTransformCommand(
     transform,
     coalesce: true,
     coalesceKey: `transform:${clipId}`,
+  }
+}
+
+/** M4: update/clear camera colour, cutout, and face tracking in one command. */
+export function createSetCameraEffectsCommand(
+  clipId: string,
+  effects: {
+    color?: CameraClip["color"] | null
+    cutout?: CameraClip["cutout"] | null
+    faceTracking?: CameraClip["faceTracking"] | null
+  },
+  options: { coalesceKey?: string } = {},
+): CommandRecord {
+  return {
+    kind: "set-camera-effects",
+    name: "Update camera effects",
+    clipId,
+    ...effects,
+    coalesce: options.coalesceKey !== undefined,
+    coalesceKey: options.coalesceKey,
   }
 }
 

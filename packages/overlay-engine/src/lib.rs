@@ -7,6 +7,7 @@
 use thiserror::Error;
 
 pub mod animation;
+pub mod color;
 #[cfg(any(feature = "native-render", test))]
 mod connectors;
 mod evaluator;

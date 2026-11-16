@@ -40,6 +40,7 @@ cargo build --release
 - `src/events/` — Tauri event/channel publishers
 - `src/exports/` — Export job orchestration
 - `src/media/` — FFmpeg/FFprobe job management
+- `src/ml/` — ONNX Runtime download/verification, model catalogue, camera-AI inference helpers (ADR 021)
 - `src/projects/` — Project persistence and loading
 - `src/storage/` — S3 and Google Drive adapters
 - `src/shortcuts.rs` — Global shortcut registration and handlers

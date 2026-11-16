@@ -19,6 +19,7 @@ RecordForge is a **local-first, low-end-friendly cross-platform desktop screen r
 | Video processing         | FFmpeg + FFprobe (pinned multi-platform sidecars)                                                                 |
 | Export compositor        | FFmpeg filter graph (default) + native wgpu compositor behind `ExportSettings.renderer` (ADR 018)                 |
 | Audio capture            | Native WASAPI (Windows), CoreAudio/ScreenCaptureKit (macOS), ALSA/PipeWire (Linux)                                |
+| Camera AI (M4)           | `ort` 2.0.0-rc.15 (`load-dynamic`) + pinned ONNX Runtime 1.31.0, MODNet Webcam + YuNet models downloaded on demand (ADR 021) |
 | Credential vault         | Windows Credential Manager, Apple Keychain (macOS), Secret Service (Linux) via `keyring`                          |
 | Cursor SVG rasterization | `resvg` + `tiny-skia` in export                                                                                   |
 | State management         | Zustand                                                                                                           |

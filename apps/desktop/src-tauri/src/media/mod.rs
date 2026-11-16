@@ -1,4 +1,5 @@
 pub mod audio;
+pub mod camera_ai;
 pub mod derivatives;
 pub mod disk;
 pub mod probe;

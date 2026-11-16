@@ -258,7 +258,43 @@ interface RenderPlanCameraLayout {
   their static rect: animated layers report `video-layer-animation` and camera
   layouts report `camera-layouts`.
 
-### 4.2 Boundary guarantees
+#### 4.1.2 Camera AI (M4, ADR 021)
+
+```typescript
+interface RenderCameraColor {
+  exposure: number; contrast: number; saturation: number
+  temperature: number; tint: number
+  lutId?: string       // bundled look id
+  lutAssetId?: string  // project `.cube` asset id
+  lutIntensity: number
+}
+interface RenderCameraCutout {
+  background: "none" | "blur" | "color" | "image"
+  blurRadius: number; color: string; imageAssetId?: string
+  edgeSoftness: number; edgeShrink: number
+  mattePath?: string   // absolute; Rust requires it inside the work dir
+}
+interface RenderCropKeyframe { timeMs: number; x: number; y: number; width: number; height: number }
+// On RenderPlanOverlay (camera layers):
+color?: RenderCameraColor
+cutout?: RenderCameraCutout
+cropKeyframes?: RenderCropKeyframe[] // face-tracked framing, ≤10 Hz
+```
+
+- Colour is composed into one 33³ `.cube` per unique setup
+  (`CompositionShared::camera_lut_file`) and applied with
+  `lut3d=interp=tetrahedral` in the camera decode chain of both renderers.
+- Cutout adds a frame-aligned matte input, `alphamerge`, and the background
+  composite inside the decode chain. The GPU path emits `yuva420p` and the
+  compositor samples the alpha plane; the compat path overlays the RGBA
+  result.
+- Face tracking drives a named `crop` filter through `sendcmd`, mirroring the
+  trim pieces exactly; the preview uses the same resolver.
+- `camera_ai` derivatives live at
+  `<work>/derivatives/camera_ai/stream_NNN/{matte.mp4,face_track.json}` and
+  are never recomputed by export.
+
+## 4.2 Boundary guarantees
 
 - `outputPath` is the user-selected destination and is validated by Rust path policy.
 - Source paths never cross IPC; Rust loads the saved project by `projectId` and resolves canonical asset paths.

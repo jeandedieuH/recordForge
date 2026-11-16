@@ -7,6 +7,7 @@ pub mod exports;
 pub mod jobs;
 pub mod licensing;
 pub mod media;
+pub mod ml;
 pub mod path_policy;
 pub mod process;
 pub mod projects;
@@ -198,6 +199,14 @@ pub fn run() {
             commands::captions::delete_ai_captions_model,
             commands::captions::transcribe_audio,
             commands::captions::cancel_transcription,
+            commands::camera_ai::get_camera_ai_status,
+            commands::camera_ai::download_camera_ai_engine,
+            commands::camera_ai::delete_camera_ai_model,
+            commands::camera_ai::analyze_camera_ai,
+            commands::camera_ai::cancel_camera_ai,
+            commands::camera_ai::get_camera_ai_artifacts,
+            commands::camera_ai::read_camera_face_track,
+            commands::camera_ai::read_camera_lut,
             commands::media::prepare_media,
             commands::media::cancel_media_job,
             commands::media::get_media_job,

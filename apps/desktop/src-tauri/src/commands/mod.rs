@@ -1,4 +1,5 @@
 pub mod assets;
+pub mod camera_ai;
 pub mod captions;
 pub mod exports;
 pub mod license;

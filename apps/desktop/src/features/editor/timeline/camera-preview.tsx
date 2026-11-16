@@ -3,12 +3,15 @@ import type {
   CameraClip,
   CameraLayoutSegment,
   ClipTransform,
+  FaceTrack,
   MediaVideoTrackOutput,
   TimelineClip,
 } from "@recordforge/contracts"
 import {
   buildPreviewSegments,
+  faceCropAt,
   resolveCameraLayoutPoseAt,
+  resolveFaceCropKeyframes,
   type PreviewSegment,
 } from "@recordforge/editor-core"
 import { cn } from "@recordforge/ui"
@@ -17,6 +20,9 @@ import { toAssetUrl } from "../media/derivative-resources"
 import { BorderOverlay } from "../canvas/border-overlay"
 import { useDualMediaSlots } from "./playback/use-dual-media-slots"
 import { usePlayheadMs } from "./use-playback-state"
+import { useTimelineStore } from "../../../stores/timeline-store"
+import { readCameraFaceTrack, readCameraLut } from "../../../lib/camera-ai"
+import { CameraLutCanvas } from "../canvas/camera-lut-canvas"
 
 interface CameraPreviewProps {
   clips: CameraClip[]
@@ -41,6 +47,11 @@ interface CameraPreviewProps {
     options?: { phase?: "draft" | "commit" | "cancel" },
   ) => void
 }
+
+// Colour preview needs WebGL2; when it is unavailable the plain camera video
+// stays visible instead of the canvas drawing a black frame.
+const WEBGL2_AVAILABLE =
+  typeof document !== "undefined" && Boolean(document.createElement("canvas").getContext("webgl2"))
 
 interface CameraGesture {
   clipId: string
@@ -266,6 +277,48 @@ function CameraStreamSurface({
     group.clips.find(
       (clip) => isClipActive(clip, playheadMs) && clip.transform.visible !== false,
     ) ?? null
+  // Face tracking (#4c): the preview consumes the same smoothed crop keyframes
+  // as the render plan. The track is loaded once per clip; the transform below
+  // then follows the playhead.
+  const recordingId = useTimelineStore((state) => state.project?.recordingId ?? state.recording?.id)
+  const [faceTrack, setFaceTrack] = useState<FaceTrack | null>(null)
+  useEffect(() => {
+    if (!recordingId || !activeClip?.faceTracking?.enabled) {
+      setFaceTrack(null)
+      return
+    }
+    let cancelled = false
+    void readCameraFaceTrack(recordingId, activeClip.streamIndex ?? 0)
+      .then((track) => {
+        if (!cancelled) setFaceTrack(track)
+      })
+      .catch(() => {
+        if (!cancelled) setFaceTrack(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [recordingId, activeClip?.id, activeClip?.streamIndex, activeClip?.faceTracking?.enabled])
+
+  const [lutCubeText, setLutCubeText] = useState<string | null>(null)
+  useEffect(() => {
+    const lutId = activeClip?.color?.lutId
+    if (!recordingId || !lutId || lutId.startsWith("look:")) {
+      setLutCubeText(null)
+      return
+    }
+    let cancelled = false
+    void readCameraLut(recordingId, lutId)
+      .then((text) => {
+        if (!cancelled) setLutCubeText(text)
+      })
+      .catch(() => {
+        if (!cancelled) setLutCubeText(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [recordingId, activeClip?.color?.lutId])
   // Camera layout lane (#5): an active window owns the camera geometry, so the
   // preview shows exactly what the export plan will render.
   const layoutPose =
@@ -294,15 +347,52 @@ function CameraStreamSurface({
   const isLocked = transform.locked === true
   const isSelected = activeClip !== null && selectedClipId === activeClip.id
   const radius = transform.shape === "circle" ? "50%" : transform.shape === "rounded" ? "12%" : 0
-  const crop = transform.crop
-  const sourceWidth = group.width ?? naturalDimensions?.width ?? crop?.width ?? canvasWidth
-  const sourceHeight = group.height ?? naturalDimensions?.height ?? crop?.height ?? canvasHeight
+  const sourceWidth =
+    group.width ?? naturalDimensions?.width ?? transform.crop?.width ?? canvasWidth
+  const sourceHeight =
+    group.height ?? naturalDimensions?.height ?? transform.crop?.height ?? canvasHeight
+  const faceCropKeyframes = (() => {
+    if (!activeClip?.faceTracking?.enabled || !faceTrack) return null
+    return resolveFaceCropKeyframes({
+      track: faceTrack,
+      sourceInMs: activeClip.sourceInMs,
+      sourceOutMs: activeClip.sourceOutMs,
+      outputStartMs: activeClip.startMs,
+      outputEndMs: activeClip.startMs + activeClip.durationMs,
+      settings: activeClip.faceTracking,
+      sourceWidth,
+      sourceHeight,
+      fps: faceTrack.fps,
+    })
+  })()
+  const trackedCrop = faceCropKeyframes ? faceCropAt(faceCropKeyframes, playheadMs) : null
+  const crop = trackedCrop ?? transform.crop
   const cropWidth = crop?.width ?? sourceWidth
   const cropHeight = crop?.height ?? sourceHeight
   const cropLeft = crop ? -(crop.x / cropWidth) * 100 : 0
   const cropTop = crop ? -(crop.y / cropHeight) * 100 : 0
   const cropVideoWidth = crop ? (sourceWidth / cropWidth) * 100 : 100
   const cropVideoHeight = crop ? (sourceHeight / cropHeight) * 100 : 100
+  const color = activeClip?.color
+  const graded = Boolean(
+    WEBGL2_AVAILABLE &&
+    color &&
+    (color.lutId ||
+      color.exposure !== 0 ||
+      color.contrast !== 0 ||
+      color.saturation !== 0 ||
+      color.temperature !== 0 ||
+      color.tint !== 0),
+  )
+  const cropNormalized =
+    crop && sourceWidth > 0 && sourceHeight > 0
+      ? {
+          x: crop.x / sourceWidth,
+          y: crop.y / sourceHeight,
+          width: crop.width / sourceWidth,
+          height: crop.height / sourceHeight,
+        }
+      : null
   const borderColor = mixBorderColor(transform.borderColor, transform.borderOpacity)
   const borderStyle = transform.borderStyle ?? "solid"
   // Solid keeps the CSS border; every richer treatment needs the SVG ring so a
@@ -503,6 +593,7 @@ function CameraStreamSurface({
             top: `${cropTop}%`,
             width: `${cropVideoWidth}%`,
             height: `${cropVideoHeight}%`,
+            opacity: graded ? 0 : 1,
             visibility: activeSlot === 0 ? "visible" : "hidden",
           }}
         />
@@ -520,9 +611,19 @@ function CameraStreamSurface({
             top: `${cropTop}%`,
             width: `${cropVideoWidth}%`,
             height: `${cropVideoHeight}%`,
+            opacity: graded ? 0 : 1,
             visibility: activeSlot === 1 ? "visible" : "hidden",
           }}
         />
+        {graded ? (
+          <CameraLutCanvas
+            videoRef={activeSlot === 0 ? slot0 : slot1}
+            color={color}
+            cubeText={lutCubeText}
+            crop={cropNormalized}
+            className="pointer-events-none absolute inset-0 size-full"
+          />
+        ) : null}
         {transform.borderWidth && borderStyle !== "solid" ? (
           <BorderOverlay
             width={transform.width * previewScale}

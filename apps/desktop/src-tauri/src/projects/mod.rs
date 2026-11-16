@@ -35,6 +35,8 @@ pub enum ProjectAssetRole {
     Image,
     Graphic,
     AudioTrack,
+    /// Imported `.cube` camera LUT (#4a). Not a timeline media source.
+    Lut,
     #[serde(rename = "b_roll")]
     BRoll,
 }
@@ -52,6 +54,7 @@ impl ProjectAssetRole {
             ProjectAssetRole::Image => "image",
             ProjectAssetRole::Graphic => "graphic",
             ProjectAssetRole::AudioTrack => "audio_track",
+            ProjectAssetRole::Lut => "lut",
             ProjectAssetRole::BRoll => "b_roll",
         }
     }
@@ -149,6 +152,20 @@ pub struct ProjectFile {
     pub markers: Value,
     #[serde(default = "empty_json_array")]
     pub zoom_segments: Value,
+    // Camera layout lane (#5). Typed by the TS contracts; kept as a JSON
+    // passthrough like `tracks` so a segment field added by a newer build is
+    // not silently stripped on the next save.
+    //
+    // An empty array is skipped on serialize: the checksum is computed over the
+    // re-serialized struct, so always emitting `"cameraLayouts": []` would
+    // change the canonical JSON of every project written before this field
+    // existed and fail their stored checksum on load ("project checksum
+    // mismatch").
+    #[serde(
+        default = "empty_json_array",
+        skip_serializing_if = "is_empty_json_array"
+    )]
+    pub camera_layouts: Value,
     #[serde(default = "empty_json_object")]
     pub smart_zoom_settings: Value,
     #[serde(default = "default_export_settings")]
@@ -161,6 +178,10 @@ pub struct ProjectFile {
 
 fn empty_json_array() -> Value {
     Value::Array(Vec::new())
+}
+
+fn is_empty_json_array(value: &Value) -> bool {
+    matches!(value, Value::Array(items) if items.is_empty())
 }
 
 fn empty_json_object() -> Value {
@@ -195,11 +216,24 @@ fn temp_path(project_dir: &Path) -> PathBuf {
 /// Compute a SHA-256 checksum over the canonical JSON of the project
 /// with the `checksum` field removed. The result is returned as lowercase hex.
 pub fn compute_checksum(project: &ProjectFile) -> Result<String> {
+    compute_checksum_with(project, false)
+}
+
+/// `includeEmptyCameraLayouts` reproduces the canonical form emitted by builds
+/// that serialized an empty camera-layout array explicitly. Files written by
+/// such a build must keep loading after the field became skip-if-empty.
+fn compute_checksum_with(
+    project: &ProjectFile,
+    include_empty_camera_layouts: bool,
+) -> Result<String> {
     let mut value = serde_json::to_value(project)
         .map_err(|e| InternalError::Project(format!("serialize project for checksum: {e}")))?;
 
     if let Some(obj) = value.as_object_mut() {
         obj.remove("checksum");
+        if include_empty_camera_layouts {
+            obj.insert("cameraLayouts".to_string(), Value::Array(Vec::new()));
+        }
     }
 
     let canonical = serde_json::to_string(&value)
@@ -212,13 +246,17 @@ pub fn compute_checksum(project: &ProjectFile) -> Result<String> {
 /// Verify that the checksum in the project matches its content.
 pub fn validate_checksum(project: &ProjectFile) -> Result<()> {
     let expected = compute_checksum(project)?;
-    if expected != project.checksum {
-        return Err(InternalError::Project(format!(
-            "project checksum mismatch: expected {expected}"
-        ))
-        .into());
+    if expected == project.checksum {
+        return Ok(());
     }
-    Ok(())
+    // Older builds always emitted `"cameraLayouts": []`; accept their form too
+    // so upgrading does not reject projects written by the previous build.
+    if is_empty_json_array(&project.camera_layouts)
+        && compute_checksum_with(project, true)? == project.checksum
+    {
+        return Ok(());
+    }
+    Err(InternalError::Project(format!("project checksum mismatch: expected {expected}")).into())
 }
 
 /// Apply forward-only migrations to a raw JSON project. Currently version 1 is
@@ -742,6 +780,7 @@ pub fn create_project(
         tracks,
         markers: Value::Array(vec![]),
         zoom_segments: Value::Array(vec![]),
+        camera_layouts: Value::Array(vec![]),
         smart_zoom_settings: empty_json_object(),
         export_settings: default_export_settings(),
         created_at: now.clone(),
@@ -968,6 +1007,7 @@ mod tests {
             tracks: Value::Null,
             markers: Value::Null,
             zoom_segments: Value::Null,
+            camera_layouts: Value::Null,
             smart_zoom_settings: Value::Null,
             export_settings: default_export_settings(),
             created_at: Utc::now().to_rfc3339(),
@@ -982,6 +1022,38 @@ mod tests {
 
         with_checksum.checksum = "invalid".to_string();
         assert!(validate_checksum(&with_checksum).is_err());
+    }
+
+    /// Builds that always emitted `"cameraLayouts": []` produced a different
+    /// canonical JSON. Their checksums must still validate, so an upgrade never
+    /// rejects a project the previous build wrote.
+    #[test]
+    fn checksum_accepts_the_explicit_empty_camera_layouts_form() {
+        let mut project = ProjectFile {
+            format: PROJECT_FORMAT.to_string(),
+            version: 1,
+            id: "p1".to_string(),
+            name: "Test".to_string(),
+            recording_id: "rec-1".to_string(),
+            canvas: Value::Null,
+            assets: vec![],
+            tracks: Value::Null,
+            markers: Value::Null,
+            zoom_segments: Value::Null,
+            camera_layouts: empty_json_array(),
+            smart_zoom_settings: Value::Null,
+            export_settings: default_export_settings(),
+            created_at: Utc::now().to_rfc3339(),
+            updated_at: Utc::now().to_rfc3339(),
+            checksum: String::new(),
+        };
+        project.checksum = compute_checksum_with(&project, true).unwrap();
+
+        assert!(validate_checksum(&project).is_ok());
+
+        // The tolerance is limited to that one empty field: real edits still fail.
+        project.name = "Tampered".to_string();
+        assert!(validate_checksum(&project).is_err());
     }
 
     #[test]
@@ -1162,5 +1234,63 @@ mod tests {
         let loaded = load_project(&project_dir, &policy()).unwrap().unwrap();
         assert_eq!(loaded.project.export_settings, project.export_settings);
         assert_eq!(saved.export_settings, project.export_settings);
+    }
+
+    /// The camera layout lane lives in `cameraLayouts`, and a project file that
+    /// drops it makes every layout segment vanish on reopen. This is the
+    /// regression for a `ProjectFile` that had no field for it at all.
+    #[test]
+    fn camera_layouts_round_trip_preserves_segments() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_dir = temp.path().join("project");
+        let (recording, metadata) = make_test_recording(&project_dir);
+        fs::create_dir_all(&project_dir).unwrap();
+        fs::write(project_dir.join("output.mp4"), b"fake").unwrap();
+
+        let mut project = create_project(&recording, &metadata, None, &project_dir).unwrap();
+        project.camera_layouts = serde_json::json!([{
+            "id": "layout-1",
+            "startMs": 1000,
+            "durationMs": 2500,
+            "layout": "pip",
+            "pip": { "corner": "br", "sizeFraction": 0.24, "shape": "rounded" },
+            "transitionInMs": 400,
+            "transitionOutMs": 400,
+            "easing": "smooth",
+            "source": "manual",
+            "enabled": true,
+            "locked": false,
+            "futureField": { "not": "invented yet" },
+        }]);
+        let saved = save_project(&project, &project_dir).unwrap();
+
+        let loaded = load_project(&project_dir, &policy()).unwrap().unwrap();
+        assert_eq!(loaded.project.camera_layouts, project.camera_layouts);
+        assert_eq!(saved.camera_layouts, project.camera_layouts);
+    }
+
+    /// A project written before the camera layout lane existed must keep
+    /// loading. The checksum is computed over the re-serialized struct, so an
+    /// always-emitted `cameraLayouts: []` changes the canonical JSON of every
+    /// older file and fails its stored checksum ("project checksum mismatch").
+    #[test]
+    fn legacy_project_without_camera_layouts_still_validates() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_dir = temp.path().join("project");
+        let (recording, metadata) = make_test_recording(&project_dir);
+        fs::create_dir_all(&project_dir).unwrap();
+        fs::write(project_dir.join("output.mp4"), b"fake").unwrap();
+
+        create_project(&recording, &metadata, None, &project_dir).unwrap();
+
+        let raw: Value =
+            serde_json::from_str(&fs::read_to_string(project_path(&project_dir)).unwrap()).unwrap();
+        assert!(
+            raw.get("cameraLayouts").is_none(),
+            "an empty camera layout lane must not change the canonical project json"
+        );
+
+        let loaded = load_project(&project_dir, &policy()).unwrap().unwrap();
+        assert_eq!(loaded.project.camera_layouts, Value::Array(Vec::new()));
     }
 }

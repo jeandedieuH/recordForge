@@ -68,6 +68,9 @@ export interface ZoomTrackRowProps {
   ) => void
   onSnapGuide: (target: SnapTarget | null) => void
   onGestureHud: (info: TimelineGestureInfo | null) => void
+  // Segment currently being dragged. Like clips, it is pinned past the visible
+  // window so unmounting can't strand the gesture (and its draft) mid-drag.
+  activeGestureSegmentId?: string | null
   edgeAutoScroll: EdgeAutoScroll
   tool?: "select" | "split" | "range"
 }
@@ -106,15 +109,27 @@ export const ZoomTrackRow = memo(function ZoomTrackRow({
   onResizeZoomSegment,
   onSnapGuide,
   onGestureHud,
+  activeGestureSegmentId,
   edgeAutoScroll,
 }: ZoomTrackRowProps) {
   const [hoverGhost, setHoverGhost] = useState<{ timeMs: number } | null>(null)
 
-  const visibleSegments = (timeline.zoomSegments ?? []).filter(
+  const windowSegments = (timeline.zoomSegments ?? []).filter(
     (segment) =>
       segment.startMs <= visibleEndMs + 2_000 &&
       segment.startMs + segment.durationMs >= visibleStartMs - 2_000,
   )
+  // A dragged segment that is pulled out of the window still has to stay
+  // mounted: its element owns the pointer capture, and an unmount mid-drag
+  // would lose the release and leave the gesture's draft behind.
+  const draggedSegment =
+    activeGestureSegmentId === null || activeGestureSegmentId === undefined
+      ? undefined
+      : (timeline.zoomSegments ?? []).find((segment) => segment.id === activeGestureSegmentId)
+  const visibleSegments =
+    draggedSegment && !windowSegments.some((segment) => segment.id === draggedSegment.id)
+      ? [...windowSegments, draggedSegment]
+      : windowSegments
 
   function handleDoubleClick(event: React.MouseEvent<HTMLDivElement>) {
     if (track.locked || !onAddZoomAtTime) return
@@ -303,10 +318,15 @@ const ZoomSegmentItem = memo(function ZoomSegmentItem({
   }
 
   // Same draft/commit split as clip gestures: draft reports the lanes HUD,
-  // commit re-runs the identical snap path.
-  function applyGesture(clientX: number, altKey: boolean, phase: "draft" | "commit") {
-    const gesture = gestureRef.current
-    if (!gesture) return
+  // commit re-runs the identical snap path. The gesture is passed in because
+  // `finishGesture` retires the ref first — reading the ref here made every
+  // release a no-op that left the draft to be discarded by the next command.
+  function applyGesture(
+    gesture: SegmentGesture,
+    clientX: number,
+    altKey: boolean,
+    phase: "draft" | "commit",
+  ) {
     const currentMs = getTimelineTime(clientX)
     const deltaMs = currentMs - gesture.initialTimelineMs
     const snap = { enabled: snapEnabled && !altKey, thresholdMs: snapThresholdMs }
@@ -349,10 +369,10 @@ const ZoomSegmentItem = memo(function ZoomSegmentItem({
     suppressClickRef.current = true
     event.preventDefault()
     lastPointerRef.current = { clientX: event.clientX, altKey: event.altKey }
-    applyGesture(event.clientX, event.altKey, "draft")
+    applyGesture(gesture, event.clientX, event.altKey, "draft")
     edgeAutoScroll.track(event.clientX, () => {
       const last = lastPointerRef.current
-      if (last) applyGesture(last.clientX, last.altKey, "draft")
+      if (last) applyGesture(gesture, last.clientX, last.altKey, "draft")
     })
   }
 
@@ -376,7 +396,7 @@ const ZoomSegmentItem = memo(function ZoomSegmentItem({
       return
     }
 
-    applyGesture(event.clientX, event.altKey, "commit")
+    applyGesture(gesture, event.clientX, event.altKey, "commit")
   }
 
   const transInWidth = Math.min(width / 2, (segment.transitionInMs ?? 400) * pixelsPerMs)
@@ -431,6 +451,9 @@ const ZoomSegmentItem = memo(function ZoomSegmentItem({
           onPointerMove={handlePointerMove}
           onPointerUp={finishGesture}
           onPointerCancel={finishGesture}
+          // A lost capture before pointerup must still finish the gesture,
+          // otherwise its draft is silently discarded by the next command.
+          onLostPointerCapture={finishGesture}
           onContextMenu={() => {
             if (!selected) {
               onSelectZoom(segment.id)

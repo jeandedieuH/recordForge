@@ -1,4 +1,5 @@
 import type { TimelineClip, TimelineTrack } from "@recordforge/contracts"
+import { clipUsesSourceTrimLimits } from "@recordforge/editor-core"
 
 export type TrimLimit = "source-start" | "source-end" | "neighbor" | "min-duration"
 
@@ -22,10 +23,8 @@ export interface ClampTrimEdgeResult {
 
 // Only true source-backed media can hit a source-media trim limit; overlays
 // and effects resize freely within their neighbors.
-const MEDIA_KINDS: ReadonlySet<TimelineClip["kind"]> = new Set(["screen", "camera", "audio"])
-
 function isMediaClip(clip: TimelineClip): boolean {
-  return MEDIA_KINDS.has(clip.kind)
+  return clipUsesSourceTrimLimits(clip)
 }
 
 /**

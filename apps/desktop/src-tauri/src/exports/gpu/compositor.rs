@@ -135,6 +135,8 @@ pub(super) struct CameraConfig {
     pub dest: (u32, u32),
     pub shape: Shape,
     pub opacity: f32,
+    /// Frames are `yuva420p` (cutout matte) instead of opaque NV12.
+    pub alpha: bool,
     /// Generated border PNG bytes (device-ready).
     pub border: Option<Vec<u8>>,
     /// Generated shadow PNG bytes plus its canvas origin.
@@ -450,6 +452,7 @@ struct Quad {
 /// One camera overlay's GPU resources.
 struct CameraResources {
     camera: Quad,
+    alpha: bool,
     border: Option<Quad>,
     shadow: Option<Quad>,
 }
@@ -856,6 +859,7 @@ impl Compositor {
                 camera.dest,
                 camera.shape,
                 camera.opacity,
+                camera.alpha,
                 &format!("cam{index}"),
             )?;
             let border = camera
@@ -909,6 +913,7 @@ impl Compositor {
                 .transpose()?;
             cameras.push(CameraResources {
                 camera: camera_quad,
+                alpha: camera.alpha,
                 border,
                 shadow,
             });
@@ -1425,7 +1430,11 @@ impl Compositor {
                         h.max(1.0).round() as u32,
                     ),
                 );
-                self.write_quad_opacity(&resources.camera, opacity.clamp(0.0, 1.0) as f32);
+                self.write_quad_opacity(
+                    &resources.camera,
+                    opacity.clamp(0.0, 1.0) as f32,
+                    if resources.alpha { 1.0 } else { 0.0 },
+                );
             }
             if !posed {
                 if let Some(shadow) = &resources.shadow {
@@ -1750,18 +1759,47 @@ impl Compositor {
             return Ok(());
         };
         let (w, h) = resources.camera.size;
-        if data.len() != nv12_len(w, h) {
+        let luma = w as usize * h as usize;
+        let expected = if resources.alpha {
+            luma * 5 / 2
+        } else {
+            nv12_len(w, h)
+        };
+        if data.len() != expected {
             return Err(gpu_error("camera frame size does not match the overlay"));
         }
-        let luma = w as usize * h as usize;
         write_plane(&self.queue, &resources.camera.y, w, h, &data[..luma]);
         write_plane(
             &self.queue,
             &resources.camera.uv,
             w / 2,
             h / 2,
-            &data[luma..],
+            &data[luma..luma + luma / 2],
         );
+        if resources.alpha {
+            // FFmpeg raw `yuva420p` is planar (Y, U, V, A); the GPU texture is
+            // interleaved RG8, so re-pack U/V before upload.
+            let chroma = luma / 4;
+            let mut interleaved = vec![0u8; chroma * 2];
+            for index in 0..chroma {
+                interleaved[index * 2] = data[luma + index];
+                interleaved[index * 2 + 1] = data[luma + chroma + index];
+            }
+            write_plane(
+                &self.queue,
+                &resources.camera.uv,
+                w / 2,
+                h / 2,
+                &interleaved,
+            );
+            write_plane(
+                &self.queue,
+                &resources.camera.a,
+                w,
+                h,
+                &data[luma + chroma * 2..luma + chroma * 2 + luma],
+            );
+        }
         Ok(())
     }
 
@@ -1778,13 +1816,13 @@ impl Compositor {
         );
     }
 
-    /// Rewrite one quad's layer opacity (row 3, `x`). The format id in `y` stays
-    /// 0 (NV12), so video layers keep their sampling path.
-    fn write_quad_opacity(&self, quad: &Quad, opacity: f32) {
+    /// Rewrite one quad's layer opacity (row 3, `x`) and keep its format id in
+    /// `y` (0 = NV12, 1 = YUVA420p with an alpha plane).
+    fn write_quad_opacity(&self, quad: &Quad, opacity: f32, format_id: f32) {
         self.queue.write_buffer(
             &quad.uniform,
             (std::mem::size_of::<[f32; 4]>() * 3) as u64,
-            pod_bytes(&[opacity.max(0.0), 0.0, 0.0, 0.0]),
+            pod_bytes(&[opacity.max(0.0), format_id, 0.0, 0.0]),
         );
     }
 }
@@ -1979,6 +2017,7 @@ impl Quad {
         dest: (u32, u32),
         shape: Shape,
         opacity: f32,
+        alpha: bool,
         label: &str,
     ) -> Result<Self> {
         let y = create_plane(
@@ -1995,7 +2034,17 @@ impl Quad {
             wgpu::TextureFormat::Rg8Unorm,
             &format!("gpu-export-{label}-uv"),
         );
-        let a = placeholder_r8(device);
+        let a = if alpha {
+            create_plane(
+                device,
+                width,
+                height,
+                wgpu::TextureFormat::R8Unorm,
+                &format!("gpu-export-{label}-a"),
+            )
+        } else {
+            placeholder_r8(device)
+        };
         Self::finish(
             device,
             queue,
@@ -2009,7 +2058,7 @@ impl Quad {
             dest,
             shape,
             opacity,
-            0.0,
+            if alpha { 1.0 } else { 0.0 },
             label,
         )
     }

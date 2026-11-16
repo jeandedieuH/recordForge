@@ -158,6 +158,26 @@ pub fn import_assets(
                 continue;
             }
         }
+        if is_cube_path(&source) {
+            match read_cube(&source) {
+                Ok(text) => {
+                    if let Err(error) = crate::commands::camera_ai::validate_cube_text(&text) {
+                        skipped.push(SkippedAsset {
+                            source_name,
+                            reason: error.to_string(),
+                        });
+                        continue;
+                    }
+                }
+                Err(error) => {
+                    skipped.push(SkippedAsset {
+                        source_name,
+                        reason: error.to_string(),
+                    });
+                    continue;
+                }
+            }
+        }
 
         let content_hash = match hash_file(&source) {
             Ok(hash) => hash,
@@ -264,6 +284,10 @@ pub fn import_assets(
     index_project(&state, &saved)?;
 
     for record in &mut imported {
+        // LUTs are validated text assets: no probe/derivative pass.
+        if record.asset.kind.as_deref() == Some("lut") {
+            continue;
+        }
         let source = absolute_asset_path(&record.asset, &project_dir);
         let options = AssetDerivativeOptions {
             recording_id: request.recording_id.clone(),
@@ -584,12 +608,32 @@ fn normalize_strategy(strategy: &str) -> Result<&'static str> {
     }
 }
 
+fn is_cube_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("cube"))
+}
+
+/// Read a `.cube` file with a hard size cap before validation.
+fn read_cube(path: &Path) -> Result<String> {
+    const MAX_CUBE_BYTES: u64 = 8_000_000;
+    let metadata = std::fs::metadata(path)
+        .map_err(|error| InternalError::Storage(format!("read LUT: {error}")))?;
+    if !metadata.is_file() || metadata.len() > MAX_CUBE_BYTES {
+        return Err(InternalError::Project("LUT file is too large".into()).into());
+    }
+    std::fs::read_to_string(path)
+        .map_err(|error| InternalError::Storage(format!("read LUT: {error}")).into())
+}
+
 fn media_kind_for_path(path: &Path) -> Option<&'static str> {
     let extension = path.extension()?.to_str()?.to_ascii_lowercase();
     match extension.as_str() {
         "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "svg" => Some("image"),
         "mp3" | "wav" | "aac" | "m4a" | "flac" | "ogg" | "opus" => Some("audio"),
         "mp4" | "mov" | "mkv" | "webm" | "avi" | "m4v" => Some("video"),
+        // Camera colour LUT (#4a). Validated as a 3D cube, never probed.
+        "cube" => Some("lut"),
         _ => None,
     }
 }
@@ -598,6 +642,7 @@ fn default_role_for_kind(kind: &str) -> ProjectAssetRole {
     match kind {
         "audio" => ProjectAssetRole::Music,
         "video" => ProjectAssetRole::BRoll,
+        "lut" => ProjectAssetRole::Lut,
         _ => ProjectAssetRole::Graphic,
     }
 }
@@ -699,7 +744,7 @@ fn probe_asset_path(
     recording_id: &str,
     kind: &str,
 ) -> Result<MediaMetadata> {
-    if crate::media::svg::is_svg_path(source) {
+    if crate::media::svg::is_svg_path(source) || is_cube_path(source) {
         return Ok(static_image_metadata(recording_id, source));
     }
     match crate::media::probe::probe_media(&ffprobe_path.to_string_lossy(), source, recording_id) {

@@ -18,10 +18,12 @@ export const projectAssetRoleSchema = z.enum([
   "graphic",
   "audio_track",
   "b_roll",
+  // Imported `.cube` 3D LUT (camera colour, #4a). Not a timeline clip source.
+  "lut",
 ])
 export type ProjectAssetRole = z.infer<typeof projectAssetRoleSchema>
 
-export const mediaKindSchema = z.enum(["audio", "image", "video", "cursor", "caption"])
+export const mediaKindSchema = z.enum(["audio", "image", "video", "cursor", "caption", "lut"])
 export type MediaKind = z.infer<typeof mediaKindSchema>
 
 export const projectAssetImportStrategySchema = z.enum(["copy", "reference"])
@@ -83,7 +85,17 @@ export const derivativeFileSchema = z.object({
   id: z.string(),
   recordingId: z.string(),
   jobId: z.string(),
-  kind: z.enum(["proxy", "thumbnail", "waveform", "metadata", "audio", "video"]),
+  kind: z.enum([
+    "proxy",
+    "thumbnail",
+    "waveform",
+    "metadata",
+    "audio",
+    "video",
+    // Camera AI (#4b/#4c): grayscale matte video and face-track JSON.
+    "matte",
+    "face_track",
+  ]),
   path: z.string(),
   sizeBytes: z.number().int().min(0).default(0),
   createdAt: z.string().datetime({ offset: true }),
@@ -110,6 +122,8 @@ export const mediaJobKindSchema = z.enum([
   "waveform",
   "prepare",
   "asset_derivative",
+  // Offline camera AI derivatives (#4b/#4c).
+  "camera_ai",
   "export",
 ])
 

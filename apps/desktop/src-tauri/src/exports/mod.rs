@@ -2,6 +2,7 @@ use crate::database::library::get_recording;
 use crate::database::media::MediaJob;
 use crate::errors::{InternalError, Result};
 use crate::events::EventPublisher;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -298,6 +299,10 @@ pub(crate) struct CompositionShared {
     /// `&self` but the type's RefCell badge cache makes it !Sync, so `Arc`
     /// sharing is out; cloning still shares the warm `Arc<Pixmap>` cache.
     keystroke_renderer: Mutex<Option<Option<keystrokes::KeystrokeRenderer>>>,
+    /// Composed camera LUT files keyed by their settings fingerprint.
+    luts: Mutex<HashMap<String, Arc<PathBuf>>>,
+    /// Owns generated `.cube` files for the export's lifetime.
+    lut_guards: Mutex<Vec<TempMaskFile>>,
 }
 
 impl CompositionShared {
@@ -308,7 +313,89 @@ impl CompositionShared {
             cursor_engines: Mutex::new(HashMap::new()),
             overlay_engine: Mutex::new(None),
             keystroke_renderer: Mutex::new(None),
+            luts: Mutex::new(HashMap::new()),
+            lut_guards: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Resolve (and cache) the composed `.cube` for one camera colour setup.
+    /// `None` means the camera needs no colour pass at all — the zero-cost path.
+    pub(crate) fn camera_lut_file(
+        &self,
+        color: &RenderCameraColor,
+        asset_paths: &HashMap<String, PathBuf>,
+    ) -> Result<Option<Arc<PathBuf>>> {
+        if color.is_neutral() {
+            return Ok(None);
+        }
+        let asset_text = match color.lut_asset_id.as_deref() {
+            Some(asset_id) => {
+                let path = asset_paths.get(asset_id).ok_or_else(|| {
+                    InternalError::Media("camera LUT references an unknown asset".into())
+                })?;
+                let metadata = std::fs::metadata(path)
+                    .map_err(|error| InternalError::Storage(format!("read camera LUT: {error}")))?;
+                if !metadata.is_file() || metadata.len() > 8_000_000 {
+                    return Err(InternalError::Media("camera LUT is too large".into()).into());
+                }
+                Some(
+                    std::fs::read_to_string(path).map_err(|error| {
+                        InternalError::Storage(format!("read camera LUT: {error}"))
+                    })?,
+                )
+            }
+            None => None,
+        };
+        let asset_hash = asset_text.as_deref().map(|text| {
+            use sha2::Digest;
+            hex::encode(sha2::Sha256::digest(text.as_bytes()))
+        });
+        let key = format!(
+            "{:?}:{:?}:{}:{}:{}:{}:{}:{}:{}",
+            color.lut_id,
+            asset_hash,
+            color.lut_id.as_deref().unwrap_or(""),
+            color.exposure,
+            color.contrast,
+            color.saturation,
+            color.temperature,
+            color.tint,
+            color.lut_intensity
+        );
+        {
+            let luts = self
+                .luts
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            if let Some(path) = luts.get(&key) {
+                return Ok(Some(Arc::clone(path)));
+            }
+        }
+        let request = overlay_engine::color::CameraColorRequest {
+            exposure: color.exposure as f32,
+            contrast: color.contrast as f32,
+            saturation: color.saturation as f32,
+            temperature: color.temperature as f32,
+            tint: color.tint as f32,
+            lut_id: color.lut_id.clone(),
+            lut_intensity: color.lut_intensity as f32,
+            cube_text: asset_text,
+        };
+        let cube = overlay_engine::color::camera_lut_cube(&request)
+            .map_err(|error| InternalError::Media(format!("camera LUT: {error}")))?;
+        let path = std::env::temp_dir().join(format!("rf-lut-{}.cube", uuid::Uuid::new_v4()));
+        std::fs::write(&path, cube)
+            .map_err(|error| InternalError::Storage(format!("write camera LUT: {error}")))?;
+        self.lut_guards
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .push(TempMaskFile(path.clone()));
+        let path = Arc::new(path);
+        self.luts
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .insert(key, Arc::clone(&path));
+        Ok(Some(path))
     }
 
     /// Return the cursor engine for `asset_id`, running `load` at most once
@@ -507,7 +594,7 @@ pub struct RenderPlanMask {
     pub enabled: bool,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RenderPlanOverlay {
     /// Clip id; the frontend sends it so layer order and diagnostics can refer
@@ -560,6 +647,95 @@ pub struct RenderPlanOverlay {
     pub shadow_offset_x: Option<f64>,
     pub shadow_offset_y: Option<f64>,
     pub preset: Option<String>,
+    /// Camera colour grade (#4a). Composed into one `.cube` per unique setup.
+    #[serde(default)]
+    pub color: Option<RenderCameraColor>,
+    /// Portrait cutout (#4b): derived matte path + background mode.
+    #[serde(default)]
+    pub cutout: Option<RenderCameraCutout>,
+    /// Face-tracked framing (#4c): fixed-size source crop, moving centre.
+    #[serde(default)]
+    pub crop_keyframes: Vec<RenderCropKeyframe>,
+}
+
+/// Camera colour settings carried by the render plan.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RenderCameraColor {
+    #[serde(default)]
+    pub exposure: f64,
+    #[serde(default)]
+    pub contrast: f64,
+    #[serde(default)]
+    pub saturation: f64,
+    #[serde(default)]
+    pub temperature: f64,
+    #[serde(default)]
+    pub tint: f64,
+    /// Bundled `look:*` id.
+    pub lut_id: Option<String>,
+    /// Project `.cube` asset id; resolved against the plan's asset map.
+    pub lut_asset_id: Option<String>,
+    #[serde(default = "default_lut_intensity")]
+    pub lut_intensity: f64,
+}
+
+fn default_lut_intensity() -> f64 {
+    1.0
+}
+
+impl RenderCameraColor {
+    fn is_neutral(&self) -> bool {
+        self.lut_id.is_none()
+            && self.lut_asset_id.is_none()
+            && self.exposure.abs() < 1e-4
+            && self.contrast.abs() < 1e-4
+            && self.saturation.abs() < 1e-4
+            && self.temperature.abs() < 1e-4
+            && self.tint.abs() < 1e-4
+    }
+}
+
+/// Portrait-cutout composition settings (the matte itself is a derivative).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RenderCameraCutout {
+    #[serde(default = "default_cutout_background")]
+    pub background: String,
+    #[serde(default = "default_cutout_blur")]
+    pub blur_radius: f64,
+    #[serde(default = "default_cutout_color")]
+    pub color: String,
+    pub image_asset_id: Option<String>,
+    #[serde(default)]
+    pub edge_softness: f64,
+    #[serde(default)]
+    pub edge_shrink: f64,
+    /// Absolute path of the derived grayscale matte; validated by the export.
+    pub matte_path: Option<String>,
+}
+
+fn default_cutout_background() -> String {
+    "none".into()
+}
+
+fn default_cutout_blur() -> f64 {
+    18.0
+}
+
+fn default_cutout_color() -> String {
+    "#0f172a".into()
+}
+
+/// One face-tracked crop keyframe, absolute output ms, source pixels.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RenderCropKeyframe {
+    pub time_ms: u64,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
 }
 
 /// One sampled layout pose (camera layouts, video layer animation). Renderers
@@ -588,6 +764,9 @@ pub struct RenderPlanCameraLayout {
     pub camera: Vec<RenderLayoutKeyframe>,
     #[serde(default)]
     pub screen: Option<Vec<RenderLayoutKeyframe>>,
+    /// `silence` marks hide-during-silence segments (#4d, Pro).
+    #[serde(default)]
+    pub source: Option<String>,
 }
 
 /// One entry in the middle-band draw order (F3/F4).
@@ -1179,6 +1358,31 @@ pub fn run_render_plan(
         PathBuf::from(recording.work_dir)
     };
     let policy = crate::path_policy::PathPolicy::new(work_dir.clone(), work_dir.clone());
+    // Camera cutout mattes are the only plan-carried absolute paths. They must
+    // exist inside the recording work dir; anything else is rejected before a
+    // job can read it.
+    let work_root = crate::path_policy::canonicalize_path(&work_dir)
+        .map_err(|error| InternalError::Storage(format!("resolve project dir: {error}")))?;
+    for overlay in &plan.overlays {
+        let Some(cutout) = overlay.cutout.as_ref() else {
+            continue;
+        };
+        let Some(matte) = cutout.matte_path.as_deref() else {
+            return Err(InternalError::Project(
+                "the camera cutout matte is missing; run Camera AI again".into(),
+            )
+            .into());
+        };
+        let canonical = crate::path_policy::canonicalize_path(Path::new(matte)).map_err(|_| {
+            InternalError::Project("the camera cutout matte is missing; run Camera AI again".into())
+        })?;
+        if !canonical.starts_with(&work_root) {
+            return Err(InternalError::Permissions(
+                "camera cutout matte is outside the project".into(),
+            )
+            .into());
+        }
+    }
     let loaded = crate::projects::load_project(&work_dir, &policy)?
         .ok_or_else(|| InternalError::Project("project file is required for export".into()))?;
     if loaded.project.id != project_id {
@@ -2249,6 +2453,10 @@ fn render_composition_window(
             pieces,
             input_index: 0,
             seek_s: 0.0,
+            matte_input_index: None,
+            matte_seek_s: 0.0,
+            matte_delay_s: 0.0,
+            bg_image_input_index: None,
         });
     }
 
@@ -2310,6 +2518,11 @@ fn render_composition_window(
                     .map(|piece| piece.clamp.src_out_s)
                     .fold(f64::NEG_INFINITY, f64::max);
                 let seek_s = floor_to_ms(src_in_s - SEEK_PREROLL_S).max(0.0);
+                let video_delay_s = asset_paths
+                    .get(&first.asset_id)
+                    .map(|path| shared.probe.video_start_delay_s(path, &first.asset_id))
+                    .unwrap_or(0.0);
+                let matte_seek_s = floor_to_ms(src_in_s - SEEK_PREROLL_S - video_delay_s).max(0.0);
                 job.input_index = input_specs.len();
                 job.seek_s = seek_s;
                 input_specs.push(InputSpec {
@@ -2319,6 +2532,17 @@ fn render_composition_window(
                     duration_s: Some(src_out_s - seek_s + SEEK_TAIL_MARGIN_S),
                     hwaccel: hwaccel_inputs,
                 });
+                push_camera_ai_inputs(
+                    job,
+                    first,
+                    asset_paths,
+                    &mut input_specs,
+                    Some(seek_s),
+                    matte_seek_s,
+                    video_delay_s,
+                    Some((src_out_s - video_delay_s - matte_seek_s).max(0.0) + SEEK_TAIL_MARGIN_S),
+                    false,
+                );
             }
             if pass.include_audio {
                 // Audio chains read asset-level (unseeked) inputs — atrim
@@ -2370,6 +2594,10 @@ fn render_composition_window(
                 let input_index = *input_indices.get(&first.asset_id).ok_or_else(|| {
                     InternalError::Media("camera overlay references an unknown asset".into())
                 })?;
+                let video_delay_s = asset_paths
+                    .get(&first.asset_id)
+                    .map(|path| shared.probe.video_start_delay_s(path, &first.asset_id))
+                    .unwrap_or(0.0);
                 // The legacy chain consumes each piece's full source range
                 // from the whole-asset input.
                 for piece in &mut job.pieces {
@@ -2384,6 +2612,17 @@ fn render_composition_window(
                 }
                 job.input_index = input_index;
                 job.seek_s = 0.0;
+                push_camera_ai_inputs(
+                    job,
+                    first,
+                    asset_paths,
+                    &mut input_specs,
+                    None,
+                    0.0,
+                    video_delay_s,
+                    None,
+                    false,
+                );
             }
         }
     }
@@ -3503,16 +3742,51 @@ fn render_composition_window(
         // length, then concatenate. One chain per track replaces one chain per
         // Smart Cut piece.
         let mut geometry_ops = String::new();
+        let mut matte_geometry_ops = String::new();
         let overlay_w = ((overlay.width.round() as u32) / 2 * 2).max(2);
         let overlay_h = ((overlay.height.round() as u32) / 2 * 2).max(2);
         let overlay_x = (overlay.x.round() as i32) / 2 * 2;
         let overlay_y = (overlay.y.round() as i32) / 2 * 2;
+        let chain_start_ms = plan.overlays[job.pieces[0].overlay_index].output_start_ms as f64
+            + job.pieces[0].clamp.cut_out_s * 1000.0;
+        let face_tracked = overlay.crop_keyframes.len() > 1;
 
-        if let Some(crop) = &overlay.crop {
-            geometry_ops.push_str(&format!(
-                ",crop={}:{}:{}:{}",
-                crop.width, crop.height, crop.x, crop.y
+        if face_tracked {
+            let first = &overlay.crop_keyframes[0];
+            let matte_name = format!("cammatte{index}");
+            let camera_name = format!("camface{index}");
+            let script = build_camera_crop_sendcmd(
+                &overlay.crop_keyframes,
+                chain_start_ms,
+                &[camera_name.clone(), matte_name.clone()],
+            );
+            let path = std::env::temp_dir().join(format!(
+                "rf-sendcmd-{}-{}.txt",
+                plan.project_id,
+                uuid::Uuid::new_v4()
             ));
+            if !script.is_empty() {
+                std::fs::write(&path, script.as_bytes()).map_err(|error| {
+                    InternalError::Storage(format!("write camera crop script: {error}"))
+                })?;
+                temp_mask_guards.push(TempMaskFile(path.clone()));
+                let escaped = captions::escape_filter_path(&path);
+                geometry_ops.push_str(&format!(
+                    ",crop@{camera_name}=w={}:h={}:x={}:y={},sendcmd=f='{escaped}'",
+                    first.width, first.height, first.x, first.y
+                ));
+                matte_geometry_ops.push_str(&format!(
+                    ",crop@{matte_name}=w={}:h={}:x={}:y={},sendcmd=f='{escaped}'",
+                    first.width, first.height, first.x, first.y
+                ));
+            }
+            geometry_ops.push_str(&format!(
+                ",scale={overlay_w}:{overlay_h}:force_original_aspect_ratio=decrease:force_divisible_by=2:threads=auto,pad={overlay_w}:{overlay_h}:(ow-iw)/2:(oh-ih)/2:color=black@0"
+            ));
+        } else if let Some(crop) = &overlay.crop {
+            let crop_ops = format!(",crop={}:{}:{}:{}", crop.width, crop.height, crop.x, crop.y);
+            geometry_ops.push_str(&crop_ops);
+            matte_geometry_ops.push_str(&crop_ops);
             geometry_ops.push_str(&format!(
                 ",scale={overlay_w}:{overlay_h}:force_original_aspect_ratio=decrease:force_divisible_by=2:threads=auto,pad={overlay_w}:{overlay_h}:(ow-iw)/2:(oh-ih)/2:color=black@0"
             ));
@@ -3565,16 +3839,162 @@ fn render_composition_window(
         };
 
         // 3. Shared geometry/mask apply once, after the pieces are joined.
-        let camera_stream_label = format!("camera_stream{index}");
+        // Camera colour (#4a): one composed `.cube`, applied identically by
+        // both renderers. `None` means the camera needs no colour pass.
+        let lut_path = overlay
+            .color
+            .as_ref()
+            .map(|color| shared.camera_lut_file(color, asset_paths))
+            .transpose()?
+            .flatten();
+        // Cutout (#4b): decode the matte with the same piece timing so it stays
+        // frame-aligned with the camera stream.
+        let matte_label = if let Some(matte_index) = job.matte_input_index {
+            let mut labels = Vec::with_capacity(job.pieces.len());
+            for (piece_index, piece) in job.pieces.iter().enumerate() {
+                let clamp = piece.clamp;
+                let frames = ((clamp.chain_dur_s * fps).round().max(0.0) as u64).max(1);
+                let piece_duration = fmt_secs(frames as f64 / fps);
+                let label = format!("camera{index}_matte_piece{piece_index}");
+                filters.push(format!(
+                    "[{matte_index}:v]trim=start={}:end={},setpts=PTS-STARTPTS,fps={},setsar=1,tpad=stop_mode=clone:stop_duration={piece_duration},tpad=stop_mode=add:stop_duration={piece_duration}:color=black,trim=end_frame={frames},setpts=PTS-STARTPTS[{label}]",
+                    fmt_secs((clamp.src_in_s - job.matte_delay_s - job.matte_seek_s).max(0.0)),
+                    fmt_secs((clamp.src_out_s - job.matte_delay_s - job.matte_seek_s).max(0.0)),
+                    canvas.fps,
+                ));
+                labels.push(format!("[{label}]"));
+            }
+            let joined = if labels.len() == 1 {
+                labels.remove(0)
+            } else {
+                let label = format!("camera{index}_matte_concat");
+                filters.push(format!(
+                    "{}concat=n={}:v=1:a=0[{label}]",
+                    labels.join(""),
+                    labels.len()
+                ));
+                format!("[{label}]")
+            };
+            let matte_label = format!("camera{index}_matte");
+            let mut matte_filter =
+                format!("{joined}{}", matte_geometry_ops.trim_start_matches(','));
+            matte_filter.push_str(&format!(
+                ",scale={overlay_w}:{overlay_h}:force_original_aspect_ratio=increase:force_divisible_by=2:threads=auto,crop={overlay_w}:{overlay_h},format=gray"
+            ));
+            let cutout = overlay.cutout.as_ref();
+            let softness = cutout.map(|c| c.edge_softness).unwrap_or(0.0);
+            if softness > 0.2 {
+                matte_filter.push_str(&format!(
+                    ",boxblur=lr={:.2}:lp=2",
+                    softness.clamp(0.0, 16.0)
+                ));
+            }
+            let shrink = cutout.map(|c| c.edge_shrink).unwrap_or(0.0);
+            if shrink.abs() > 0.2 {
+                // Positive shrink pulls the matte in; negative expands it.
+                let shift = (shrink.clamp(-8.0, 8.0) * 12.0).round();
+                matte_filter.push_str(&format!(",lut=y='clip((val-({shift}))*1.04,0,255)'"));
+            }
+            matte_filter.push_str(&format!("[{matte_label}]"));
+            filters.push(matte_filter);
+            Some(matte_label)
+        } else {
+            None
+        };
+
         // `geometry_ops` is written as a suffix (`",crop=...,"`) for the
         // decode chain; here it follows an input label, so the leading comma
         // would parse as an empty filter.
         let mut camera_filter = format!("{raw_label}{}", geometry_ops.trim_start_matches(','));
-        if overlay.opacity < 1.0 {
-            camera_filter.push_str(&format!(",colorchannelmixer=aa={:.4}", overlay.opacity));
+        if let Some(path) = lut_path.as_deref() {
+            let escaped = captions::escape_filter_path(path);
+            camera_filter.push_str(&format!(
+                ",format=rgb24,lut3d=file='{escaped}':interp=tetrahedral"
+            ));
         }
-        camera_filter.push_str(&format!(",format=rgba[{camera_stream_label}]"));
-        filters.push(camera_filter);
+        let camera_stream_label = if let Some(matte_label) = matte_label.as_deref() {
+            let rgb_label = format!("camera{index}_rgb");
+            camera_filter.push_str(&format!(",format=rgb24[{rgb_label}]"));
+            filters.push(camera_filter);
+            let cutout = overlay.cutout.as_ref();
+            let background = cutout
+                .map(|cutout| cutout.background.as_str())
+                .unwrap_or("none");
+            let foreground = format!("camera{index}_fg");
+            let blur_pair = if background == "blur" {
+                let fg_source = format!("camera{index}_fg_src");
+                let bg_source = format!("camera{index}_bg_src");
+                filters.push(format!("[{rgb_label}]split=2[{fg_source}][{bg_source}]"));
+                Some((fg_source, bg_source))
+            } else {
+                None
+            };
+            let foreground_source = blur_pair
+                .as_ref()
+                .map(|(fg_source, _)| fg_source.clone())
+                .unwrap_or_else(|| rgb_label.clone());
+            filters.push(format!(
+                "[{foreground_source}][{matte_label}]alphamerge[{foreground}]"
+            ));
+            let out_label = format!("camera_cutout{index}");
+            match background {
+                "blur" => {
+                    let radius = cutout
+                        .map(|c| c.blur_radius)
+                        .unwrap_or(18.0)
+                        .clamp(0.0, 100.0);
+                    let blurred = format!("camera{index}_bg_blur");
+                    let bg_source = blur_pair
+                        .as_ref()
+                        .map(|(_, bg_source)| bg_source.clone())
+                        .unwrap_or_else(|| rgb_label.clone());
+                    filters.push(format!(
+                        "[{bg_source}]boxblur=lr={radius:.2}:lp=2[{blurred}]"
+                    ));
+                    filters.push(format!(
+                        "[{blurred}][{foreground}]overlay=0:0:format=auto[{out_label}]"
+                    ));
+                }
+                "color" => {
+                    let color = cutout
+                        .map(|c| safe_filter_color(&c.color))
+                        .unwrap_or_else(|| "0x0f172a".to_string());
+                    filters.push(format!(
+                        "color=c={color}:s={overlay_w}x{overlay_h}:r={fps}[{out_label}_bg]"
+                    ));
+                    filters.push(format!(
+                        "[{out_label}_bg][{foreground}]overlay=0:0:format=auto[{out_label}]"
+                    ));
+                }
+                "image" => {
+                    if let Some(bg_index) = job.bg_image_input_index {
+                        let bg = format!("camera{index}_bg_image");
+                        filters.push(format!(
+                            "[{bg_index}:v]scale={overlay_w}:{overlay_h}:force_original_aspect_ratio=increase,crop={overlay_w}:{overlay_h},format=rgba[{bg}]"
+                        ));
+                        filters.push(format!(
+                            "[{bg}][{foreground}]overlay=0:0:format=auto[{out_label}]"
+                        ));
+                    } else {
+                        // Missing image asset: fall back to the transparent
+                        // cutout rather than failing the whole export.
+                        filters.push(format!("[{foreground}]null[{out_label}]"));
+                    }
+                }
+                _ => {
+                    filters.push(format!("[{foreground}]null[{out_label}]"));
+                }
+            }
+            out_label
+        } else {
+            let label = format!("camera_stream{index}");
+            if overlay.opacity < 1.0 {
+                camera_filter.push_str(&format!(",colorchannelmixer=aa={:.4}", overlay.opacity));
+            }
+            camera_filter.push_str(&format!(",format=rgba[{label}]"));
+            filters.push(camera_filter);
+            label
+        };
 
         // 4. Mask camera video stream (for circle and rounded shapes)
         let chain_duration = fmt_secs(chain_frames as f64 / fps);
@@ -4893,12 +5313,68 @@ struct CameraTrackJob {
     pieces: Vec<CameraPieceJob>,
     input_index: usize,
     seek_s: f64,
+    /// Resolved cutout matte input (same seek window as the camera input).
+    matte_input_index: Option<usize>,
+    /// Matte seek offset and the camera stream's start delay, so matte trims
+    /// stay aligned with the camera's container timestamps.
+    matte_seek_s: f64,
+    matte_delay_s: f64,
+    /// Background-image input for `cutout.background = image`.
+    bg_image_input_index: Option<usize>,
 }
 
 #[derive(Clone, Copy)]
 struct CameraPieceJob {
     overlay_index: usize,
     clamp: CameraClamp,
+}
+
+/// Add the cutout matte and optional background image as graph inputs for one
+/// camera track. Seeked layouts share the camera input's window; the legacy
+/// whole-asset layout reads them unseeked.
+#[allow(clippy::too_many_arguments)]
+fn push_camera_ai_inputs(
+    job: &mut CameraTrackJob,
+    overlay: &RenderPlanOverlay,
+    asset_paths: &HashMap<String, PathBuf>,
+    input_specs: &mut Vec<InputSpec>,
+    seek_s: Option<f64>,
+    matte_seek_s: f64,
+    matte_delay_s: f64,
+    duration_s: Option<f64>,
+    hwaccel: bool,
+) {
+    let Some(cutout) = overlay.cutout.as_ref() else {
+        return;
+    };
+    if let Some(matte) = cutout.matte_path.as_deref() {
+        job.matte_input_index = Some(input_specs.len());
+        job.matte_seek_s = matte_seek_s;
+        job.matte_delay_s = matte_delay_s;
+        input_specs.push(InputSpec {
+            key: format!("cam-matte:{}", job.track_index),
+            path: PathBuf::from(matte),
+            seek_s: seek_s.map(|_| matte_seek_s),
+            duration_s,
+            hwaccel,
+        });
+    }
+    if cutout.background == "image" {
+        if let Some(path) = cutout
+            .image_asset_id
+            .as_deref()
+            .and_then(|asset_id| asset_paths.get(asset_id))
+        {
+            job.bg_image_input_index = Some(input_specs.len());
+            input_specs.push(InputSpec {
+                key: format!("cam-bg:{}", job.track_index),
+                path: path.clone(),
+                seek_s: None,
+                duration_s: None,
+                hwaccel: false,
+            });
+        }
+    }
 }
 
 fn same_f64(a: f64, b: f64) -> bool {
@@ -4967,6 +5443,9 @@ fn overlay_visual_matches(left: &RenderPlanOverlay, right: &RenderPlanOverlay) -
         && left.role == right.role
         && left.fit == right.fit
         && same_optional_f64(left.radius, right.radius)
+        && left.color == right.color
+        && left.cutout == right.cutout
+        && left.crop_keyframes == right.crop_keyframes
         // Animated layers carry absolute-time keyframes; two pieces of one clip
         // never share them, so comparing them keeps Smart Cut pieces of the same
         // animation in one track and different animations apart.
@@ -5917,6 +6396,34 @@ fn pack_plane_layout(plane_rects: &[(u32, u32, u32, u32)]) -> (Vec<(u32, u32)>, 
         let height = plane_rects.iter().map(|rect| rect.3).sum();
         (offsets, width.max(1), height)
     }
+}
+
+/// Format `sendcmd` lines that move named `crop` filters between face-tracked
+/// source crops. Times are relative to the decoded chain (which starts at 0
+/// after concat); keyframes are absolute output ms.
+pub(crate) fn build_camera_crop_sendcmd(
+    keyframes: &[RenderCropKeyframe],
+    chain_start_ms: f64,
+    filter_names: &[String],
+) -> String {
+    let mut script = String::new();
+    let mut previous: Option<(i32, i32)> = None;
+    for keyframe in keyframes {
+        let time_s = (keyframe.time_ms as f64 - chain_start_ms) / 1000.0;
+        if time_s < -1e-6 {
+            continue;
+        }
+        let time_s = time_s.max(0.0) + 1e-4;
+        if previous == Some((keyframe.x, keyframe.y)) {
+            continue;
+        }
+        previous = Some((keyframe.x, keyframe.y));
+        for name in filter_names {
+            script.push_str(&format!("{time_s:.6} {name} x {};\n", keyframe.x));
+            script.push_str(&format!("{time_s:.6} {name} y {};\n", keyframe.y));
+        }
+    }
+    script
 }
 
 /// Format `sendcmd` lines that move `overlay@cursor` between per-frame tile
@@ -10114,6 +10621,30 @@ fn overlay_values_are_finite(overlay: &RenderPlanOverlay) -> bool {
     ]
     .iter()
     .all(|value| value.is_finite())
+        && overlay.color.as_ref().is_none_or(|color| {
+            [
+                color.exposure,
+                color.contrast,
+                color.saturation,
+                color.temperature,
+                color.tint,
+                color.lut_intensity,
+            ]
+            .iter()
+            .all(|value| value.is_finite())
+        })
+        && overlay.cutout.as_ref().is_none_or(|cutout| {
+            cutout.blur_radius.is_finite()
+                && cutout.edge_softness.is_finite()
+                && cutout.edge_shrink.is_finite()
+                && matches!(
+                    cutout.background.as_str(),
+                    "none" | "blur" | "color" | "image"
+                )
+        })
+        && overlay.crop_keyframes.iter().all(|keyframe| {
+            keyframe.width >= 2 && keyframe.height >= 2 && keyframe.x >= 0 && keyframe.y >= 0
+        })
 }
 
 fn mask_values_are_finite(mask: &RenderPlanMask) -> bool {
@@ -10958,6 +11489,7 @@ mod tests {
             shadow_offset_x: None,
             shadow_offset_y: None,
             preset: None,
+            ..Default::default()
         }
     }
 
@@ -12857,6 +13389,7 @@ mod tests {
             shadow_offset_x: None,
             shadow_offset_y: None,
             preset: Some("side-by-side".into()),
+            ..Default::default()
         };
 
         let plan = RenderPlan {
@@ -15748,6 +16281,7 @@ mod tests {
                 shadow_offset_x: Some(0.0),
                 shadow_offset_y: Some(0.0),
                 preset: None,
+                ..Default::default()
             }],
             captions: Vec::new(),
             caption_mode: "burn-in".into(),
@@ -16229,6 +16763,7 @@ mod tests {
                 shadow_offset_x: Some(0.0),
                 shadow_offset_y: Some(0.0),
                 preset: None,
+                ..Default::default()
             }],
             captions: Vec::new(),
             caption_mode: "burn-in".into(),
@@ -16420,6 +16955,7 @@ mod tests {
                 shadow_offset_x: Some(0.0),
                 shadow_offset_y: Some(4.0),
                 preset: None,
+                ..Default::default()
             }],
             captions: Vec::new(),
             caption_mode: "burn-in".into(),
@@ -16846,6 +17382,7 @@ mod tests {
                     crop: None,
                     visible: true,
                     preset: None,
+                    ..Default::default()
                 },
                 RenderPlanOverlay {
                     asset_id: "camera-asset".into(),
@@ -16879,6 +17416,7 @@ mod tests {
                     crop: None,
                     visible: true,
                     preset: None,
+                    ..Default::default()
                 },
             ],
             zoom_segments: Vec::new(),
@@ -17073,6 +17611,7 @@ mod tests {
                 crop: None,
                 visible: true,
                 preset: None,
+                ..Default::default()
             }],
             zoom_segments: Vec::new(),
             cursor_effects: Vec::new(),
@@ -17301,6 +17840,7 @@ mod tests {
                 shadow_offset_x: None,
                 shadow_offset_y: None,
                 preset: None,
+                ..Default::default()
             });
         }
         let plan = RenderPlan {

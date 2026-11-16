@@ -60,6 +60,7 @@ import { createProject, loadProject, saveProject, snapshotProject } from "../lib
 import { getCursorTelemetry } from "../lib/cursor"
 import { getKeystrokeEvents } from "../lib/keystrokes"
 import { getRecordingSmartZoom } from "../lib/recorder"
+import { loadCameraAiArtifactsForExport } from "../lib/camera-ai"
 import {
   createCursorEngine,
   createWasmCursorEngine,
@@ -1522,6 +1523,20 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       ? freeExportSettings(effectiveExportSettings)
       : effectiveExportSettings
 
+    // Camera-AI derivatives are offline artifacts; resolve them just before
+    // planning so a freshly completed matte/face job is picked up.
+    const cameraClips = engine.history.present.tracks.flatMap((track) =>
+      track.kind === "camera"
+        ? track.clips.filter(
+            (clip): clip is Extract<(typeof track.clips)[number], { kind: "camera" }> =>
+              clip.kind === "camera",
+          )
+        : [],
+    )
+    const cameraAi = currentProject?.recordingId
+      ? await loadCameraAiArtifactsForExport(currentProject.recordingId, cameraClips)
+      : undefined
+
     const plan = buildRenderPlan({
       state: engine.history.present,
       projectId: currentProject.id,
@@ -1529,6 +1544,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       captionMode: finalSettings.captionMode,
       chapterMode: finalSettings.chapterMode,
       assets: currentProject.assets,
+      cameraAi,
       cursorTelemetry: get().cursorTelemetry,
       cursorEngine: get().cursorEngine,
       stripProFeatures: strip,

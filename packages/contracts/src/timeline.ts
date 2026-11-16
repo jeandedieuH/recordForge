@@ -245,6 +245,81 @@ export const clipTransformSchema = z.object({
 
 export type ClipTransform = z.infer<typeof clipTransformSchema>
 
+// Camera colour grade (#4a). Adjustments and an optional 3D LUT are composed
+// into one cube by the overlay engine, so the preview (WASM/WebGL2) and both
+// export renderers sample exactly the same table. `lutId` is either a bundled
+// look id (`look:<name>`) or a project asset id imported from a `.cube` file.
+export const BUNDLED_CAMERA_LUT_IDS = [
+  "look:warm",
+  "look:cool",
+  "look:film",
+  "look:teal-orange",
+  "look:mono",
+  "look:vivid",
+  "look:matte",
+] as const
+export type BundledCameraLutId = (typeof BUNDLED_CAMERA_LUT_IDS)[number]
+
+export const BUNDLED_CAMERA_LUTS: ReadonlyArray<{ id: BundledCameraLutId; label: string }> = [
+  { id: "look:warm", label: "Warm" },
+  { id: "look:cool", label: "Cool" },
+  { id: "look:film", label: "Film" },
+  { id: "look:teal-orange", label: "Teal & Orange" },
+  { id: "look:mono", label: "Mono" },
+  { id: "look:vivid", label: "Vivid" },
+  { id: "look:matte", label: "Matte" },
+]
+
+export const cameraColorSchema = z.object({
+  /** Exposure in stops (-2…+2). */
+  exposure: z.number().min(-2).max(2).default(0),
+  /** -1 flattest, +1 punchiest. */
+  contrast: z.number().min(-1).max(1).default(0),
+  /** -1 monochrome, +1 vivid. */
+  saturation: z.number().min(-1).max(1).default(0),
+  /** -1 cooler/blue, +1 warmer/amber. */
+  temperature: z.number().min(-1).max(1).default(0),
+  /** -1 green, +1 magenta. */
+  tint: z.number().min(-1).max(1).default(0),
+  /** Bundled `look:*` id or a project `.cube` asset id. */
+  lutId: z.string().optional(),
+  lutIntensity: z.number().min(0).max(1).default(1),
+})
+export type CameraColor = z.infer<typeof cameraColorSchema>
+
+export const cameraCutoutBackgroundSchema = z.enum(["none", "blur", "color", "image"])
+export type CameraCutoutBackground = z.infer<typeof cameraCutoutBackgroundSchema>
+
+// Portrait cutout (#4b). The matte itself is an offline derivative job; these
+// fields only describe how the derived alpha is composited.
+export const cameraCutoutSchema = z.object({
+  enabled: z.boolean().default(false),
+  background: cameraCutoutBackgroundSchema.default("none"),
+  blurRadius: z.number().min(0).max(100).default(18),
+  color: z.string().default("#0f172a"),
+  imageAssetId: z.string().optional(),
+  /** Matte edge softening in matte pixels (0…16). */
+  edgeSoftness: z.number().min(0).max(16).default(2),
+  /** Pulls the matte in (positive) or expands it (negative), in matte pixels. */
+  edgeShrink: z.number().min(-8).max(8).default(0),
+})
+export type CameraCutout = z.infer<typeof cameraCutoutSchema>
+
+export const cameraFaceFramingSchema = z.enum(["tight", "medium", "wide"])
+export type CameraFaceFraming = z.infer<typeof cameraFaceFramingSchema>
+
+// Face-tracked framing (#4c). The face detector runs offline at ~8 Hz; the
+// resolver turns its boxes into a smoothed, fixed-size source crop.
+export const cameraFaceTrackingSchema = z.object({
+  enabled: z.boolean().default(false),
+  framing: cameraFaceFramingSchema.default("medium"),
+  /** One-Euro smoothing strength, 0…1 (higher = calmer). */
+  smoothness: z.number().min(0).max(1).default(0.6),
+  /** Headroom above the face box, as a fraction of the crop height. */
+  headroom: z.number().min(0).max(1).default(0.12),
+})
+export type CameraFaceTracking = z.infer<typeof cameraFaceTrackingSchema>
+
 // Zoom ranges are timeline effects rather than media clips. The target is
 // clamped to the canvas before it reaches either the preview or the exporter.
 // Optional Phase 9 metadata keeps v1 manual zooms readable while distinguishing
@@ -350,6 +425,10 @@ export type ScreenClip = z.infer<typeof screenClipSchema>
 export const cameraClipSchema = timelineClipBaseSchema.extend({
   kind: z.literal("camera"),
   transform: clipTransformSchema.default(() => clipTransformSchema.parse({})),
+  // M4 camera effects. All optional so v1 projects load unchanged.
+  color: cameraColorSchema.optional(),
+  cutout: cameraCutoutSchema.optional(),
+  faceTracking: cameraFaceTrackingSchema.optional(),
 })
 
 export type CameraClip = z.infer<typeof cameraClipSchema>
@@ -1088,6 +1167,46 @@ export const renderPlanLayoutKeyframeSchema = z.object({
 
 export type RenderPlanLayoutKeyframe = z.infer<typeof renderPlanLayoutKeyframeSchema>
 
+// One sampled source crop for face-tracked framing (#4c), in absolute output
+// ms. Width/height stay fixed within a clip; the renderer interpolates x/y.
+export const renderPlanCropKeyframeSchema = z.object({
+  timeMs: z.number().transform(Math.round).pipe(z.number().int().min(0)),
+  x: z.number().int().min(0),
+  y: z.number().int().min(0),
+  width: z.number().int().min(2),
+  height: z.number().int().min(2),
+})
+
+export type RenderPlanCropKeyframe = z.infer<typeof renderPlanCropKeyframeSchema>
+
+// Camera colour resolution carried into the plan. `lutAssetId` names a project
+// `.cube` asset; `lutId` keeps the bundled look id so Rust can generate it.
+export const renderPlanCameraColorSchema = z.object({
+  exposure: z.number().min(-2).max(2).default(0),
+  contrast: z.number().min(-1).max(1).default(0),
+  saturation: z.number().min(-1).max(1).default(0),
+  temperature: z.number().min(-1).max(1).default(0),
+  tint: z.number().min(-1).max(1).default(0),
+  lutId: z.string().optional(),
+  lutAssetId: z.string().optional(),
+  lutIntensity: z.number().min(0).max(1).default(1),
+})
+
+export type RenderPlanCameraColor = z.infer<typeof renderPlanCameraColorSchema>
+
+export const renderPlanCameraCutoutSchema = z.object({
+  background: cameraCutoutBackgroundSchema.default("none"),
+  blurRadius: z.number().min(0).max(100).default(18),
+  color: z.string().default("#0f172a"),
+  imageAssetId: z.string().optional(),
+  edgeSoftness: z.number().min(0).max(16).default(2),
+  edgeShrink: z.number().min(-8).max(8).default(0),
+  /** Absolute path of the derived grayscale matte, validated by Rust. */
+  mattePath: z.string().optional(),
+})
+
+export type RenderPlanCameraCutout = z.infer<typeof renderPlanCameraCutoutSchema>
+
 // Picture-in-picture overlay settings for the final render. This is the unified
 // video-layer record (F3): the camera bubble, b-roll video clips and media-track
 // video all cross the plan boundary through it.
@@ -1129,6 +1248,11 @@ export const renderPlanOverlaySchema = z.object({
   shadowOffsetX: z.number().optional(),
   shadowOffsetY: z.number().optional(),
   preset: cameraPlacementPresetSchema.optional(),
+  // M4 camera effects (camera layers only).
+  color: renderPlanCameraColorSchema.optional(),
+  cutout: renderPlanCameraCutoutSchema.optional(),
+  // Face-tracked framing: fixed-size source crop with a moving centre.
+  cropKeyframes: z.array(renderPlanCropKeyframeSchema).optional(),
 })
 
 export type RenderPlanOverlay = z.infer<typeof renderPlanOverlaySchema>
@@ -1141,6 +1265,9 @@ export const renderPlanCameraLayoutSchema = z.object({
   endMs: z.number().transform(Math.round).pipe(z.number().int().positive()),
   camera: z.array(renderPlanLayoutKeyframeSchema).min(1),
   screen: z.array(renderPlanLayoutKeyframeSchema).min(1).optional(),
+  // `silence` marks a hide-during-silence segment (#4d, Pro) so Rust can gate
+  // it without re-reading the timeline.
+  source: cameraLayoutSourceSchema.optional(),
 })
 
 export type RenderPlanCameraLayout = z.infer<typeof renderPlanCameraLayoutSchema>

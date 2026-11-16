@@ -70,6 +70,7 @@ const IMPORT_EXTENSIONS = [
   "webm",
   "avi",
   "m4v",
+  "cube",
 ]
 
 const BUILTIN_ROLES = new Set([

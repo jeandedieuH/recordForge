@@ -1,5 +1,7 @@
 export { createOverlayWasmEngine } from "./wasm-engine"
 export type { OverlayEngine } from "./wasm-engine"
+export { composeCameraLut } from "./camera-color"
+export type { CameraLutRequest, CameraLutTexture } from "./camera-color"
 export { diffOverlayPlanGeometry } from "./plan-geometry"
 export type { OverlayGeometryPatch } from "./plan-geometry"
 export { renderOverlayDisplayList, wrapTextToLines } from "./canvas-renderer"

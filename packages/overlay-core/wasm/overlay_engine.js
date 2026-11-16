@@ -57,6 +57,33 @@ export class WasmOverlayEngine {
     }
 }
 if (Symbol.dispose) WasmOverlayEngine.prototype[Symbol.dispose] = WasmOverlayEngine.prototype.free;
+
+/**
+ * Size of the composed camera LUT texture (33).
+ * @returns {number}
+ */
+export function camera_lut_size() {
+    const ret = wasm.camera_lut_size();
+    return ret >>> 0;
+}
+
+/**
+ * Composed camera LUT as an RGBA8 3D texture (size³ × 4 bytes, red fastest).
+ * Same table the export writes as a `.cube`, so preview and render agree.
+ * @param {string} request_json
+ * @returns {Uint8Array}
+ */
+export function camera_lut_texture(request_json) {
+    const ptr0 = passStringToWasm0(request_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.camera_lut_texture(ptr0, len0);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v2;
+}
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,
@@ -87,6 +114,11 @@ function __wbg_get_imports() {
 const WasmOverlayEngineFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_wasmoverlayengine_free(ptr, 1));
+
+function getArrayU8FromWasm0(ptr, len) {
+    ptr = ptr >>> 0;
+    return getUint8ArrayMemory0().subarray(ptr / 1, ptr / 1 + len);
+}
 
 function getStringFromWasm0(ptr, len) {
     return decodeText(ptr >>> 0, len);

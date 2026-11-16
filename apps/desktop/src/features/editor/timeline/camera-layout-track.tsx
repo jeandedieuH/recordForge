@@ -260,9 +260,12 @@ function CameraLayoutSegmentItem({
     }
   }
 
-  function applyGesture(clientX: number, altKey: boolean, phase: "draft" | "commit") {
-    const gesture = gestureRef.current
-    if (!gesture) return
+  function applyGesture(
+    gesture: LayoutGesture,
+    clientX: number,
+    altKey: boolean,
+    phase: "draft" | "commit",
+  ) {
     const deltaMs = getTimelineTime(clientX) - gesture.initialTimeMs
     const snap = { enabled: snapEnabled && !altKey, thresholdMs: snapThresholdMs }
     // Ctrl/Alt-free moves snap to clips, markers and the live playhead exactly
@@ -331,7 +334,7 @@ function CameraLayoutSegmentItem({
     suppressClickRef.current = true
     setGestureMode(gesture.mode)
     event.preventDefault()
-    applyGesture(event.clientX, event.altKey, "draft")
+    applyGesture(gesture, event.clientX, event.altKey, "draft")
   }
 
   function finishGesture(event: React.PointerEvent<HTMLDivElement>) {
@@ -346,7 +349,7 @@ function CameraLayoutSegmentItem({
       suppressClickRef.current = false
       return
     }
-    applyGesture(event.clientX, event.altKey, "commit")
+    applyGesture(gesture, event.clientX, event.altKey, "commit")
     onSnapGuide(null)
   }
 

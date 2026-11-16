@@ -1856,6 +1856,10 @@ fn compositor_spec(
             dest: (x.max(0) as u32, y.max(0) as u32),
             shape,
             opacity: overlay.opacity.clamp(0.0, 1.0) as f32,
+            alpha: overlay
+                .cutout
+                .as_ref()
+                .is_some_and(|cutout| cutout.matte_path.is_some()),
             border,
             shadow,
         });
@@ -2222,6 +2226,7 @@ mod tests {
             end_ms: 1_000,
             camera: vec![keyframe(0, 0.0, 1920.0, 1.0)],
             screen: None,
+            source: None,
         }];
         plan.overlays = vec![crate::exports::RenderPlanOverlay {
             id: Some("layer".into()),
@@ -2255,6 +2260,7 @@ mod tests {
             shadow_offset_x: None,
             shadow_offset_y: None,
             preset: None,
+            ..Default::default()
         }];
         let track = crate::exports::coalesce_camera_overlays(&plan.overlays)
             .into_iter()
@@ -2277,6 +2283,7 @@ mod tests {
                 keyframe(1_000, 0.0, 480.0, 1.0),
                 keyframe(2_000, 480.0, 960.0, 1.0),
             ]),
+            source: None,
         }];
         assert_eq!(camera_layout_max_rect(&plan), Some((960.0, 1080.0)));
         assert_eq!(screen_layout_rect_at(&plan, 900.0), None);

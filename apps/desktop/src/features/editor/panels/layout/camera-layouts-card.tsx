@@ -4,12 +4,15 @@ import {
   createAddCameraLayoutCommand,
   createDeleteCameraLayoutCommand,
   createDeleteCameraLayoutsCommand,
+  createGenerateCameraSilenceLayoutsCommand,
   createUpdateCameraLayoutCommand,
   formatTime,
+  getTotalDuration,
 } from "@recordforge/editor-core"
 import { Button, IconButton, NativeSelect, cn } from "@recordforge/ui"
 import { Columns2, EyeOff, PictureInPicture2, RectangleHorizontal, Trash2 } from "lucide-react"
 import { useTimelineStore } from "../../../../stores/timeline-store"
+import { useSmartCutStore } from "../../../../stores/smart-cut-store"
 
 /** Default length of a layout added from the card, in ms. */
 const LAYOUT_ADD_DURATION_MS = 4_000
@@ -39,6 +42,7 @@ export function CameraLayoutsCard() {
   const execute = useTimelineStore((state) => state.execute)
   const timeline = useTimelineStore((state) => state.engine?.history.present)
   const playheadMs = useTimelineStore((state) => state.view.playheadMs)
+  const silenceReview = useSmartCutStore((state) => state.review)
 
   const segments = useMemo(
     () =>
@@ -85,6 +89,28 @@ export function CameraLayoutsCard() {
     )
   }
 
+  const silenceSegments = segments.filter((segment) => segment.source === "silence")
+  const canHideSilence =
+    hasCameraClip &&
+    silenceReview !== null &&
+    silenceReview.ranges.filter((range) => !silenceReview.excludedIds.includes(range.id)).length > 0
+
+  function hideDuringSilence() {
+    if (!canHideSilence || !silenceReview || !timeline) return
+    const included = silenceReview.ranges.filter(
+      (range) => !silenceReview.excludedIds.includes(range.id),
+    )
+    execute(
+      createGenerateCameraSilenceLayoutsCommand(
+        included.map((range) => ({ startMs: range.startMs, endMs: range.endMs })),
+        {
+          durationMs: getTotalDuration(timeline),
+          fps: timeline.canvas.fps,
+        },
+      ),
+    )
+  }
+
   return (
     <div className="flex flex-col gap-2 border-t border-border pt-3">
       <div className="flex items-center justify-between gap-2">
@@ -127,6 +153,30 @@ export function CameraLayoutsCard() {
             </Button>
           )
         })}
+      </div>
+
+      <div className="flex items-center justify-between gap-2 rounded-md border border-border bg-surface-dim px-2 py-1.5">
+        <div className="flex flex-col">
+          <span className="text-[11px] font-medium text-foreground">Hide during silence</span>
+          <span className="text-[10px] text-subtle-foreground">
+            {silenceReview
+              ? `${silenceReview.ranges.length} silence range(s) from Smart Cut`
+              : "Run Smart Cut analysis first"}
+          </span>
+        </div>
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={!canHideSilence}
+          onClick={hideDuringSilence}
+          title={
+            canHideSilence
+              ? "Insert hidden camera layouts for every silence range"
+              : "Analyze silence in Smart Cut first"
+          }
+        >
+          {silenceSegments.length > 0 ? "Regenerate" : "Generate"}
+        </Button>
       </div>
 
       {segments.length === 0 ? (

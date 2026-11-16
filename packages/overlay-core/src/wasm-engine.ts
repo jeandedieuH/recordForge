@@ -27,7 +27,8 @@ export interface OverlayEngine {
 
 let initPromise: Promise<void> | null = null
 
-async function ensureInitialized(): Promise<void> {
+/** Shared WASM initialization for the overlay engine and camera-LUT helpers. */
+export async function ensureOverlayWasmInitialized(): Promise<void> {
   if (typeof window === "undefined" || typeof WebAssembly === "undefined") {
     throw new Error("WASM overlay engine is only available in the browser")
   }
@@ -45,7 +46,7 @@ async function ensureInitialized(): Promise<void> {
 /** Create the browser adapter for the canonical Rust overlay scene. */
 export async function createOverlayWasmEngine(plan: OverlayRenderPlan): Promise<OverlayEngine> {
   const validatedPlan = overlayRenderPlanSchema.parse(plan)
-  await ensureInitialized()
+  await ensureOverlayWasmInitialized()
 
   const wasm = new WasmOverlayEngine(JSON.stringify(validatedPlan))
   let isDisposed = false

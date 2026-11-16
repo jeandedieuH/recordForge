@@ -28,6 +28,7 @@ import type {
   TimelineClip,
   TimelineState,
 } from "@recordforge/domain"
+import type { CameraColor, FaceTrack } from "@recordforge/contracts"
 import {
   applyCaptionContinuity,
   baseCameraLayoutPose,
@@ -38,6 +39,7 @@ import {
   resolveCameraShots,
   resolveCaptionLayout,
   resolveClipDesign,
+  resolveFaceCropKeyframes,
   sampleCameraLayoutKeyframes,
   timelineMarkersToChapters,
   videoLayerAnimationRamps,
@@ -234,6 +236,24 @@ function videoLayerKeyframes(
     })
 }
 
+export interface CameraAiRenderArtifacts {
+  /** Absolute path of the derived grayscale matte for this camera stream. */
+  mattePath?: string
+  /** Parsed face-track derivative for this camera stream. */
+  faceTrack?: FaceTrack
+}
+
+function cameraColorIsActive(color: CameraColor): boolean {
+  return Boolean(
+    color.lutId ||
+    color.exposure !== 0 ||
+    color.contrast !== 0 ||
+    color.saturation !== 0 ||
+    color.temperature !== 0 ||
+    color.tint !== 0,
+  )
+}
+
 /**
  * The unified video-layer list (F3): the camera bubble and every b-roll /
  * media-track video clip, in track order. A muted track contributes nothing,
@@ -244,6 +264,7 @@ function toOverlays(
   canvas: TimelineState["canvas"],
   range: ExportRange | undefined,
   assets?: ProjectAsset[],
+  cameraAi?: Record<string, CameraAiRenderArtifacts>,
 ): RenderPlanOverlay[] {
   const assetById = new Map(assets?.map((asset) => [asset.id, asset]))
   const layers: RenderPlanOverlay[] = []
@@ -263,6 +284,59 @@ function toOverlays(
             asset.path && !asset.path.includes(":") && asset.path.toLowerCase().endsWith(".mp4"),
           )
         const streamIndex = isStandaloneWebcam ? undefined : clip.streamIndex
+        const ai = cameraAi?.[String(streamIndex ?? -1)]
+        const color = clip.color
+        const colorPlan =
+          color && cameraColorIsActive(color)
+            ? {
+                exposure: color.exposure,
+                contrast: color.contrast,
+                saturation: color.saturation,
+                temperature: color.temperature,
+                tint: color.tint,
+                lutIntensity: color.lutIntensity,
+                ...(color.lutId
+                  ? color.lutId.startsWith("look:")
+                    ? { lutId: color.lutId }
+                    : { lutAssetId: color.lutId }
+                  : {}),
+              }
+            : undefined
+        const cutout =
+          clip.cutout?.enabled && ai?.mattePath
+            ? {
+                background: clip.cutout.background,
+                blurRadius: clip.cutout.blurRadius,
+                color: clip.cutout.color,
+                imageAssetId: clip.cutout.imageAssetId,
+                edgeSoftness: clip.cutout.edgeSoftness,
+                edgeShrink: clip.cutout.edgeShrink,
+                mattePath: ai.mattePath,
+              }
+            : clip.cutout?.enabled
+              ? {
+                  background: clip.cutout.background,
+                  blurRadius: clip.cutout.blurRadius,
+                  color: clip.cutout.color,
+                  imageAssetId: clip.cutout.imageAssetId,
+                  edgeSoftness: clip.cutout.edgeSoftness,
+                  edgeShrink: clip.cutout.edgeShrink,
+                }
+              : undefined
+        const faceKeyframes =
+          clip.faceTracking?.enabled && ai?.faceTrack
+            ? resolveFaceCropKeyframes({
+                track: ai.faceTrack,
+                sourceInMs: window.sourceInMs,
+                sourceOutMs: window.sourceOutMs,
+                outputStartMs: window.outputStartMs,
+                outputEndMs: window.outputEndMs,
+                settings: clip.faceTracking,
+                sourceWidth: ai.faceTrack.width,
+                sourceHeight: ai.faceTrack.height,
+                fps: canvas.fps,
+              })
+            : null
         layers.push({
           id: clip.id,
           role: "camera",
@@ -277,7 +351,14 @@ function toOverlays(
           y: Math.min(Math.max(0, transform.y), Math.max(0, canvas.height - height)),
           width,
           height,
-          crop: transform.crop,
+          crop: faceKeyframes?.[0]
+            ? {
+                x: faceKeyframes[0].x,
+                y: faceKeyframes[0].y,
+                width: faceKeyframes[0].width,
+                height: faceKeyframes[0].height,
+              }
+            : transform.crop,
           opacity: transform.opacity,
           visible: transform.visible !== false,
           shape: transform.shape,
@@ -292,6 +373,9 @@ function toOverlays(
           shadowOffsetX: transform.shadowOffsetX,
           shadowOffsetY: transform.shadowOffsetY,
           preset: transform.preset,
+          ...(colorPlan ? { color: colorPlan } : {}),
+          ...(cutout ? { cutout } : {}),
+          ...(faceKeyframes ? { cropKeyframes: faceKeyframes } : {}),
         })
         continue
       }
@@ -398,6 +482,7 @@ function toCameraLayouts(
         endMs: Math.max(1, Math.round(endMs - rangeStart)),
         camera,
         screen,
+        source: window.segment.source,
       },
     ]
   })
@@ -1360,6 +1445,9 @@ export function stripProTimelineFeatures(state: TimelineState): TimelineState {
   return {
     ...state,
     canvas,
+    // #4d: silence-generated camera layouts are a Pro effect; manual layouts
+    // stay. The lane is regenerated from the same analysis on upgrade.
+    cameraLayouts: state.cameraLayouts?.filter((segment) => segment.source !== "silence"),
     zoomSegments: state.zoomSegments?.map((segment) => {
       if (segment.style !== "loupe") return segment
       const { loupe: _loupe, ...rest } = segment
@@ -1373,6 +1461,18 @@ export function stripProTimelineFeatures(state: TimelineState): TimelineState {
         }
         if (clip.kind === "text" && clip.titleDesign?.template !== "clean-text") {
           return { ...clip, titleDesign: cleanTextDesign(clip.titleDesign) }
+        }
+        if (clip.kind === "camera") {
+          // Cutout (#4b) and face tracking (#4c) are Pro. Keep the settings so
+          // they return on upgrade, but render the plain camera for Free.
+          if (!clip.cutout?.enabled && !clip.faceTracking?.enabled) return clip
+          return {
+            ...clip,
+            cutout: clip.cutout ? { ...clip.cutout, enabled: false } : clip.cutout,
+            faceTracking: clip.faceTracking
+              ? { ...clip.faceTracking, enabled: false }
+              : clip.faceTracking,
+          }
         }
         return clip
       }),
@@ -1423,6 +1523,12 @@ export interface BuildRenderPlanInput {
   settings?: ProjectExportSettings
   range?: ExportRange
   assets?: ProjectAsset[]
+  /**
+   * Offline camera-AI derivatives keyed by stream index (`"-1"` for a
+   * standalone webcam asset). Supplied by the editor after the matte / face
+   * job completes; absent means the plan keeps the manual crop and no cutout.
+   */
+  cameraAi?: Record<string, CameraAiRenderArtifacts>
   cursorTelemetry?: CursorTelemetryFile | null
   cursorEngine?: CursorEngine | null
   /**
@@ -1547,7 +1653,7 @@ export function buildRenderPlan(
     }
   }
 
-  const overlays = toOverlays(state, state.canvas, effectiveRange, input.assets)
+  const overlays = toOverlays(state, state.canvas, effectiveRange, input.assets, input.cameraAi)
   const cameraLayouts = toCameraLayouts(state, effectiveRange, state.canvas)
   const layerOrder = toLayerOrder(state)
   const firstScreenAssetId = segments[0].assetId

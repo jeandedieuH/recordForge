@@ -168,6 +168,22 @@ the file means an older build that does not know the kind can still open the
 project; the lane simply reappears (empty-safe) the next time a current build
 opens it. Deleting the anchor is rejected by the command engine.
 
+### 2.2.3 Camera clip effects (M4)
+
+Camera clips may carry three optional effect blocks (ADR 021). All are optional
+on project v1; absent means today's plain camera.
+
+| Field | Type | Description |
+|---|---|---|
+| `color` | object | `{ exposure (-2…2), contrast (-1…1), saturation (-1…1), temperature (-1…1), tint (-1…1), lutId?, lutIntensity 0…1 }`. `lutId` is a bundled `look:*` id or a project asset id (`role: "lut"`). Free. |
+| `cutout` | object | `{ enabled, background: "none"\|"blur"\|"color"\|"image", blurRadius, color, imageAssetId?, edgeSoftness, edgeShrink }`. Pro. |
+| `faceTracking` | object | `{ enabled, framing: "tight"\|"medium"\|"wide", smoothness 0…1, headroom 0…1 }`. Pro. The face track itself is a derivative (`camera_ai` job), not stored in the project. |
+
+Hide-during-silence is expressed in the existing `cameraLayouts` lane:
+generated segments have `source: "silence"` and `layout: "hidden"`, and are
+replaced wholesale by `generate-camera-silence-layouts`. Manual segments always
+win on overlap. Free exports strip silence-generated segments.
+
 ### 2.3 Checksum
 
 The `checksum` field holds `sha256:<hex>` where the hex value is the SHA-256 digest of the canonical JSON of the project object with the `checksum` field removed. Rust recomputes it on every atomic save and validates it on every load, falling back to `project.json.bak` when the primary file is corrupt.
@@ -182,7 +198,7 @@ The `checksum` field holds `sha256:<hex>` where the hex value is the SHA-256 dig
 | ---------------- | ------- | -------- | -------------------------------------------------------------------------- |
 | `id`             | string  | yes      | Durable id that clips use as `assetId`                                     |
 | `role`           | string  | yes      | Timeline purpose such as `music`, `graphic`, or `b_roll`                   |
-| `kind`           | string  | no       | Source kind: `audio`, `image`, `video`, `cursor`, or `caption`             |
+| `kind`           | string  | no       | Source kind: `audio`, `image`, `video`, `cursor`, `caption`, or `lut`      |
 | `path`           | string  | yes      | Project-relative copied path, or canonical absolute path for a reference   |
 | `status`         | string  | no       | `available` (default), `missing`, or `relinked`                            |
 | `contentHash`    | string  | no       | SHA-256 source hash used for project-local deduplication                   |
@@ -214,6 +230,7 @@ The `checksum` field holds `sha256:<hex>` where the hex value is the SHA-256 dig
 | `b_roll`        | Imported video overlay source        | Project asset importer            |
 | `image`         | Legacy user-imported image           | Manual import                     |
 | `caption`       | Text/subtitle data                   | User-created                      |
+| `lut`           | Imported `.cube` camera LUT          | Project asset importer            |
 
 ### 3.2 Asset Resolution
 

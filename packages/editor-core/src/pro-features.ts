@@ -42,11 +42,15 @@ function pluralize(count: number, singular: string, plural = `${singular}s`): st
   return count === 1 ? `1 ${singular}` : `${count} ${plural}`
 }
 
-function enabledClips(state: TimelineState, kind: "annotation" | "text") {
+function enabledClips(state: TimelineState, kind: "annotation" | "text" | "camera") {
   return state.tracks
     .filter((track) => !track.muted)
     .flatMap((track) => track.clips)
-    .filter((clip) => clip.kind === kind && clip.enabled !== false)
+    .filter((clip) => clip.kind === kind)
+    .filter((clip) => {
+      if (clip.kind === "camera") return clip.transform.visible !== false
+      return !("enabled" in clip) || clip.enabled !== false
+    })
 }
 
 /**
@@ -115,6 +119,27 @@ export function analyzeProFeatureUsage(
   )
   if (loupes.length > 0) {
     push("glass-loupe", loupes.length, pluralize(loupes.length, "Glass Loupe zoom"))
+  }
+
+  // M4 camera AI. Colour grading is Free and intentionally absent here.
+  const cameraClips = enabledClips(timeline, "camera")
+  const cutouts = cameraClips.filter((clip) => clip.kind === "camera" && clip.cutout?.enabled)
+  if (cutouts.length > 0) {
+    push("camera-cutout", cutouts.length, pluralize(cutouts.length, "camera cutout"))
+  }
+  const tracked = cameraClips.filter((clip) => clip.kind === "camera" && clip.faceTracking?.enabled)
+  if (tracked.length > 0) {
+    push("face-tracking", tracked.length, pluralize(tracked.length, "face-tracked camera"))
+  }
+  const silenceLayouts = (timeline.cameraLayouts ?? []).filter(
+    (segment) => segment.enabled && segment.source === "silence",
+  )
+  if (silenceLayouts.length > 0) {
+    push(
+      "hide-during-silence",
+      silenceLayouts.length,
+      pluralize(silenceLayouts.length, "silence camera layout"),
+    )
   }
 
   return {

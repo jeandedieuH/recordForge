@@ -21,6 +21,9 @@ export const PRO_FEATURE_KEYS = [
   "cloud-storage",
   "motion-blur",
   "glass-loupe",
+  "camera-cutout",
+  "face-tracking",
+  "hide-during-silence",
 ] as const
 
 export const proFeatureKeySchema = z.enum(PRO_FEATURE_KEYS)
@@ -93,6 +96,18 @@ export const PRO_FEATURES: Record<ProFeatureKey, ProFeature> = {
   "glass-loupe": {
     label: "Glass Loupe",
     description: "Magnify details inside a frosted-glass lens instead of zooming the frame.",
+  },
+  "camera-cutout": {
+    label: "Camera cutout",
+    description: "Remove your background on camera with an on-device portrait matte.",
+  },
+  "face-tracking": {
+    label: "Face tracking",
+    description: "Keep your face smoothly framed with automatic camera crops.",
+  },
+  "hide-during-silence": {
+    label: "Hide camera during silence",
+    description: "Automatically hide the camera bubble while you are not speaking.",
   },
 }
 

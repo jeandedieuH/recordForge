@@ -13,6 +13,7 @@ import type {
   TimelineViewState,
   ZoomPreset,
 } from "@recordforge/contracts"
+import { getTotalDuration } from "@recordforge/domain"
 import {
   buildSnapTargets,
   getClipGroupId,
@@ -39,6 +40,7 @@ import { toAssetUrl } from "../media/derivative-resources"
 import { TimelineMarquee } from "./timeline-marquee"
 import { SilencePreviewLayer } from "./silence-preview-layer"
 import { TimelineMinimap } from "./timeline-minimap"
+import { pointerTimeMs } from "./timeline-navigation"
 import { TimelinePlayhead } from "./timeline-playhead"
 import { TimelineRuler, formatTimelineTime, getVisibleTickInterval } from "./timeline-ruler"
 import { TimelineSnapBadge } from "./timeline-snap-badge"
@@ -374,11 +376,19 @@ export function TimelineLanes({
     handler(paths, timeMs)
   })
 
+  // The lanes paint whichever is longer: the committed duration or the clip
+  // geometry of the in-flight draft. A gesture that drags a clip, or extends an
+  // overlay's tail, past the current end of the timeline must stay inside the
+  // scrollable content while it is not committed yet.
+  const contentDurationMs = useMemo(
+    () => Math.max(view.durationMs, getTotalDuration(timeline)),
+    [timeline, view.durationMs],
+  )
+
   const computedTimelineWidth = useMemo(() => {
     const effectiveWidth = Math.max(200, viewportWidth)
-    if (view.zoom === 0) return effectiveWidth
-    return Math.max(effectiveWidth, Math.ceil(view.durationMs * pixelsPerMs))
-  }, [viewportWidth, view.durationMs, pixelsPerMs, view.zoom])
+    return Math.max(effectiveWidth, Math.ceil(contentDurationMs * pixelsPerMs))
+  }, [contentDurationMs, pixelsPerMs, viewportWidth])
 
   const timelineWidth = propTimelineWidth ?? computedTimelineWidth
 
@@ -468,7 +478,7 @@ export function TimelineLanes({
 
   const visibleStartMs = Math.max(0, scrollLeft / pixelsPerMs - 2_000)
   const visibleEndMs = Math.min(
-    view.durationMs,
+    contentDurationMs,
     visibleStartMs + Math.max(viewportWidth / pixelsPerMs, 1_000) + 4_000,
   )
 
@@ -505,12 +515,29 @@ export function TimelineLanes({
     onSetScroll(element.scrollLeft / pixelsPerMs)
   }
 
-  function timelineTimeFromClientX(clientX: number): number {
+  // Pointer → timeline time. Navigation (seek, marquee, drops) stays inside the
+  // movie; edit gestures resolve past the current end so the last clip can be
+  // moved or extended — the draft is what grows the timeline.
+  function pointerTime(clientX: number, clampToDuration: boolean): number {
     const element = scrollRef.current
     if (!element) return 0
-    const bounds = element.getBoundingClientRect()
-    const position = Math.max(0, clientX - bounds.left + element.scrollLeft)
-    return Math.min(view.durationMs, Math.max(0, position / pixelsPerMs))
+    return pointerTimeMs({
+      clientX,
+      boundsLeft: element.getBoundingClientRect().left,
+      scrollLeft: element.scrollLeft,
+      pixelsPerMs,
+      durationMs: view.durationMs,
+      clampToDuration,
+    })
+  }
+
+  function timelineTimeFromClientX(clientX: number): number {
+    return pointerTime(clientX, true)
+  }
+
+  /** Edit-gesture variant: unbounded at the tail so durations can grow. */
+  function gestureTimeFromClientX(clientX: number): number {
+    return pointerTime(clientX, false)
   }
 
   // Vertical counterpart to timelineTimeFromClientX: client Y mapped into the
@@ -1260,7 +1287,7 @@ export function TimelineLanes({
                           snapEnabled={view.snapEnabled}
                           snapThresholdMs={view.snapThresholdMs}
                           selectedSegmentId={selectedCameraLayoutId}
-                          getTimelineTime={timelineTimeFromClientX}
+                          getTimelineTime={gestureTimeFromClientX}
                           onSnapGuide={onSnapGuideCallback}
                           onSelectCameraLayout={onSelectCameraLayout}
                           onGestureHud={onGestureHud}
@@ -1293,7 +1320,7 @@ export function TimelineLanes({
                           snapEnabled={view.snapEnabled}
                           snapThresholdMs={view.snapThresholdMs}
                           snapTargets={snapTargets}
-                          getTimelineTime={timelineTimeFromClientX}
+                          getTimelineTime={gestureTimeFromClientX}
                           tool={tool}
                           onSelectZoom={onSelectZoom}
                           onAddZoomAtTime={onAddZoomAtTime}
@@ -1302,6 +1329,9 @@ export function TimelineLanes({
                           onResizeZoomSegment={onResizeZoomSegment}
                           onSnapGuide={onSnapGuideCallback}
                           onGestureHud={onGestureHud}
+                          activeGestureSegmentId={
+                            gestureInfo?.trackId === track.id ? gestureInfo.clipId : null
+                          }
                           edgeAutoScroll={edgeAutoScroll}
                         />
                       </div>
@@ -1357,7 +1387,7 @@ export function TimelineLanes({
                       edgeAutoScroll={edgeAutoScroll}
                       onGestureHud={onGestureHud}
                       onSnapGuide={onSnapGuideCallback}
-                      getTimelineTime={timelineTimeFromClientX}
+                      getTimelineTime={gestureTimeFromClientX}
                       onSeek={onSeek}
                       onSelectClip={onSelectClip}
                       onMoveClip={onMoveClip}

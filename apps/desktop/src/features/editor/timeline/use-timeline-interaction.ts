@@ -13,8 +13,6 @@ import {
   createInteractionTransaction,
   createMoveClipCommand,
   createMoveClipsCommand,
-  createResizeCursorRangeCommand,
-  createTrimClipCommand,
   createUpdateCaptionClipCommand,
   createUpdateClipTransformCommand,
   createUpdateMaskClipCommand,
@@ -29,6 +27,7 @@ import {
   type TimelineClip,
 } from "@recordforge/editor-core"
 import { useTimelineStore } from "../../../stores/timeline-store"
+import { buildTrimCommand, type TrimDraft } from "./trim-command"
 
 // Phase 2: bridge pointer/keyboard editing gestures with the editor-core
 // interaction transaction. A transaction holds an immutable base state, applies
@@ -37,7 +36,7 @@ import { useTimelineStore } from "../../../stores/timeline-store"
 
 type InteractionDraft =
   | { kind: "move"; clipId: string; newStartMs: number }
-  | { kind: "trim"; clipId: string; edge: "start" | "end"; edgeTimeMs: number }
+  | ({ kind: "trim" } & TrimDraft)
   | { kind: "camera"; clipId: string; transform: ClipTransform }
   | { kind: "mask"; clipId: string; rect: MaskRect }
   | {
@@ -193,77 +192,6 @@ function buildMoveCommand(
       hint: null,
     },
   }
-}
-
-function buildTrimCommand(
-  draft: Extract<InteractionDraft, { kind: "trim" }>,
-  base: TimelineState,
-  metadata: MediaMetadata | null,
-): CommandResult<BuildCommandResult> {
-  const found = findClip(base, draft.clipId)
-  if (!found) {
-    return {
-      ok: false,
-      error: { category: "editor", code: "clip_not_found", message: "Clip not found" },
-    }
-  }
-  const { clip, track } = found
-  if (track.locked || (clip.kind === "cursor-effect" && clip.locked)) {
-    return {
-      ok: false,
-      error: { category: "editor", code: "track_locked", message: "Track is locked" },
-    }
-  }
-
-  const clipEndMs = clip.startMs + clip.durationMs
-  const nextEdgeMs = Math.round(draft.edgeTimeMs)
-
-  if (clip.kind === "cursor-effect") {
-    const command = createResizeCursorRangeCommand(
-      clip.id,
-      draft.edge === "start"
-        ? { startMs: Math.max(0, Math.min(clipEndMs - 1, nextEdgeMs)) }
-        : { endMs: Math.max(clip.startMs + 1, nextEdgeMs) },
-    )
-    return { ok: true, value: { command, hint: null } }
-  }
-
-  if (draft.edge === "start") {
-    const nextStartMs = Math.max(0, Math.min(clipEndMs - 1, nextEdgeMs))
-    const sourceInMs = Math.max(
-      0,
-      clip.sourceInMs + Math.round((nextStartMs - clip.startMs) * clip.speed),
-    )
-    if (sourceInMs >= clip.sourceOutMs) {
-      return {
-        ok: false,
-        error: {
-          category: "editor",
-          code: "invalid_trim",
-          message: "Trim start must be before end",
-        },
-      }
-    }
-    const command = createTrimClipCommand(clip.id, sourceInMs, clip.sourceOutMs, {
-      startMs: nextStartMs,
-    })
-    return { ok: true, value: { command, hint: null } }
-  }
-
-  const nextEndMs = Math.max(clip.startMs + 1, nextEdgeMs)
-  const sourceDurationMs = Math.max(metadata?.durationMs ?? 0, clip.sourceOutMs)
-  const sourceOutMs = Math.min(
-    sourceDurationMs,
-    clip.sourceInMs + Math.round((nextEndMs - clip.startMs) * clip.speed),
-  )
-  if (sourceOutMs <= clip.sourceInMs) {
-    return {
-      ok: false,
-      error: { category: "editor", code: "invalid_trim", message: "Trim end must be after start" },
-    }
-  }
-  const command = createTrimClipCommand(clip.id, clip.sourceInMs, sourceOutMs)
-  return { ok: true, value: { command, hint: null } }
 }
 
 function buildCameraCommand(

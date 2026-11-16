@@ -5,7 +5,31 @@ import {
   findPreviousCut,
   getTimelineEditPoints,
   parseTimecode,
+  pointerTimeMs,
 } from "./timeline-navigation"
+
+describe("pointerTimeMs", () => {
+  const base = { boundsLeft: 100, scrollLeft: 0, pixelsPerMs: 0.1, durationMs: 20_000 }
+
+  it("maps navigation pointers inside the movie", () => {
+    // 2000px of content at 0.1 px/ms = 20s, so the far edge is the duration.
+    expect(pointerTimeMs({ ...base, clientX: 500, clampToDuration: true })).toBe(4000)
+    expect(pointerTimeMs({ ...base, clientX: 3000, clampToDuration: true })).toBe(20_000)
+  })
+
+  it("lets edit gestures resolve past the current end of the timeline", () => {
+    // Extending the last clip needs a time beyond the duration; clamping here
+    // pinned every such drag to zero movement, so the clip snapped back.
+    expect(pointerTimeMs({ ...base, clientX: 3000, clampToDuration: false })).toBe(29_000)
+  })
+
+  it("honours the scroll offset and never returns a negative time", () => {
+    expect(pointerTimeMs({ ...base, clientX: 0, scrollLeft: 0, clampToDuration: false })).toBe(0)
+    expect(pointerTimeMs({ ...base, clientX: 300, scrollLeft: 1000, clampToDuration: false })).toBe(
+      12_000,
+    )
+  })
+})
 
 describe("timeline-navigation", () => {
   const sampleTimeline = {

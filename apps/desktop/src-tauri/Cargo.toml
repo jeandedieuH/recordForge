@@ -78,8 +78,19 @@ wgpu = { version = "30.0.1", default-features = false, features = [
     "vulkan",
     "gles",
 ] }
+# ONNX Runtime for the offline camera-AI derivatives (ADR 021). `load-dynamic`
+# keeps the installer small: the runtime dylib is downloaded on demand and
+# verified against a pinned SHA-256 (ml/runtime.rs).
+ort = { version = "=2.0.0-rc.15", default-features = false, features = [
+    "std",
+    "ndarray",
+    "load-dynamic",
+    "api-31",
+    "tracing",
+] }
 
 [target.'cfg(windows)'.dependencies]
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["directml"] }
 wasapi = "0.23.0"
 # Must stay on the same minor version wry/tauri resolve so PlatformWebview
 # COM types are identical — wry 0.57 pins webview2-com 0.39.
@@ -90,6 +101,7 @@ windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Dx
 keyring = { version = "3", default-features = false, features = ["apple-native", "sync-secret-service"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["coreml"] }
 # CoreGraphics/CoreFoundation give us real display + window enumeration and
 # the TCC preflight calls, without pulling the heavier objc2 ScreenCaptureKit
 # stack Phase 1 needs. Both are already in the lockfile via tao/wry.

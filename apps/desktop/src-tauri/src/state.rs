@@ -293,7 +293,11 @@ pub struct AppState {
     /// License state: entitlements consulted by export validation, and the
     /// token store behind the licensing commands.
     pub license: Arc<crate::licensing::LicenseManager>,
-    /// Running transcription jobs — the busy gate and cancel channel for
+    /// Running transcription jobs - the busy gate and cancel channel for
     /// `transcribe_audio`/`cancel_transcription`.
     pub transcription: Arc<crate::transcript::TranscriptionRegistry>,
+    /// Running camera-AI derivative jobs - the busy gate and cancel channel for
+    /// `analyze_camera_ai`/`cancel_camera_ai`. Shares the transcription job
+    /// primitive (cancel flag + FFmpeg child) with a separate slot.
+    pub camera_ai: Arc<crate::transcript::TranscriptionRegistry>,
 }

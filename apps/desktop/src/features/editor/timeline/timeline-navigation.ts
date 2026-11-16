@@ -75,6 +75,32 @@ export function findNextCut(editPoints: number[], currentMs: number, thresholdMs
   return lastPoint !== undefined ? lastPoint : safeCurrent
 }
 
+export interface PointerTimeOptions {
+  clientX: number
+  /** Left edge of the scrolling lanes element, in client coordinates. */
+  boundsLeft: number
+  scrollLeft: number
+  pixelsPerMs: number
+  durationMs: number
+  /**
+   * `true` keeps navigation honest: seeking, marquee selection and drops always
+   * land inside the movie. `false` is the edit-gesture mode — a clip may be
+   * moved or trimmed past the current end of the timeline, which is how the
+   * timeline grows. Clamping gestures to the duration makes every drag that
+   * starts (or ends) at the last clip resolve to zero movement, so the release
+   * restores the pre-gesture geometry.
+   */
+  clampToDuration: boolean
+}
+
+/** Map a pointer x-position inside the lanes onto a timeline time. */
+export function pointerTimeMs(options: PointerTimeOptions): number {
+  const scale = Math.max(options.pixelsPerMs, 1e-6)
+  const position = Math.max(0, options.clientX - options.boundsLeft + options.scrollLeft)
+  const timeMs = position / scale
+  return options.clampToDuration ? Math.min(Math.max(0, options.durationMs), timeMs) : timeMs
+}
+
 /**
  * Parses user-entered timecode strings into milliseconds.
  * Supports:

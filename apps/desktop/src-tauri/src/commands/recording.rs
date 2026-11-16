@@ -116,6 +116,7 @@ pub fn init(app: &tauri::App) -> Result<()> {
         update_gate,
         license: Arc::clone(&license),
         transcription: Arc::new(crate::transcript::TranscriptionRegistry::default()),
+        camera_ai: Arc::new(crate::transcript::TranscriptionRegistry::default()),
     });
 
     // One persistent audio-level emitter for the HUD meter — session-agnostic

@@ -63,6 +63,14 @@ A ripple delete affects the following layers when they are not locked:
 
 Locked layers are never shifted. Layers that are locked at the track level are skipped entirely. Layers with a locked individual clip/range keep that item in place; later unlocked items on the same track are shifted around it, producing a gap on the track if necessary.
 
+### 3.3 Camera AI commands (M4)
+
+| Command | Undo boundary | Rules |
+|---|---|---|
+| `set-camera-effects { clipId, color?, cutout?, faceTracking? }` | One command per commit; sliders coalesce on `camera-effects:<clipId>:<field>` | Camera clips only; `null` clears a block; track/clip lock rejected; new blocks are Zod-parsed against the contract before commit |
+| `generate-camera-silence-layouts { ranges, minSilenceMs, padMs, transitionMs, durationMs, fps }` | One command replacing every `source: "silence"` segment | Camera-lane lock rejected; manual segments are preserved and win on overlap; ranges are padded, frame-snapped, and split around manual segments; generated segments are `layout: "hidden"` with `source: "silence"` |
+
+
 ### 3.3 Atomicity rules
 
 1. The command preflight collects every participating track and item.

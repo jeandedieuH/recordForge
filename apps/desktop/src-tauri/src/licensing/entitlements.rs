@@ -27,6 +27,9 @@ pub const PRO_FEATURE_KEYS: &[&str] = &[
     "cloud-storage",
     "motion-blur",
     "glass-loupe",
+    "camera-cutout",
+    "face-tracking",
+    "hide-during-silence",
 ];
 
 const HIGH_RES_EXPORT: &str = "high-res-export";
@@ -38,6 +41,9 @@ const ANNOTATIONS: &str = "annotations";
 const KEYSTROKE_OVERLAY: &str = "keystroke-overlay";
 const MOTION_BLUR: &str = "motion-blur";
 const GLASS_LOUPE: &str = "glass-loupe";
+const CAMERA_CUTOUT: &str = "camera-cutout";
+const FACE_TRACKING: &str = "face-tracking";
+const HIDE_DURING_SILENCE: &str = "hide-during-silence";
 
 /// Free canvases must measure 16:9 on their actual pixel dimensions,
 /// allowing ±0.5% for rounding on odd source sizes.
@@ -129,6 +135,26 @@ pub fn required_pro_features(plan: &RenderPlan, settings: &ExportSettings) -> Ve
         .any(|segment| segment.enabled && segment.style.as_deref() == Some("loupe"))
     {
         push(GLASS_LOUPE);
+    }
+
+    // M4 camera AI (#4b–d). Colour grading (#4a) is Free and deliberately
+    // absent here.
+    if plan.overlays.iter().any(|overlay| overlay.cutout.is_some()) {
+        push(CAMERA_CUTOUT);
+    }
+    if plan
+        .overlays
+        .iter()
+        .any(|overlay| !overlay.crop_keyframes.is_empty())
+    {
+        push(FACE_TRACKING);
+    }
+    if plan
+        .camera_layouts
+        .iter()
+        .any(|layout| layout.source.as_deref() == Some("silence"))
+    {
+        push(HIDE_DURING_SILENCE);
     }
 
     features

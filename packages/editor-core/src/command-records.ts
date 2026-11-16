@@ -22,6 +22,9 @@ import {
   cameraLayoutKindSchema,
   cameraLayoutPipSchema,
   cameraLayoutSourceSchema,
+  cameraColorSchema,
+  cameraCutoutSchema,
+  cameraFaceTrackingSchema,
   smartZoomSettingsSchema,
   textClipSchema,
   timelineCanvasSchema,
@@ -294,6 +297,41 @@ export const updateClipTransformCommandSchema = commandMetaSchema.extend({
 })
 
 export type UpdateClipTransformCommand = z.infer<typeof updateClipTransformCommandSchema>
+
+// M4 camera effects (#4a–c). Passing `null` clears the field so a reset is one
+// undoable command; omitted fields are left untouched.
+export const setCameraEffectsCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("set-camera-effects"),
+  clipId: z.string(),
+  color: cameraColorSchema.nullable().optional(),
+  cutout: cameraCutoutSchema.nullable().optional(),
+  faceTracking: cameraFaceTrackingSchema.nullable().optional(),
+})
+
+export type SetCameraEffectsCommand = z.infer<typeof setCameraEffectsCommandSchema>
+
+// #4d: replace every silence-generated camera-layout segment from analysed
+// dead-air ranges. Manual segments are preserved (and win on overlap).
+export const generateCameraSilenceLayoutsCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("generate-camera-silence-layouts"),
+  ranges: z
+    .array(
+      z.object({
+        startMs: z.number().int().min(0),
+        endMs: z.number().int().min(0),
+      }),
+    )
+    .default([]),
+  minSilenceMs: z.number().int().min(500).default(2500),
+  padMs: z.number().int().min(0).max(2000).default(150),
+  transitionMs: z.number().int().min(0).max(10_000).default(400),
+  durationMs: z.number().int().min(0),
+  fps: z.number().positive().optional(),
+})
+
+export type GenerateCameraSilenceLayoutsCommand = z.infer<
+  typeof generateCameraSilenceLayoutsCommandSchema
+>
 
 export const addCaptionClipCommandSchema = commandMetaSchema.extend({
   kind: z.literal("add-caption-clip"),
@@ -788,6 +826,8 @@ export const commandRecordSchema = z.discriminatedUnion("kind", [
   updateTrackCommandSchema,
   updateClipAudioCommandSchema,
   updateClipTransformCommandSchema,
+  setCameraEffectsCommandSchema,
+  generateCameraSilenceLayoutsCommandSchema,
   addCaptionClipCommandSchema,
   updateCaptionClipCommandSchema,
   updateCaptionTrackCommandSchema,

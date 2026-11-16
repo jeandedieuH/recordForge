@@ -363,6 +363,8 @@ pub(super) struct CameraPlan {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
+    /// Output frames are `yuva420p` (cutout matte) instead of `nv12`.
+    pub alpha: bool,
 }
 
 /// Plan one camera track's decode chain. Each piece is trimmed, retimed and
@@ -455,6 +457,11 @@ pub(super) fn plan_camera(
         .map(|(_, clamp)| clamp.src_out_s)
         .fold(f64::NEG_INFINITY, f64::max);
     let seek_s = super::super::floor_to_ms(src_in_s - SEEK_PREROLL_S).max(0.0);
+    let video_delay_s = shared
+        .probe
+        .video_start_delay_s(&asset_path, &first.asset_id);
+    let matte_seek_s =
+        super::super::floor_to_ms(src_in_s - SEEK_PREROLL_S - video_delay_s).max(0.0);
     let input = resolve_video_stream_specifier(
         &shared.probe,
         &asset_path,
@@ -495,10 +502,48 @@ trim=end_frame={frames},setpts=PTS-STARTPTS[{label}]",
 
     // Geometry is shared by every piece (coalescing requires identical visual
     // props), so it runs once over the joined stream.
-    let geometry = if let Some(crop) = &first.crop {
+    let face_tracked = first.crop_keyframes.len() > 1;
+    let mut camera_crop = String::new();
+    let mut matte_crop = String::new();
+    let mut sendcmd = String::new();
+    let mut sendcmd_path: Option<PathBuf> = None;
+    if face_tracked {
+        let keyframe = &first.crop_keyframes[0];
+        let chain_start_ms =
+            overlays[track.pieces[0]].output_start_ms as f64 + clamps[0].1.cut_out_s * 1000.0;
+        let script = crate::exports::build_camera_crop_sendcmd(
+            &first.crop_keyframes,
+            chain_start_ms,
+            &["camface".to_string(), "cammatte".to_string()],
+        );
+        if !script.is_empty() {
+            let path = std::env::temp_dir().join(format!(
+                "rf-sendcmd-{}-{}.txt",
+                project_id,
+                uuid::Uuid::new_v4()
+            ));
+            std::fs::write(&path, script.as_bytes())
+                .map_err(|error| InternalError::Storage(format!("write crop script: {error}")))?;
+            let escaped = super::super::captions::escape_filter_path(&path);
+            sendcmd = format!(",sendcmd=f='{escaped}'");
+            sendcmd_path = Some(path);
+        }
+        camera_crop = format!(
+            ",crop@camface=w={}:h={}:x={}:y={}",
+            keyframe.width, keyframe.height, keyframe.x, keyframe.y
+        );
+        matte_crop = format!(
+            ",crop@cammatte=w={}:h={}:x={}:y={}",
+            keyframe.width, keyframe.height, keyframe.x, keyframe.y
+        );
+    } else if let Some(crop) = &first.crop {
+        let ops = format!(",crop={}:{}:{}:{}", crop.width, crop.height, crop.x, crop.y);
+        camera_crop = ops.clone();
+        matte_crop = ops;
+    }
+    let fit = if face_tracked || first.crop.is_some() {
         format!(
-            ",crop={}:{}:{}:{},scale={width}:{height}:force_original_aspect_ratio=decrease:force_divisible_by=2:threads=auto,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black@0",
-            crop.width, crop.height, crop.x, crop.y
+            ",scale={width}:{height}:force_original_aspect_ratio=decrease:force_divisible_by=2:threads=auto,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black@0"
         )
     } else {
         match first.fit.as_deref() {
@@ -517,23 +562,165 @@ trim=end_frame={frames},setpts=PTS-STARTPTS[{label}]",
             ),
         }
     };
-    filters.push(format!(
-        "{joined}{},format=nv12[vout]",
-        geometry.trim_start_matches(',')
-    ));
+    let mut camera_ops = format!("{camera_crop}{sendcmd}{fit}");
+
+    // Camera colour (#4a): same composed `.cube` as the compat renderer.
+    if let Some(color) = first.color.as_ref() {
+        if let Some(lut_path) = shared.camera_lut_file(color, asset_paths)? {
+            let escaped = super::super::captions::escape_filter_path(&lut_path);
+            camera_ops.push_str(&format!(
+                ",format=rgb24,lut3d=file='{escaped}':interp=tetrahedral"
+            ));
+        }
+    }
+
+    let mut inputs = vec![DecodeInput {
+        path: asset_path.clone(),
+        seek_s: Some(seek_s),
+        duration_s: Some(src_out_s - seek_s + SEEK_TAIL_MARGIN_S),
+        hwaccel: false,
+    }];
+
+    // Portrait cutout (#4b): a mirrored matte chain (same trims, fps, crop)
+    // alpha-merges the camera before it reaches the compositor.
+    let mut cutout_label: Option<String> = None;
+    if let Some(cutout) = first.cutout.as_ref() {
+        if let Some(matte) = cutout.matte_path.as_deref() {
+            let matte_index = inputs.len();
+            inputs.push(DecodeInput {
+                path: PathBuf::from(matte),
+                seek_s: Some(matte_seek_s),
+                duration_s: Some(
+                    (src_out_s - video_delay_s - matte_seek_s).max(0.0) + SEEK_TAIL_MARGIN_S,
+                ),
+                hwaccel: false,
+            });
+            let mut matte_labels = Vec::with_capacity(clamps.len());
+            for (piece_index, (_overlay_index, clamp)) in clamps.iter().enumerate() {
+                let frames = ((clamp.chain_dur_s * frame_rate).round().max(0.0) as u64).max(1);
+                let duration = fmt_secs(frames as f64 / frame_rate);
+                let label = format!("matte{piece_index}");
+                filters.push(format!(
+                    "[{matte_index}:v]trim=start={}:end={},setpts=PTS-STARTPTS,fps={fps},setsar=1,\
+tpad=stop_mode=clone:stop_duration={duration},tpad=stop_mode=add:stop_duration={duration}:color=black,\
+trim=end_frame={frames},setpts=PTS-STARTPTS[{label}]",
+                    fmt_secs((clamp.src_in_s - video_delay_s - matte_seek_s).max(0.0)),
+                    fmt_secs((clamp.src_out_s - video_delay_s - matte_seek_s).max(0.0)),
+                ));
+                matte_labels.push(format!("[{label}]"));
+            }
+            let matte_joined = if matte_labels.len() == 1 {
+                matte_labels.remove(0)
+            } else {
+                filters.push(format!(
+                    "{}concat=n={}:v=1:a=0[matte_concat]",
+                    matte_labels.join(""),
+                    matte_labels.len()
+                ));
+                "[matte_concat]".to_string()
+            };
+            let mut matte_ops = format!("{matte_crop}{sendcmd}");
+            matte_ops.push_str(&format!(
+                ",scale={width}:{height}:force_original_aspect_ratio=increase:force_divisible_by=2:threads=auto,crop={width}:{height},format=gray"
+            ));
+            let softness = cutout.edge_softness;
+            if softness > 0.2 {
+                matte_ops.push_str(&format!(
+                    ",boxblur=lr={:.2}:lp=2",
+                    softness.clamp(0.0, 16.0)
+                ));
+            }
+            if cutout.edge_shrink.abs() > 0.2 {
+                let shift = (cutout.edge_shrink.clamp(-8.0, 8.0) * 12.0).round();
+                matte_ops.push_str(&format!(",lut=y='clip((val-({shift}))*1.04,0,255)'"));
+            }
+            filters.push(format!(
+                "{matte_joined}{}[matte_plane]",
+                matte_ops.trim_start_matches(',')
+            ));
+            cutout_label = Some("matte_plane".to_string());
+        }
+    }
+
+    let alpha = cutout_label.is_some();
+    if let Some(matte_label) = cutout_label.as_deref() {
+        let cutout = first.cutout.as_ref().expect("cutout label implies cutout");
+        let rgb = "cam_cutout_rgb";
+        filters.push(format!(
+            "{joined}{},format=rgb24[{rgb}]",
+            camera_ops.trim_start_matches(',')
+        ));
+        let foreground = "cam_cutout_fg";
+        let foreground_source = if cutout.background == "blur" {
+            filters.push(format!("[{rgb}]split=2[cam_fg_src][cam_blur_src]"));
+            "cam_fg_src"
+        } else {
+            rgb
+        };
+        filters.push(format!(
+            "[{foreground_source}][{matte_label}]alphamerge[{foreground}]"
+        ));
+        match cutout.background.as_str() {
+            "blur" => {
+                let radius = cutout.blur_radius.clamp(0.0, 100.0);
+                filters.push(format!(
+                    "[cam_blur_src]boxblur=lr={radius:.2}:lp=2[cam_bg_blur]"
+                ));
+                filters.push(format!(
+                    "[cam_bg_blur][{foreground}]overlay=0:0:format=auto[cam_cutout]"
+                ));
+            }
+            "color" => {
+                let color = super::super::safe_filter_color(&cutout.color);
+                filters.push(format!(
+                    "color=c={color}:s={width}x{height}:r={fps}[cam_bg_color]"
+                ));
+                filters.push(format!(
+                    "[cam_bg_color][{foreground}]overlay=0:0:format=auto[cam_cutout]"
+                ));
+            }
+            "image" => {
+                if let Some(image_id) = cutout.image_asset_id.as_deref() {
+                    if let Some(image_path) = asset_paths.get(image_id) {
+                        let image_index = inputs.len();
+                        inputs.push(DecodeInput {
+                            path: image_path.clone(),
+                            seek_s: None,
+                            duration_s: None,
+                            hwaccel: false,
+                        });
+                        filters.push(format!(
+                            "[{image_index}:v]scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},format=rgba[cam_bg_image]"
+                        ));
+                        filters.push(format!(
+                            "[cam_bg_image][{foreground}]overlay=0:0:format=auto[cam_cutout]"
+                        ));
+                    } else {
+                        filters.push(format!("[{foreground}]null[cam_cutout]"));
+                    }
+                } else {
+                    filters.push(format!("[{foreground}]null[cam_cutout]"));
+                }
+            }
+            _ => filters.push(format!("[{foreground}]null[cam_cutout]")),
+        }
+        filters.push("[cam_cutout]format=yuva420p[vout]".to_string());
+    } else {
+        filters.push(format!(
+            "{joined}{},format=nv12[vout]",
+            camera_ops.trim_start_matches(',')
+        ));
+    }
     let _ = project_id;
+    let _ = sendcmd_path;
 
     Ok(Some(CameraPlan {
-        inputs: vec![DecodeInput {
-            path: asset_path,
-            seek_s: Some(seek_s),
-            duration_s: Some(src_out_s - seek_s + SEEK_TAIL_MARGIN_S),
-            hwaccel: false,
-        }],
+        inputs,
         filter: filters.join(";\n"),
         width,
         height,
         fps,
+        alpha,
     }))
 }
 
@@ -620,6 +807,7 @@ impl DecodeProcess {
             plan.width,
             plan.height,
             plan.fps,
+            false,
         )
     }
 
@@ -631,6 +819,7 @@ impl DecodeProcess {
             plan.width,
             plan.height,
             plan.fps,
+            plan.alpha,
         )
     }
 
@@ -641,6 +830,7 @@ impl DecodeProcess {
         width: u32,
         height: u32,
         fps: u32,
+        alpha: bool,
     ) -> Result<Self> {
         let mut command = crate::process::create_command(ffmpeg_path);
         command.args(["-hide_banner", "-loglevel", "error", "-nostdin"]);
@@ -667,7 +857,7 @@ impl DecodeProcess {
                 "-f",
                 "rawvideo",
                 "-pix_fmt",
-                "nv12",
+                if alpha { "yuva420p" } else { "nv12" },
                 "-s",
                 &format!("{width}x{height}"),
                 "-r",
@@ -714,7 +904,11 @@ impl DecodeProcess {
             child,
             stdout: Some(BufReader::with_capacity(4 << 20, stdout)),
             stderr,
-            frame_len: (width as usize * height as usize * 3 / 2).max(1),
+            frame_len: if alpha {
+                (width as usize * height as usize * 5 / 2).max(1)
+            } else {
+                (width as usize * height as usize * 3 / 2).max(1)
+            },
         })
     }
 

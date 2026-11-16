@@ -283,9 +283,17 @@ export const TimelineClipItem = memo(function TimelineClipItem({
 
   // phase "draft" renders + reports the HUD; "commit" re-runs the identical
   // snap/clamp path so the committed value equals the last draft shown.
-  function applyGesture(clientX: number, altKey: boolean, phase: "draft" | "commit") {
-    const gesture = gestureRef.current
-    if (!gesture) return
+  //
+  // The gesture is passed in explicitly: `finishGesture` has to retire the ref
+  // before the commit (a second pointerup must not replay it), so reading
+  // `gestureRef.current` here would make every release a no-op that left the
+  // draft behind — the edit looked applied, then the next command dropped it.
+  function applyGesture(
+    gesture: ClipGesture,
+    clientX: number,
+    altKey: boolean,
+    phase: "draft" | "commit",
+  ) {
     const currentMs = getTimelineTime(clientX)
     const deltaMs = currentMs - gesture.initialTimelineMs
     const snap = { enabled: snapEnabled && !altKey, thresholdMs: snapThresholdMs }
@@ -365,12 +373,12 @@ export const TimelineClipItem = memo(function TimelineClipItem({
     suppressClickRef.current = true
     event.preventDefault()
     lastPointerRef.current = { clientX: event.clientX, altKey: event.altKey }
-    applyGesture(event.clientX, event.altKey, "draft")
+    applyGesture(gesture, event.clientX, event.altKey, "draft")
     // While the pointer hugs the viewport edge the scroll drives the gesture —
     // re-applying at the same clientX follows the time that scrolled under it.
     edgeAutoScroll.track(event.clientX, () => {
       const last = lastPointerRef.current
-      if (last) applyGesture(last.clientX, last.altKey, "draft")
+      if (last) applyGesture(gesture, last.clientX, last.altKey, "draft")
     })
   }
 
@@ -401,7 +409,7 @@ export const TimelineClipItem = memo(function TimelineClipItem({
       return
     }
 
-    applyGesture(event.clientX, event.altKey, "commit")
+    applyGesture(gesture, event.clientX, event.altKey, "commit")
   }
 
   // Unmount mid-gesture (e.g. the clip scrolled out of the virtual window on a
@@ -502,6 +510,10 @@ export const TimelineClipItem = memo(function TimelineClipItem({
           onPointerMove={handlePointerMove}
           onPointerUp={finishGesture}
           onPointerCancel={finishGesture}
+          // Capture can be lost before pointerup (a re-render replaces the
+          // captured node). Without this the gesture would never commit and its
+          // draft would be dropped by the next command.
+          onLostPointerCapture={finishGesture}
           onContextMenu={(event) => {
             const timeMs = getTimelineTime(event.clientX)
             setContextMenuTimeMs(timeMs)

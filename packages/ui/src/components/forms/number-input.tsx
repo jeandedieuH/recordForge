@@ -71,6 +71,40 @@ function roundToPrecision(val: number, step = 1, precision?: number): number {
   return Math.round(val)
 }
 
+export interface NumberInputBlurCommit {
+  /** Text the field is showing. */
+  draft: string
+  /** Whether the user changed the field since it gained focus. */
+  edited: boolean
+  /** The model value the field is bound to. */
+  value: number
+  step?: number
+  precision?: number
+  min?: number
+  max?: number
+}
+
+/**
+ * What a blur should commit, or `null` when it must commit nothing.
+ *
+ * An untouched field follows the model. Committing its displayed text instead
+ * re-applies the value it showed when the user focused it, silently reverting
+ * anything that changed in the meantime — dragging a title on the canvas while
+ * its inspector X/Y/width field had focus used to snap the title back on the
+ * next click.
+ */
+export function resolveNumberInputBlurCommit(input: NumberInputBlurCommit): number | null {
+  const parsed = Number.parseFloat(input.draft)
+  if (Number.isNaN(parsed)) return input.edited ? input.value : null
+  if (!input.edited) return null
+  const normalized = clamp(
+    roundToPrecision(parsed, input.step, input.precision),
+    input.min,
+    input.max,
+  )
+  return normalized === input.value ? null : normalized
+}
+
 function NumberInput({
   value,
   defaultValue = 0,
@@ -101,11 +135,16 @@ function NumberInput({
 
   const [draftString, setDraftString] = useState<string>(() => String(internalValue))
   const [isFocused, setIsFocused] = useState(false)
+  // True once the user changed this field since it gained focus. Only a typed
+  // value may be committed on blur: a field left untouched must follow the
+  // model, otherwise clicking out of an X/Y/width field re-commits the value it
+  // showed when the user clicked in — reverting a drag made in the meantime.
+  const editedSinceFocusRef = useRef(false)
 
   const currentValue = isControlled ? value : internalValue
 
   useEffect(() => {
-    if (!isFocused) {
+    if (!isFocused || !editedSinceFocusRef.current) {
       setDraftString(String(currentValue))
     }
   }, [currentValue, isFocused])
@@ -193,6 +232,7 @@ function NumberInput({
 
   const handleInputChange = (e: ChangeEvent<HTMLInputElement>) => {
     const raw = e.target.value
+    editedSinceFocusRef.current = true
     setDraftString(raw)
     const parsed = parseFloat(raw)
     if (!Number.isNaN(parsed)) {
@@ -205,16 +245,29 @@ function NumberInput({
 
   const handleInputBlur = (e: FocusEvent<HTMLInputElement>) => {
     setIsFocused(false)
-    const parsed = parseFloat(draftString)
-    if (Number.isNaN(parsed)) {
-      notifyChange(currentValue)
+    const edited = editedSinceFocusRef.current
+    editedSinceFocusRef.current = false
+    const commit = resolveNumberInputBlurCommit({
+      draft: draftString,
+      edited,
+      value: currentValue,
+      step,
+      precision,
+      min,
+      max,
+    })
+    if (commit === null) {
+      // Nothing to commit: the field adopts the model value (which may have
+      // moved while it had focus) without emitting a change.
+      setDraftString(String(currentValue))
     } else {
-      notifyChange(parsed)
+      notifyChange(commit)
     }
     onBlur?.(e)
   }
 
   const handleInputFocus = () => {
+    editedSinceFocusRef.current = false
     setIsFocused(true)
   }
 
