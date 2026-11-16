@@ -32,6 +32,12 @@ impl BoxRect {
             h: self.h - py * 2.0,
         }
     }
+    fn with_h(self, h: f64) -> BoxRect {
+        BoxRect { h, ..self }
+    }
+    fn bottom(self) -> f64 {
+        self.y + self.h
+    }
 }
 
 #[derive(Clone)]
@@ -47,37 +53,39 @@ struct Style {
 }
 
 // Per-template default element-size ratios (of the clip's fontSize). Element
-// `size` overrides in the design replace these.
+// `size` overrides in the design replace these. Mirror:
+// packages/editor-core/src/title-preset-helpers.ts `titleFontSizeRatios` —
+// keep the numbers identical (a test on each side locks the table).
 fn size_ratios(t: TitleTemplate) -> (f64, f64, f64, f64) {
     match t {
         TitleTemplate::Hook => (1.3, 0.30, 0.22, 1.0),
-        TitleTemplate::HookEmphasis => (1.15, 0.30, 0.22, 1.0),
-        TitleTemplate::Clean => (1.0, 0.34, 0.27, 1.0),
+        TitleTemplate::HookEmphasis => (1.15, 0.32, 0.28, 1.0),
+        TitleTemplate::Clean => (1.0, 0.45, 0.33, 1.0),
         TitleTemplate::Editorial => (1.15, 0.30, 0.23, 1.0),
-        TitleTemplate::Chapter => (1.0, 0.33, 1.8, 1.0),
+        TitleTemplate::Chapter => (1.0, 0.40, 1.8, 1.0),
         TitleTemplate::LowerThirdBar
         | TitleTemplate::LowerThirdGlass
-        | TitleTemplate::LowerThirdLine => (1.0, 0.42, 0.24, 1.0),
-        TitleTemplate::SocialHandle => (0.9, 0.34, 0.24, 1.0),
+        | TitleTemplate::LowerThirdLine => (1.0, 0.50, 0.40, 1.0),
+        TitleTemplate::SocialHandle => (0.9, 0.50, 0.40, 1.0),
         TitleTemplate::Cta | TitleTemplate::CtaFollow | TitleTemplate::CtaLink => {
-            (0.9, 0.34, 0.24, 1.0)
+            (0.9, 0.45, 0.36, 1.0)
         }
-        TitleTemplate::Step => (0.9, 0.33, 0.7, 1.0),
-        TitleTemplate::Checklist => (0.6, 0.4, 0.24, 1.0),
-        TitleTemplate::Shortcut => (0.57, 0.33, 0.24, 1.0),
-        TitleTemplate::Terminal => (0.62, 0.25, 0.22, 1.0),
-        TitleTemplate::Callout => (0.85, 0.31, 0.25, 1.0),
-        TitleTemplate::Quote => (1.0, 0.27, 0.23, 1.0),
-        TitleTemplate::Stat => (0.34, 0.24, 0.23, 1.7),
-        TitleTemplate::StatBeforeAfter => (0.3, 0.22, 0.2, 1.5),
-        TitleTemplate::Countdown => (0.2, 0.15, 0.15, 2.6),
-        TitleTemplate::Location => (0.8, 0.3, 0.22, 1.0),
-        TitleTemplate::Banner => (0.9, 0.3, 0.2, 1.0),
-        TitleTemplate::Highlight => (1.0, 0.3, 0.2, 1.0),
-        TitleTemplate::Kinetic => (1.25, 0.3, 0.24, 1.0),
-        TitleTemplate::Agenda => (0.6, 0.36, 0.24, 1.0),
-        TitleTemplate::Outro => (1.1, 0.3, 0.26, 1.0),
-        TitleTemplate::Source => (0.7, 0.28, 0.23, 1.0),
+        TitleTemplate::Step => (0.9, 0.55, 0.7, 1.0),
+        TitleTemplate::Checklist => (0.9, 0.60, 0.38, 1.0),
+        TitleTemplate::Shortcut => (0.75, 0.50, 0.36, 1.0),
+        TitleTemplate::Terminal => (0.7, 0.45, 0.36, 1.0),
+        TitleTemplate::Callout => (0.9, 0.62, 0.5, 1.0),
+        TitleTemplate::Quote => (1.0, 0.42, 0.32, 1.0),
+        TitleTemplate::Stat => (0.36, 0.26, 0.24, 1.7),
+        TitleTemplate::StatBeforeAfter => (0.34, 0.26, 0.22, 1.5),
+        TitleTemplate::Countdown => (0.22, 0.16, 0.16, 2.6),
+        TitleTemplate::Location => (0.75, 0.55, 0.45, 1.0),
+        TitleTemplate::Banner => (0.9, 0.38, 0.26, 1.0),
+        TitleTemplate::Highlight => (1.0, 0.34, 0.26, 1.0),
+        TitleTemplate::Kinetic => (1.25, 0.30, 0.24, 1.0),
+        TitleTemplate::Agenda => (0.85, 0.58, 0.36, 1.0),
+        TitleTemplate::Outro => (1.1, 0.32, 0.28, 1.0),
+        TitleTemplate::Source => (0.75, 0.56, 0.45, 1.0),
     }
 }
 
@@ -89,6 +97,84 @@ fn role_index(role: Role) -> usize {
         Role::Primary => 3,
         Role::Secondary => 4,
     }
+}
+
+// A stack block is one vertical slice of a template composition. Blocks are
+// measured at their natural (unscaled) size, share one fit factor, and render
+// top-to-bottom so type hierarchy survives when the box is short.
+#[derive(Clone)]
+enum StackBlock {
+    /// Accent kicker line from `tag_text`.
+    Tag,
+    /// Explicit label rendered with the tag style and an explicit color
+    /// (callout tone labels, source kicker). Already display-cased.
+    Label {
+        text: String,
+        color: String,
+    },
+    /// Tag inside an accent chip (single line, never wraps).
+    Chip,
+    Primary {
+        emphasis: bool,
+    },
+    Secondary,
+    Metric {
+        step: bool,
+        before_after: bool,
+    },
+    /// Primary text on an accent pill that hugs the text (CTA button).
+    ButtonPrimary,
+    /// Tag text on an accent pill that hugs the text (outro handle).
+    ButtonTag,
+    ChecklistItems,
+    AgendaItems,
+    Keycaps,
+    /// Terminal chrome: three dots plus the tag on one line.
+    TerminalBar,
+    /// Full-bleed accent band carrying the primary text (banner).
+    Band,
+    /// Reserved vertical space (no content).
+    Slot(f64),
+}
+
+struct StackItem {
+    block: StackBlock,
+    /// Absolute gap above this block; defaults to a proportion of the
+    /// previous block's type size when unset.
+    gap: Option<f64>,
+    /// Horizontal alignment override for the block's text, used when a
+    /// template's composition axis is fixed (the banner's supporting line
+    /// follows the centered band regardless of the clip alignment).
+    align: Option<&'static str>,
+}
+impl StackItem {
+    fn new(block: StackBlock) -> Self {
+        Self {
+            block,
+            gap: None,
+            align: None,
+        }
+    }
+    fn centered(mut self) -> Self {
+        self.align = Some("center");
+        self
+    }
+}
+
+#[derive(Clone)]
+struct StackBlockInfo {
+    rect: BoxRect,
+    // Resolved type size driving this block (before the shared fit factor).
+    size: f64,
+    block: StackBlock,
+}
+
+#[derive(Clone)]
+struct StackInfo {
+    // Bounding rect of the rendered stack (before clipping to `rect`).
+    rect: BoxRect,
+    fit: f64,
+    blocks: Vec<StackBlockInfo>,
 }
 
 struct Builder<'a> {
@@ -104,6 +190,9 @@ struct Builder<'a> {
     // Per-role [line, word, char] counters for animation units.
     counts: [[u32; 3]; 5],
     split_rect: Option<BoxRect>,
+    // The main text stack's occupied rect, recorded by `stack` so edge
+    // decorations (bars, dots, numbers) hug the content instead of the box.
+    stack_info: Option<StackInfo>,
 }
 
 pub(super) fn compile(
@@ -147,6 +236,7 @@ pub(super) fn compile(
         pad_y,
         counts: [[0; 3]; 5],
         split_rect: None,
+        stack_info: None,
     };
 
     b.backdrop();
@@ -197,18 +287,25 @@ fn layout_template(b: &mut Builder<'_>) {
     let inner = b.inner;
     match t {
         TitleTemplate::Clean => {
-            b.tag_line(inner.with_h(inner.h * 0.15));
-            b.primary(inner.inset(0.0, inner.h * 0.2).with_h(inner.h * 0.55), true);
-            b.secondary(inner.inset(0.0, inner.h * 0.8).with_h(inner.h * 0.2));
+            b.stack(
+                inner,
+                &[
+                    StackItem::new(StackBlock::Tag),
+                    StackItem::new(StackBlock::Primary { emphasis: true }),
+                    StackItem::new(StackBlock::Secondary),
+                ],
+            );
         }
         TitleTemplate::Hook | TitleTemplate::HookEmphasis | TitleTemplate::Kinetic => {
             let emphasis = t != TitleTemplate::Kinetic;
-            b.tag_chip(inner.inset(0.0, 0.0).with_h(inner.h * 0.16));
-            b.primary(
-                inner.inset(0.0, inner.h * 0.2).with_h(inner.h * 0.56),
-                emphasis,
+            b.stack(
+                inner,
+                &[
+                    StackItem::new(StackBlock::Chip),
+                    StackItem::new(StackBlock::Primary { emphasis }),
+                    StackItem::new(StackBlock::Secondary),
+                ],
             );
-            b.secondary(inner.inset(0.0, inner.h * 0.82).with_h(inner.h * 0.18));
         }
         TitleTemplate::Editorial => {
             let rule = (inner.w.min(inner.h) * 0.012).max(1.0);
@@ -219,95 +316,43 @@ fn layout_template(b: &mut Builder<'_>) {
                 1.0,
                 Role::Decoration,
             );
-            b.tag_line(inner.inset(0.0, inner.h * 0.07).with_h(inner.h * 0.12));
-            b.primary(
-                inner.inset(0.0, inner.h * 0.24).with_h(inner.h * 0.5),
-                false,
-            );
-            b.rect(
-                BoxRect {
-                    x: inner.x,
-                    y: inner.y + inner.h * 0.85,
-                    w: inner.w * 0.12,
-                    h: rule,
-                },
-                0.0,
-                &b.accent.clone(),
-                1.0,
-                Role::Decoration,
-            );
-            b.secondary(inner.inset(0.0, inner.h * 0.87).with_h(inner.h * 0.13));
-        }
-        TitleTemplate::Chapter => {
-            // Big chapter number left, rule, title block right.
-            let num_w = inner.w * 0.22;
-            let tag_style = b.style_for(Role::Tag);
-            b.text_at(
-                &b.details.tag_text.clone().unwrap_or_else(|| "01".into()),
-                BoxRect {
-                    x: inner.x,
-                    y: inner.y,
-                    w: num_w,
-                    h: inner.h,
-                },
-                Role::Tag,
-                &tag_style,
-                false,
-            );
-            let x = inner.x + num_w + inner.w * 0.04;
-            b.rect(
-                BoxRect {
-                    x: inner.x + num_w,
-                    y: inner.y + inner.h * 0.08,
-                    w: (inner.w * 0.006).max(2.0),
-                    h: inner.h * 0.84,
-                },
-                0.0,
-                &b.accent.clone(),
-                1.0,
-                Role::Decoration,
-            );
-            let right = BoxRect {
-                x,
-                y: inner.y,
-                w: inner.x + inner.w - x,
-                h: inner.h,
+            let area = BoxRect {
+                y: inner.y + rule + inner.h * 0.03,
+                h: inner.h - rule - inner.h * 0.03,
+                ..inner
             };
-            b.primary(
-                right.inset(0.0, right.h * 0.1).with_h(right.h * 0.55),
-                false,
+            let info = b.stack(
+                area,
+                &[
+                    StackItem::new(StackBlock::Tag),
+                    StackItem::new(StackBlock::Primary { emphasis: false }),
+                    StackItem::new(StackBlock::Secondary),
+                ],
             );
-            b.secondary(right.inset(0.0, right.h * 0.72).with_h(right.h * 0.28));
-        }
-        TitleTemplate::LowerThirdBar => {
-            let bar_w = (inner.w * 0.014).max(4.0);
-            b.rect(
-                BoxRect {
-                    x: inner.x,
-                    y: inner.y + inner.h * 0.08,
-                    w: bar_w,
-                    h: inner.h * 0.84,
-                },
-                bar_w * 0.5,
-                &b.accent.clone(),
-                1.0,
-                Role::Decoration,
-            );
-            let text = inner.inset(bar_w + inner.w * 0.03, inner.h * 0.05);
-            b.primary(text.with_h(text.h * 0.6), false);
-            b.secondary(text.inset(0.0, text.h * 0.62).with_h(text.h * 0.38));
-        }
-        TitleTemplate::LowerThirdGlass | TitleTemplate::LowerThirdLine => {
-            let text = inner;
-            b.primary(text.inset(0.0, text.h * 0.06).with_h(text.h * 0.58), false);
-            if t == TitleTemplate::LowerThirdLine {
-                let y = inner.y + inner.h * 0.68;
+            // Short accent rule separating headline and subtitle.
+            if let Some(prim) = info
+                .blocks
+                .iter()
+                .find(|bl| matches!(bl.block, StackBlock::Primary { .. }))
+            {
+                let y = match info
+                    .blocks
+                    .iter()
+                    .find(|bl| matches!(bl.block, StackBlock::Secondary))
+                {
+                    Some(sec) => prim.rect.bottom() + (sec.rect.y - prim.rect.bottom()) * 0.42,
+                    None => prim.rect.bottom() + prim.size * info.fit * 0.3,
+                };
+                let x = match prim.rect.x > inner.x {
+                    true => prim.rect.x,
+                    false => inner.x,
+                };
                 b.rect(
                     BoxRect {
-                        x: inner.x,
+                        x,
                         y,
-                        w: inner.w * 0.16,
-                        h: (inner.h * 0.03).max(2.0),
+                        w: inner.w * 0.12,
+                        h: rule,
                     },
                     0.0,
                     &b.accent.clone(),
@@ -315,170 +360,212 @@ fn layout_template(b: &mut Builder<'_>) {
                     Role::Decoration,
                 );
             }
-            b.secondary(text.inset(0.0, text.h * 0.74).with_h(text.h * 0.26));
+        }
+        TitleTemplate::Chapter => {
+            // Big chapter number left, divider + stacked title block right.
+            let tag_style = b.style_for(Role::Tag);
+            let num = b.details.tag_text.clone().unwrap_or_else(|| "01".into());
+            let face = glyphs::face(&tag_style.family, &tag_style.weight);
+            let shown = apply_transform(&num, tag_style.transform);
+            let num_w = glyphs::measure(&face, &shown, tag_style.size, tag_style.spacing)
+                .max(tag_style.size * 0.6)
+                + tag_style.size * 0.3;
+            let gap = inner.w * 0.04;
+            let div_w = (inner.w * 0.006).max(2.0);
+            let div_x = inner.x + num_w + gap * 0.5;
+            let right = BoxRect {
+                x: div_x + gap * 0.5 + div_w,
+                y: inner.y,
+                w: inner.x + inner.w - div_x - gap * 0.5 - div_w,
+                h: inner.h,
+            };
+            let info = b.stack(
+                right,
+                &[
+                    StackItem::new(StackBlock::Primary { emphasis: false }),
+                    StackItem::new(StackBlock::Secondary),
+                ],
+            );
+            b.rect(
+                BoxRect {
+                    x: div_x,
+                    y: info.rect.y,
+                    w: div_w,
+                    h: info.rect.h,
+                },
+                0.0,
+                &b.accent.clone(),
+                1.0,
+                Role::Decoration,
+            );
+            let mut num_style = tag_style;
+            num_style.size *= info.fit;
+            b.text_at(
+                &num,
+                BoxRect {
+                    x: inner.x,
+                    y: info.rect.y,
+                    w: num_w,
+                    h: info.rect.h,
+                },
+                Role::Tag,
+                &num_style,
+                false,
+            );
+        }
+        TitleTemplate::LowerThirdBar => {
+            let bar_w = (inner.w * 0.014).max(4.0);
+            let text = inner.inset(bar_w + inner.w * 0.03, 0.0);
+            let info = b.stack(
+                text,
+                &[
+                    StackItem::new(StackBlock::Primary { emphasis: false }),
+                    StackItem::new(StackBlock::Secondary),
+                ],
+            );
+            b.rect(
+                BoxRect {
+                    x: inner.x,
+                    y: info.rect.y,
+                    w: bar_w,
+                    h: info.rect.h,
+                },
+                bar_w * 0.5,
+                &b.accent.clone(),
+                1.0,
+                Role::Decoration,
+            );
+        }
+        TitleTemplate::LowerThirdGlass | TitleTemplate::LowerThirdLine => {
+            let info = b.stack(
+                inner,
+                &[
+                    StackItem::new(StackBlock::Primary { emphasis: false }),
+                    StackItem::new(StackBlock::Secondary),
+                ],
+            );
+            if t == TitleTemplate::LowerThirdLine {
+                // Accent rule in the gap between name and role.
+                if let Some(prim) = info
+                    .blocks
+                    .iter()
+                    .find(|bl| matches!(bl.block, StackBlock::Primary { .. }))
+                {
+                    let y = match info
+                        .blocks
+                        .iter()
+                        .find(|bl| matches!(bl.block, StackBlock::Secondary))
+                    {
+                        Some(sec) => prim.rect.bottom() + (sec.rect.y - prim.rect.bottom()) * 0.35,
+                        None => prim.rect.bottom() + prim.size * info.fit * 0.22,
+                    };
+                    b.rect(
+                        BoxRect {
+                            x: inner.x,
+                            y,
+                            w: inner.w * 0.16,
+                            h: (inner.h * 0.03).max(2.0),
+                        },
+                        0.0,
+                        &b.accent.clone(),
+                        1.0,
+                        Role::Decoration,
+                    );
+                }
+            }
         }
         TitleTemplate::SocialHandle => {
-            b.tag_chip(inner.inset(0.0, 0.0).with_h(inner.h * 0.2));
-            b.primary(
-                inner.inset(0.0, inner.h * 0.26).with_h(inner.h * 0.48),
-                false,
+            b.stack(
+                inner,
+                &[
+                    StackItem::new(StackBlock::Chip),
+                    StackItem::new(StackBlock::Primary { emphasis: false }),
+                    StackItem::new(StackBlock::Secondary),
+                ],
             );
-            b.secondary(inner.inset(0.0, inner.h * 0.8).with_h(inner.h * 0.2));
         }
         TitleTemplate::Cta | TitleTemplate::CtaFollow | TitleTemplate::CtaLink => {
-            // Button: accent pill behind the primary text, centered lower half.
-            b.tag_line(inner.inset(0.0, 0.0).with_h(inner.h * 0.16));
-            let btn = inner
-                .inset(inner.w * 0.06, inner.h * 0.28)
-                .with_h(inner.h * 0.4);
-            b.rect(btn, btn.h * 0.5, &b.accent.clone(), 1.0, Role::Decoration);
-            let mut style = b.style_for(Role::Primary);
-            style.color = b.surface.clone();
-            b.text_at(
-                &b.details.primary_text.clone(),
-                btn.inset(btn.w * 0.06, 0.0),
-                Role::Primary,
-                &style,
-                false,
+            b.stack(
+                inner,
+                &[
+                    StackItem::new(StackBlock::ButtonPrimary),
+                    StackItem::new(StackBlock::Secondary),
+                    StackItem::new(StackBlock::Tag),
+                ],
             );
-            b.secondary(inner.inset(0.0, inner.h * 0.78).with_h(inner.h * 0.22));
         }
         TitleTemplate::Step => {
-            let r = inner.h * 0.34;
+            let p_size = b.style_for(Role::Primary).size;
+            let col_w = p_size * 1.7;
+            let right = BoxRect {
+                x: inner.x + col_w,
+                y: inner.y,
+                w: inner.w - col_w,
+                h: inner.h,
+            };
+            let info = b.stack(
+                right,
+                &[
+                    StackItem::new(StackBlock::Primary { emphasis: false }),
+                    StackItem::new(StackBlock::Secondary),
+                ],
+            );
+            // Number badge sized to the instruction's first line.
+            let first = info.blocks.first().cloned().unwrap_or(StackBlockInfo {
+                rect: right,
+                size: p_size,
+                block: StackBlock::Slot(0.0),
+            });
+            let size = first.size * info.fit;
+            let r = size * 0.72;
             let cx = inner.x + r;
-            let cy = inner.y + inner.h * 0.32;
+            let cy = first.rect.y + size * 0.6;
             b.circle(cx, cy, r, &b.accent.clone(), Role::Decoration);
             let mut style = b.style_for(Role::Tag);
             style.color = b.surface.clone();
-            style.size = r * 1.1;
+            style.align = "center".into();
+            style.size = r * 1.05;
             b.text_at(
                 &b.details.tag_text.clone().unwrap_or_else(|| "1".into()),
                 BoxRect {
                     x: cx - r,
-                    y: cy - r * 0.72,
+                    y: cy - r,
                     w: r * 2.0,
-                    h: r * 1.6,
+                    h: r * 2.0,
                 },
                 Role::Tag,
                 &style,
                 false,
             );
-            let x = cx + r + inner.w * 0.03;
-            let right = BoxRect {
-                x,
-                y: inner.y,
-                w: inner.x + inner.w - x,
-                h: inner.h,
-            };
-            b.primary(
-                right.inset(0.0, right.h * 0.06).with_h(right.h * 0.52),
-                false,
-            );
-            b.secondary(right.inset(0.0, right.h * 0.66).with_h(right.h * 0.34));
         }
         TitleTemplate::Checklist => {
-            b.tag_line(inner.inset(0.0, 0.0).with_h(inner.h * 0.18));
-            let items: Vec<String> = b
-                .details
-                .secondary_text
-                .clone()
-                .unwrap_or_default()
-                .lines()
-                .map(|l| l.trim().to_string())
-                .filter(|l| !l.is_empty())
-                .take(5)
-                .collect();
-            let items = if items.is_empty() {
-                vec![b.details.primary_text.clone()]
-            } else {
-                items
-            };
-            let rows = inner.inset(0.0, inner.h * 0.22);
-            let row_h = rows.h / items.len().max(1) as f64;
-            let box_s = row_h * 0.42;
-            let mut style = b.style_for(Role::Secondary);
-            style.size = (row_h * 0.5).min(style.size);
-            for (i, item) in items.iter().enumerate() {
-                let y = rows.y + i as f64 * row_h;
-                let bx = inner.x;
-                let by = y + (row_h - box_s) * 0.5;
-                // Checkbox: rounded square + accent tick.
-                b.rect(
-                    BoxRect {
-                        x: bx,
-                        y: by,
-                        w: box_s,
-                        h: box_s,
-                    },
-                    box_s * 0.24,
-                    &b.foreground.clone(),
-                    0.16,
-                    Role::Decoration,
-                );
-                {
-                    let mut e = TitleSceneElement::new(check_path(bx, by, box_s), "rgba(0,0,0,0)");
-                    e.stroke = Some(TitleSceneStroke {
-                        color: b.accent.clone(),
-                        width: (box_s * 0.13).max(1.5),
-                    });
-                    e.clip = Some(
-                        BoxRect {
-                            x: bx,
-                            y: by,
-                            w: box_s,
-                            h: box_s,
-                        }
-                        .clip(),
-                    );
-                    b.push_part(e, Role::Decoration, (bx + box_s * 0.5, by + box_s * 0.5));
-                }
-                b.text_at(
-                    item,
-                    BoxRect {
-                        x: bx + box_s * 1.5,
-                        y,
-                        w: inner.x + inner.w - bx - box_s * 1.5,
-                        h: row_h,
-                    },
-                    Role::Secondary,
-                    &style,
-                    false,
-                );
-            }
+            b.stack(
+                inner,
+                &[
+                    StackItem::new(StackBlock::Tag),
+                    StackItem::new(StackBlock::Primary { emphasis: false }),
+                    StackItem::new(StackBlock::ChecklistItems),
+                ],
+            );
         }
         TitleTemplate::Shortcut => {
-            b.keycaps(
-                &b.details.primary_text.clone(),
-                inner.inset(0.0, inner.h * 0.08).with_h(inner.h * 0.6),
+            b.stack(
+                inner,
+                &[
+                    StackItem::new(StackBlock::Keycaps),
+                    StackItem::new(StackBlock::Secondary),
+                ],
             );
-            b.secondary(inner.inset(0.0, inner.h * 0.76).with_h(inner.h * 0.24));
         }
         TitleTemplate::Terminal => {
-            // Chrome dots + mono command; typewriter comes from the anim spec.
-            let dot_r = inner.h * 0.045;
-            for (i, shade) in [0.35_f64, 0.28, 0.22].iter().enumerate() {
-                b.circle(
-                    inner.x + dot_r + i as f64 * dot_r * 3.0,
-                    inner.y + inner.h * 0.1,
-                    dot_r,
-                    &b.foreground.clone(),
-                    Role::Decoration,
-                );
-                if let Some(last) = b.layout.parts.last_mut() {
-                    last.element.opacity = *shade;
-                }
-            }
-            b.tag_line(BoxRect {
-                x: inner.x + dot_r * 9.0,
-                y: inner.y,
-                w: inner.w - dot_r * 9.0,
-                h: inner.h * 0.2,
-            });
-            b.primary(
-                inner.inset(0.0, inner.h * 0.26).with_h(inner.h * 0.52),
-                false,
+            b.stack(
+                inner,
+                &[
+                    StackItem::new(StackBlock::TerminalBar),
+                    StackItem::new(StackBlock::Primary { emphasis: false }),
+                    StackItem::new(StackBlock::Secondary),
+                ],
             );
-            b.secondary(inner.inset(0.0, inner.h * 0.82).with_h(inner.h * 0.18));
         }
         TitleTemplate::Callout => {
             let tone = b.layout.design.note_tone;
@@ -487,22 +574,6 @@ fn layout_template(b: &mut Builder<'_>) {
                 NoteTone::Tip => b.accent.clone(),
                 NoteTone::Warning => "#f59e0b".to_string(),
             };
-            let bar_w = (inner.w * 0.014).max(4.0);
-            b.rect(
-                BoxRect {
-                    x: inner.x,
-                    y: inner.y + inner.h * 0.06,
-                    w: bar_w,
-                    h: inner.h * 0.88,
-                },
-                bar_w * 0.5,
-                &tone_color,
-                1.0,
-                Role::Decoration,
-            );
-            let text = inner.inset(bar_w + inner.w * 0.03, 0.0);
-            let mut tag_style = b.style_for(Role::Tag);
-            tag_style.color = tone_color.clone();
             let label = b
                 .details
                 .tag_text
@@ -513,216 +584,164 @@ fn layout_template(b: &mut Builder<'_>) {
                     NoteTone::Warning => "WARNING".to_string(),
                 })
                 .to_uppercase();
-            b.text_at(
-                &label,
-                text.inset(0.0, 0.0).with_h(text.h * 0.18),
-                Role::Tag,
-                &tag_style,
-                false,
+            let bar_w = (inner.w * 0.014).max(4.0);
+            let text = inner.inset(bar_w + inner.w * 0.03, 0.0);
+            let info = b.stack(
+                text,
+                &[
+                    StackItem::new(StackBlock::Label {
+                        text: label,
+                        color: tone_color.clone(),
+                    }),
+                    StackItem::new(StackBlock::Primary { emphasis: false }),
+                    StackItem::new(StackBlock::Secondary),
+                ],
             );
-            b.primary(text.inset(0.0, text.h * 0.22).with_h(text.h * 0.5), false);
-            b.secondary(text.inset(0.0, text.h * 0.76).with_h(text.h * 0.24));
+            b.rect(
+                BoxRect {
+                    x: inner.x,
+                    y: info.rect.y,
+                    w: bar_w,
+                    h: info.rect.h,
+                },
+                bar_w * 0.5,
+                &tone_color,
+                1.0,
+                Role::Decoration,
+            );
         }
         TitleTemplate::Quote => {
-            let mut mark_style = b.style_for(Role::Tag);
-            mark_style.family = "serif".into();
-            mark_style.size = inner.h * 0.5;
-            mark_style.color = b.accent.clone();
-            b.text_at(
-                "\u{201C}",
-                BoxRect {
-                    x: inner.x - mark_style.size * 0.1,
-                    y: inner.y - mark_style.size * 0.1,
-                    w: mark_style.size * 1.4,
-                    h: mark_style.size,
-                },
-                Role::Decoration,
-                &mark_style,
-                false,
+            let p_size = b.style_for(Role::Primary).size;
+            let col = p_size * 0.9;
+            let text = inner.inset(col, 0.0);
+            let info = b.stack(
+                text,
+                &[
+                    StackItem::new(StackBlock::Primary { emphasis: false }),
+                    StackItem::new(StackBlock::Secondary),
+                ],
             );
-            let text = inner.inset(inner.w * 0.08, inner.h * 0.12);
-            b.primary(text.inset(0.0, 0.0).with_h(text.h * 0.68), false);
-            b.secondary(text.inset(0.0, text.h * 0.76).with_h(text.h * 0.24));
+            // Oversized opening quote anchored beside the first line: its
+            // baseline matches the first text line's baseline so it can't
+            // drift out of the clip top.
+            if let Some(first) = info.blocks.first() {
+                let size = first.size * info.fit;
+                let mut ms = b.style_for(Role::Tag);
+                ms.family = "serif".into();
+                ms.size = size * 1.55;
+                ms.color = b.accent.clone();
+                b.text_at(
+                    "\u{201C}",
+                    BoxRect {
+                        x: inner.x,
+                        y: first.rect.y + size * 0.95 - ms.size * 0.975,
+                        w: col * 1.3,
+                        h: ms.size * 1.25,
+                    },
+                    Role::Decoration,
+                    &ms,
+                    false,
+                );
+            }
         }
         TitleTemplate::Stat | TitleTemplate::StatBeforeAfter | TitleTemplate::Countdown => {
-            b.tag_line(inner.inset(0.0, 0.0).with_h(inner.h * 0.14));
-            let step = t == TitleTemplate::Countdown;
-            let metric_rect = inner.inset(0.0, inner.h * 0.16).with_h(inner.h * 0.55);
-            b.metric(metric_rect, step);
-            if t == TitleTemplate::StatBeforeAfter {
-                // Arrow showing the before → after direction.
-                let y = metric_rect.y + metric_rect.h * 0.5;
+            b.stack(
+                inner,
+                &[
+                    StackItem::new(StackBlock::Tag),
+                    StackItem::new(StackBlock::Metric {
+                        step: t == TitleTemplate::Countdown,
+                        before_after: t == TitleTemplate::StatBeforeAfter,
+                    }),
+                    StackItem::new(StackBlock::Primary { emphasis: false }),
+                    StackItem::new(StackBlock::Secondary),
+                ],
+            );
+        }
+        TitleTemplate::Location => {
+            let p_size = b.style_for(Role::Primary).size;
+            let col = p_size * 1.15;
+            let text = inner.inset(col, 0.0);
+            let info = b.stack(
+                text,
+                &[
+                    StackItem::new(StackBlock::Primary { emphasis: false }),
+                    StackItem::new(StackBlock::Secondary),
+                ],
+            );
+            if let Some(first) = info.blocks.first() {
+                let size = first.size * info.fit;
+                let pin_h = size * 0.95;
+                let cy = first.rect.y + size * 0.6;
                 b.path(
-                    arrow_path(inner.x + inner.w * 0.76, y, inner.w * 0.16, inner.h * 0.06),
+                    pin_path(inner.x + pin_h * 0.4, cy - pin_h * 0.5, pin_h),
                     &b.accent.clone(),
                     1.0,
                     Role::Decoration,
                     None,
                 );
             }
-            b.primary(
-                inner.inset(0.0, inner.h * 0.72).with_h(inner.h * 0.14),
-                false,
-            );
-            b.secondary(inner.inset(0.0, inner.h * 0.86).with_h(inner.h * 0.14));
-        }
-        TitleTemplate::Location => {
-            let pin_h = inner.h * 0.34;
-            b.path(
-                pin_path(inner.x + pin_h * 0.35, inner.y + inner.h * 0.04, pin_h),
-                &b.accent.clone(),
-                1.0,
-                Role::Decoration,
-                None,
-            );
-            let text = inner.inset(inner.h * 0.5, 0.0);
-            b.primary(text.inset(0.0, text.h * 0.05).with_h(text.h * 0.55), false);
-            b.secondary(text.inset(0.0, text.h * 0.68).with_h(text.h * 0.32));
         }
         TitleTemplate::Banner => {
-            // Accent band across the clip with the headline on it.
-            let band = inner
-                .inset(-b.pad_x * 0.999, inner.h * 0.18)
-                .with_h(inner.h * 0.5);
-            b.rect(band, 0.0, &b.accent.clone(), 1.0, Role::Decoration);
-            let mut style = b.style_for(Role::Primary);
-            style.color = b.surface.clone();
-            style.align = "center".into();
-            b.text_at(
-                &b.details.primary_text.clone(),
-                band.inset(band.w * 0.04, 0.0),
-                Role::Primary,
-                &style,
-                false,
-            );
-            let mut sub = b.style_for(Role::Secondary);
-            sub.align = "center".into();
-            let sub_text = b.details.secondary_text.clone().unwrap_or_default();
-            b.text_at(
-                &sub_text,
-                inner.inset(0.0, inner.h * 0.76).with_h(inner.h * 0.2),
-                Role::Secondary,
-                &sub,
-                false,
+            b.stack(
+                inner,
+                &[
+                    StackItem::new(StackBlock::Band),
+                    // The band centers its label, so the supporting line
+                    // follows the same centered axis even when the clip
+                    // alignment says otherwise.
+                    StackItem::new(StackBlock::Secondary).centered(),
+                ],
             );
         }
         TitleTemplate::Highlight => {
-            // Marker emphasis over the whole primary when no phrase is set.
-            b.primary(
-                inner.inset(0.0, inner.h * 0.16).with_h(inner.h * 0.56),
-                true,
+            b.stack(
+                inner,
+                &[
+                    StackItem::new(StackBlock::Tag),
+                    StackItem::new(StackBlock::Primary { emphasis: true }),
+                    StackItem::new(StackBlock::Secondary),
+                ],
             );
-            b.secondary(inner.inset(0.0, inner.h * 0.78).with_h(inner.h * 0.22));
         }
         TitleTemplate::Agenda => {
-            let mut tag_style = b.style_for(Role::Tag);
-            tag_style.size *= 1.4;
-            let title = b.details.primary_text.clone();
-            b.text_at(
-                &title,
-                inner.inset(0.0, 0.0).with_h(inner.h * 0.2),
-                Role::Tag,
-                &tag_style,
-                false,
+            b.stack(
+                inner,
+                &[
+                    StackItem::new(StackBlock::Primary { emphasis: false }),
+                    StackItem::new(StackBlock::AgendaItems),
+                ],
             );
-            let items: Vec<String> = b
-                .details
-                .secondary_text
-                .clone()
-                .unwrap_or_default()
-                .lines()
-                .map(|l| l.trim().to_string())
-                .filter(|l| !l.is_empty())
-                .take(6)
-                .collect();
-            let rows = inner.inset(0.0, inner.h * 0.26);
-            let row_h = rows.h / items.len().max(1) as f64;
-            let dot_r = (row_h * 0.16).min(inner.w * 0.01);
-            let mut style = b.style_for(Role::Secondary);
-            style.size = (row_h * 0.46).min(style.size);
-            for (i, item) in items.iter().enumerate() {
-                let cy = rows.y + i as f64 * row_h + row_h * 0.5;
-                let color = if i == 0 {
-                    b.accent.clone()
-                } else {
-                    b.secondary.clone()
-                };
-                b.circle(inner.x + dot_r, cy, dot_r, &color, Role::Decoration);
-                if i + 1 < items.len() {
-                    b.rect(
-                        BoxRect {
-                            x: inner.x + dot_r - 1.0,
-                            y: cy + dot_r,
-                            w: 2.0,
-                            h: row_h - dot_r * 2.0,
-                        },
-                        0.0,
-                        &b.secondary.clone(),
-                        0.4,
-                        Role::Decoration,
-                    );
-                }
-                b.text_at(
-                    item,
-                    BoxRect {
-                        x: inner.x + dot_r * 3.4,
-                        y: rows.y + i as f64 * row_h,
-                        w: inner.x + inner.w - inner.x - dot_r * 3.4,
-                        h: row_h,
-                    },
-                    Role::Secondary,
-                    &style,
-                    false,
-                );
-            }
         }
         TitleTemplate::Outro => {
-            b.primary(inner.inset(0.0, inner.h * 0.08).with_h(inner.h * 0.5), true);
-            let pill = inner
-                .inset(inner.w * 0.18, inner.h * 0.64)
-                .with_h(inner.h * 0.2);
-            b.rect(pill, pill.h * 0.5, &b.accent.clone(), 1.0, Role::Decoration);
-            let mut style = b.style_for(Role::Tag);
-            style.color = b.surface.clone();
-            style.align = "center".into();
-            style.size = (pill.h * 0.44).max(10.0);
-            b.text_at(
-                &b.details
-                    .tag_text
-                    .clone()
-                    .unwrap_or_else(|| "recordforge".into()),
-                pill,
-                Role::Tag,
-                &style,
-                false,
+            b.stack(
+                inner,
+                &[
+                    StackItem::new(StackBlock::Primary { emphasis: true }),
+                    StackItem::new(StackBlock::ButtonTag),
+                    StackItem::new(StackBlock::Secondary),
+                ],
             );
-            b.secondary(inner.inset(0.0, inner.h * 0.88).with_h(inner.h * 0.12));
         }
         TitleTemplate::Source => {
-            let mut tag_style = b.style_for(Role::Tag);
-            tag_style.color = b.accent.clone();
             let label = b
                 .details
                 .tag_text
                 .clone()
                 .unwrap_or_else(|| "SOURCE".into())
                 .to_uppercase();
-            b.text_at(
-                &label,
-                inner.inset(0.0, 0.0).with_h(inner.h * 0.3),
-                Role::Tag,
-                &tag_style,
-                false,
+            b.stack(
+                inner,
+                &[
+                    StackItem::new(StackBlock::Label {
+                        text: label,
+                        color: b.accent.clone(),
+                    }),
+                    StackItem::new(StackBlock::Primary { emphasis: false }),
+                    StackItem::new(StackBlock::Secondary),
+                ],
             );
-            b.primary(inner.inset(0.0, inner.h * 0.3).with_h(inner.h * 0.4), false);
-            b.secondary(inner.inset(0.0, inner.h * 0.74).with_h(inner.h * 0.26));
         }
-    }
-}
-
-impl BoxRect {
-    fn with_h(self, h: f64) -> BoxRect {
-        BoxRect { h, ..self }
     }
 }
 
@@ -754,6 +773,8 @@ impl Builder<'_> {
                 "600",
                 self.accent.as_str(),
             ),
+            // Non-text roles borrow the metric element slot for sizing so the
+            // fourth ratio in `size_ratios` applies (metric digits, keycaps).
             _ => (
                 metric,
                 design.elements.metric.as_ref(),
@@ -790,6 +811,247 @@ impl Builder<'_> {
         }
     }
 
+    /// Natural (fit = 1) height of a wrapped text block: the same formula
+    /// `text_at` uses for its height fit, so stack allocation matches.
+    fn measure_text_block(&self, text: &str, w: f64, style: &Style) -> f64 {
+        if text.trim().is_empty() || w <= 0.0 {
+            return 0.0;
+        }
+        let text = apply_transform(text, style.transform);
+        let face = glyphs::face(&style.family, &style.weight);
+        let lines = glyphs::wrap(&face, &text, w, style.size, style.spacing);
+        style.size * (1.2 + lines.len().saturating_sub(1) as f64 * style.line_height)
+    }
+
+    fn metric_style(&self) -> Style {
+        self.style_for(Role::Decoration)
+    }
+
+    fn item_lines(&self, max: usize) -> Vec<String> {
+        self.details
+            .secondary_text
+            .clone()
+            .unwrap_or_default()
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .take(max)
+            .collect()
+    }
+
+    /// Natural height and the reference type size for a block, or `None` when
+    /// the block has no content and should drop out of the stack.
+    fn block_metrics(&self, block: &StackBlock, w: f64) -> Option<(f64, f64)> {
+        match block {
+            StackBlock::Tag => {
+                let tag = self
+                    .details
+                    .tag_text
+                    .clone()
+                    .filter(|t| !t.trim().is_empty())?;
+                let style = self.style_for(Role::Tag);
+                Some((self.measure_text_block(&tag, w, &style), style.size))
+            }
+            StackBlock::Label { text, .. } => {
+                let style = self.style_for(Role::Tag);
+                Some((self.measure_text_block(text, w, &style), style.size))
+            }
+            StackBlock::Chip => {
+                self.details
+                    .tag_text
+                    .clone()
+                    .filter(|t| !t.trim().is_empty())?;
+                let size = self.style_for(Role::Tag).size;
+                Some((size * 1.75, size))
+            }
+            StackBlock::Primary { .. } => {
+                let style = self.style_for(Role::Primary);
+                Some((
+                    self.measure_text_block(&self.details.primary_text, w, &style),
+                    style.size,
+                ))
+            }
+            StackBlock::Secondary => {
+                let text = self.details.secondary_text.clone()?;
+                let style = self.style_for(Role::Secondary);
+                Some((self.measure_text_block(&text, w, &style), style.size))
+            }
+            StackBlock::Metric { .. } => {
+                let size = self.metric_style().size;
+                Some((size * 1.22, size))
+            }
+            StackBlock::ButtonPrimary => {
+                let size = self.style_for(Role::Primary).size;
+                Some((size * 2.15, size))
+            }
+            StackBlock::ButtonTag => {
+                let size = self.style_for(Role::Tag).size;
+                Some((size * 2.15, size))
+            }
+            StackBlock::ChecklistItems | StackBlock::AgendaItems => {
+                let max = if matches!(block, StackBlock::AgendaItems) {
+                    6
+                } else {
+                    5
+                };
+                let n = self.item_lines(max).len();
+                if n == 0 {
+                    return None;
+                }
+                let size = self.style_for(Role::Secondary).size;
+                Some((n as f64 * size * 1.55, size))
+            }
+            StackBlock::Keycaps => {
+                if self.details.primary_text.trim().is_empty() {
+                    return None;
+                }
+                let size = self.style_for(Role::Primary).size;
+                Some((size * 1.95, size))
+            }
+            StackBlock::TerminalBar => {
+                let size = self.style_for(Role::Tag).size;
+                Some((size * 1.5, size))
+            }
+            StackBlock::Band => {
+                let size = self.style_for(Role::Primary).size;
+                Some((size * 2.0, size))
+            }
+            StackBlock::Slot(h) => Some((*h, 0.0)),
+        }
+    }
+
+    /// Default gap after a block, proportional to its type size.
+    fn gap_after(block: &StackBlock, size: f64) -> f64 {
+        let factor = match block {
+            StackBlock::Tag | StackBlock::Label { .. } | StackBlock::Chip => 0.5,
+            StackBlock::TerminalBar => 0.45,
+            StackBlock::Primary { .. } => 0.25,
+            StackBlock::Secondary => 0.35,
+            StackBlock::Metric { .. } => 0.14,
+            StackBlock::ButtonPrimary | StackBlock::ButtonTag | StackBlock::Band => 0.45,
+            StackBlock::Keycaps => 0.4,
+            StackBlock::ChecklistItems | StackBlock::AgendaItems | StackBlock::Slot(_) => 0.0,
+        };
+        factor * size
+    }
+
+    /// Lay the blocks out top-to-bottom inside `rect` with one shared fit
+    /// factor (the stack shrinks as a unit, preserving the type hierarchy),
+    /// gaps proportional to type size, and the whole stack vertically centered.
+    /// Returns the occupied rect and per-block rects so decorations can be
+    /// sized from the content rather than the clip box.
+    fn stack(&mut self, rect: BoxRect, items: &[StackItem]) -> StackInfo {
+        struct Entry {
+            block: StackBlock,
+            h: f64,
+            size: f64,
+            gap: f64,
+            align: Option<&'static str>,
+        }
+        let mut entries: Vec<Entry> = Vec::with_capacity(items.len());
+        for item in items {
+            let Some((h, size)) = self.block_metrics(&item.block, rect.w) else {
+                continue;
+            };
+            let gap = if entries.is_empty() {
+                0.0
+            } else {
+                let prev = entries.last().unwrap();
+                item.gap
+                    .unwrap_or_else(|| Self::gap_after(&prev.block, prev.size))
+            };
+            entries.push(Entry {
+                block: item.block.clone(),
+                h,
+                size,
+                gap,
+                align: item.align,
+            });
+        }
+        let total: f64 = entries.iter().map(|e| e.h + e.gap).sum();
+        if total <= 0.0 {
+            let info = StackInfo {
+                rect: rect.with_h(0.0),
+                fit: 1.0,
+                blocks: Vec::new(),
+            };
+            self.stack_info = Some(info.clone());
+            return info;
+        }
+        let fit = (rect.h / total).min(1.0);
+        let mut y = rect.y + (rect.h - total * fit) * 0.5;
+        let mut info = StackInfo {
+            rect: BoxRect {
+                x: rect.x,
+                y,
+                w: rect.w,
+                h: total * fit,
+            },
+            fit,
+            blocks: Vec::with_capacity(entries.len()),
+        };
+        for e in entries {
+            y += e.gap * fit;
+            let block_rect = BoxRect {
+                x: rect.x,
+                y,
+                w: rect.w,
+                h: e.h * fit,
+            };
+            self.render_block(&e.block, block_rect, fit, e.align);
+            info.blocks.push(StackBlockInfo {
+                rect: block_rect,
+                size: e.size,
+                block: e.block,
+            });
+            y += e.h * fit;
+        }
+        self.stack_info = Some(info.clone());
+        info
+    }
+
+    fn render_block(
+        &mut self,
+        block: &StackBlock,
+        rect: BoxRect,
+        fit: f64,
+        align: Option<&'static str>,
+    ) {
+        match block {
+            StackBlock::Tag => self.tag_line(rect),
+            StackBlock::Label { text, color } => {
+                let mut style = self.style_for(Role::Tag);
+                style.color = color.clone();
+                self.text_at(text, rect, Role::Tag, &style, false);
+            }
+            StackBlock::Chip => self.tag_chip(rect),
+            StackBlock::Primary { emphasis } => self.primary(rect, *emphasis),
+            StackBlock::Secondary => self.secondary(rect, align),
+            StackBlock::Metric { step, before_after } => self.metric(rect, *step, *before_after),
+            StackBlock::ButtonPrimary => self.button(rect, Role::Primary),
+            StackBlock::ButtonTag => self.button(rect, Role::Tag),
+            StackBlock::ChecklistItems => self.checklist_items(rect, fit),
+            StackBlock::AgendaItems => self.agenda_items(rect, fit),
+            StackBlock::Keycaps => {
+                let text = self.details.primary_text.clone();
+                self.keycaps(&text, rect);
+            }
+            StackBlock::TerminalBar => self.terminal_bar(rect),
+            StackBlock::Band => self.band(rect),
+            StackBlock::Slot(_) => {}
+        }
+    }
+
+    /// X offset of a width-`w` sub-block inside `rect` for the given alignment.
+    fn align_x(rect: BoxRect, w: f64, align: &str) -> f64 {
+        rect.x
+            + match align {
+                "center" => (rect.w - w) * 0.5,
+                "right" => rect.w - w,
+                _ => 0.0,
+            }
+    }
+
     fn tag_line(&mut self, rect: BoxRect) {
         let Some(tag) = self
             .details
@@ -803,7 +1065,9 @@ impl Builder<'_> {
         self.text_at(&tag, rect, Role::Tag, &style, false);
     }
 
-    // Tag inside a small accent chip.
+    // Tag inside a small accent chip. The chip always holds a single line:
+    // its text rect is the measured text width plus slack, centered on the
+    // chip, so the label can never wrap inside its own chip.
     fn tag_chip(&mut self, rect: BoxRect) {
         let Some(tag) = self
             .details
@@ -814,17 +1078,17 @@ impl Builder<'_> {
             return;
         };
         let mut style = self.style_for(Role::Tag);
+        // The stack allocates `size * 1.75` of height; the rendered size comes
+        // from the allocated height so the shared fit factor reaches the chip.
+        let s = (rect.h / 1.75).min(style.size);
+        style.size = s;
         let face = glyphs::face(&style.family, &style.weight);
-        let tw = glyphs::measure(&face, &tag.to_uppercase(), style.size, style.spacing);
-        let chip_w = tw + style.size * 1.1;
-        let chip_h = style.size * 1.9;
+        let shown = apply_transform(&tag, style.transform);
+        let tw = glyphs::measure(&face, &shown, s, style.spacing);
+        let chip_w = tw + s * 1.1;
+        let chip_h = s * 1.7;
         let chip = BoxRect {
-            x: rect.x
-                + match style.align.as_str() {
-                    "center" => (rect.w - chip_w) * 0.5,
-                    "right" => rect.w - chip_w,
-                    _ => 0.0,
-                },
+            x: Self::align_x(rect, chip_w, &style.align),
             y: rect.y + (rect.h - chip_h) * 0.5,
             w: chip_w,
             h: chip_h,
@@ -837,10 +1101,91 @@ impl Builder<'_> {
             Role::Decoration,
         );
         style.color = self.surface.clone();
+        style.align = "center".into();
         self.text_at(
             &tag,
-            chip.inset(style.size * 0.55, 0.0),
+            BoxRect {
+                x: chip.x + chip.w * 0.5 - (tw + s) * 0.5,
+                y: chip.y,
+                w: tw + s,
+                h: chip.h,
+            },
             Role::Tag,
+            &style,
+            false,
+        );
+    }
+
+    // Accent pill that hugs its label (CTA button / outro handle).
+    fn button(&mut self, rect: BoxRect, role: Role) {
+        let text = match role {
+            Role::Primary => self.details.primary_text.clone(),
+            Role::Tag => self
+                .details
+                .tag_text
+                .clone()
+                .unwrap_or_else(|| "recordforge".into()),
+            _ => return,
+        };
+        if text.trim().is_empty() {
+            return;
+        }
+        let mut style = self.style_for(role);
+        let mut s = (rect.h / 2.15).min(style.size);
+        let face = glyphs::face(&style.family, &style.weight);
+        let shown = apply_transform(&text, style.transform);
+        let mut tw = glyphs::measure(&face, &shown, s, style.spacing);
+        let mut bw = tw + s * 1.8;
+        if bw > rect.w {
+            // Keep the pill inside the stack width: shrink the label instead
+            // of letting the button overflow the box.
+            s *= rect.w / bw;
+            tw = glyphs::measure(&face, &shown, s, style.spacing);
+            bw = tw + s * 1.8;
+        }
+        let bh = s * 1.9;
+        let btn = BoxRect {
+            x: Self::align_x(rect, bw, &style.align),
+            y: rect.y + (rect.h - bh) * 0.5,
+            w: bw,
+            h: bh,
+        };
+        self.rect(btn, bh * 0.5, &self.accent.clone(), 1.0, Role::Decoration);
+        style.color = self.surface.clone();
+        style.align = "center".into();
+        style.size = s;
+        // The text rect is wider than the pill and centered on it: a label
+        // sized exactly to the pill interior would re-wrap at its own measure.
+        self.text_at(
+            &text,
+            BoxRect {
+                x: btn.x - s,
+                w: btn.w + 2.0 * s,
+                ..btn
+            },
+            role,
+            &style,
+            false,
+        );
+    }
+
+    // Full-bleed accent band carrying the headline (banner template).
+    fn band(&mut self, rect: BoxRect) {
+        let band = BoxRect {
+            x: 0.0,
+            y: rect.y,
+            w: self.layout.width,
+            h: rect.h,
+        };
+        self.rect(band, 0.0, &self.accent.clone(), 1.0, Role::Decoration);
+        let mut style = self.style_for(Role::Primary);
+        style.color = self.surface.clone();
+        style.align = "center".into();
+        let text = self.details.primary_text.clone();
+        self.text_at(
+            &text,
+            band.inset(rect.h * 0.4, 0.0),
+            Role::Primary,
             &style,
             false,
         );
@@ -855,11 +1200,14 @@ impl Builder<'_> {
         self.text_at(&text, rect, Role::Primary, &style, emphasis);
     }
 
-    fn secondary(&mut self, rect: BoxRect) {
+    fn secondary(&mut self, rect: BoxRect, align: Option<&'static str>) {
         let Some(text) = self.details.secondary_text.clone() else {
             return;
         };
-        let style = self.style_for(Role::Secondary);
+        let mut style = self.style_for(Role::Secondary);
+        if let Some(align) = align {
+            style.align = align.into();
+        }
         self.text_at(&text, rect, Role::Secondary, &style, false);
     }
 
@@ -1016,7 +1364,28 @@ impl Builder<'_> {
         }
         let text = apply_transform(text, style.transform);
         let face = glyphs::face(&style.family, &style.weight);
-        let lines = glyphs::wrap(&face, &text, rect.w, style.size, style.spacing);
+        let mut lines = glyphs::wrap(&face, &text, rect.w, style.size, style.spacing);
+        // Centered headlines balance like CSS `text-wrap: balance`: shrink
+        // the wrap width to the narrowest value that still breaks into the
+        // same number of lines, evening out a ragged greedy wrap. The line
+        // count never changes, so block metrics and fit are unaffected;
+        // left/right aligned text keeps the greedy wrap.
+        if role == Role::Primary && style.align == "center" && (2..=4).contains(&lines.len()) {
+            let target = lines.len();
+            let (mut lo, mut hi) = (0.0f64, rect.w);
+            for _ in 0..32 {
+                let mid = (lo + hi) * 0.5;
+                if glyphs::wrap(&face, &text, mid, style.size, style.spacing).len() <= target {
+                    hi = mid;
+                } else {
+                    lo = mid;
+                }
+            }
+            let balanced = glyphs::wrap(&face, &text, hi, style.size, style.spacing);
+            if balanced.len() == target {
+                lines = balanced;
+            }
+        }
         let max_width = lines
             .iter()
             .map(|line| glyphs::measure(&face, line, style.size, style.spacing))
@@ -1038,8 +1407,16 @@ impl Builder<'_> {
         let total_graphemes = text.graphemes(true).count().max(1);
         let block_center = rect.center();
         let emph = design.emphasis.clone();
+        // An empty emphasis phrase marks the whole block only for the
+        // Highlight template ("mark everything"); every other template needs
+        // real, matching emphasis text before anything is decorated or
+        // recolored.
         let emph_text = if emphasis && emph.text.is_empty() {
-            text.clone() // Highlight template marks everything.
+            if design.template == TitleTemplate::Highlight {
+                text.clone()
+            } else {
+                String::new()
+            }
         } else {
             apply_transform(&emph.text, style.transform)
         };
@@ -1053,7 +1430,7 @@ impl Builder<'_> {
             && design.fill.gradient_stops.len() >= 2;
         let mut consumed = 0usize;
         let mut graphemes = 0usize;
-        for line in &lines {
+        for (line_i, line) in lines.iter().enumerate() {
             let source_start = text[consumed..]
                 .find(line.as_str())
                 .map_or(consumed, |o| consumed + o);
@@ -1064,10 +1441,13 @@ impl Builder<'_> {
                     "right" => rect.w - width,
                     _ => 0.0,
                 };
+            // Geometry uses a per-call local line index; the global per-role
+            // counter only drives animation unit indices so a second `text_at`
+            // call for the same role doesn't get pushed down by earlier lines.
             let baseline = rect.y
                 + (rect.h - block_height) * 0.5
                 + size * 0.95
-                + self.counts[role_index(role)][0] as f64 * size * style.line_height;
+                + line_i as f64 * size * style.line_height;
             let line_clip = TitleClip {
                 x: rect.x,
                 y: baseline - size,
@@ -1075,6 +1455,12 @@ impl Builder<'_> {
                 height: size * 1.25,
             };
             let line_idx = self.counts[role_index(role)][0];
+            // Emphasis decorations are merged into one band per contiguous
+            // selected span per line and spliced in behind the whole line so
+            // adjacent words share a single band with no overlap darkening.
+            let line_start = self.layout.parts.len();
+            let mut spans: Vec<(f64, f64, (u32, u32, u32))> = Vec::new();
+            let mut open_span: Option<(f64, f64, (u32, u32, u32))> = None;
             for run in glyphs::runs(&face, line, size, style.spacing, per_char || typewriter) {
                 let run_selected = selected.is_some_and(|(s, e)| {
                     source_start + run.end > s && source_start + run.start < e
@@ -1082,21 +1468,22 @@ impl Builder<'_> {
                 let line_word_idx = self.counts[role_index(role)][1];
                 let line_char_idx = self.counts[role_index(role)][2];
                 let unit = (line_idx, line_word_idx, line_char_idx);
-                if run_selected && !run.path.is_empty() {
-                    self.emphasis_decor(
-                        &emph,
-                        x + run.x,
-                        run.width,
-                        baseline,
-                        size,
-                        line_clip,
-                        unit,
-                    );
+                if run_selected {
+                    match &mut open_span {
+                        Some(span) => span.1 = x + run.x + run.width,
+                        None => open_span = Some((x + run.x, x + run.x + run.width, unit)),
+                    }
+                } else if let Some(span) = open_span.take() {
+                    spans.push(span);
                 }
                 let anchor = (x + run.x + run.width * 0.5, baseline - size * 0.35);
                 if !run.path.is_empty() {
                     let mut e = TitleSceneElement::new(run.path.clone(), &style.color);
-                    e.translate_x = x + run.x;
+                    // Run paths are authored in absolute line-space (glyph_path
+                    // relies on this for whole-string shapes), so the element
+                    // translate carries only the line origin — adding run.x
+                    // would double the offset and spread words apart.
+                    e.translate_x = x;
                     e.translate_y = baseline;
                     e.clip = Some(line_clip);
                     if run_selected && emph.style == super::EmphasisStyle::Color {
@@ -1150,6 +1537,20 @@ impl Builder<'_> {
                     self.counts[role_index(role)][1] += 1;
                 }
             }
+            if let Some(span) = open_span.take() {
+                spans.push(span);
+            }
+            if !spans.is_empty() {
+                let mut decor = Vec::with_capacity(spans.len());
+                for (x0, x1, unit) in spans {
+                    if let Some(part) =
+                        self.emphasis_part(&emph, x0, x1 - x0, baseline, size, line_clip, unit)
+                    {
+                        decor.push(part);
+                    }
+                }
+                self.layout.parts.splice(line_start..line_start, decor);
+            }
             self.counts[role_index(role)][0] += 1;
             graphemes += line.graphemes(true).count();
             consumed = source_start + line.len();
@@ -1188,9 +1589,10 @@ impl Builder<'_> {
         }
     }
 
+    // One emphasis decoration part spanning a contiguous selected span.
     #[allow(clippy::too_many_arguments)]
-    fn emphasis_decor(
-        &mut self,
+    fn emphasis_part(
+        &self,
         emph: &TitleEmphasis,
         x: f64,
         w: f64,
@@ -1198,29 +1600,10 @@ impl Builder<'_> {
         size: f64,
         line_clip: TitleClip,
         unit: (u32, u32, u32),
-    ) {
+    ) -> Option<Part> {
         let color = emph.color.clone().unwrap_or_else(|| self.accent.clone());
-        let push = |b: &mut Self, e: TitleSceneElement| {
-            let anchor = (x + w * 0.5, baseline - size * 0.35);
-            b.layout.parts.push(Part {
-                element: e,
-                role: Role::Decoration,
-                line_idx: unit.0,
-                word_idx: unit.1,
-                char_idx: unit.2,
-                line_count: 1,
-                word_count: 1,
-                char_count: 1,
-                anchor,
-                tracking: 0.0,
-                sweep: Some(line_clip),
-                typing: None,
-                emphasis: true,
-                shimmer: None,
-            });
-        };
-        match emph.style {
-            super::EmphasisStyle::Color => {}
+        let e = match emph.style {
+            super::EmphasisStyle::Color => return None,
             super::EmphasisStyle::Marker => {
                 let r = BoxRect {
                     x: x - size * 0.05,
@@ -1231,7 +1614,7 @@ impl Builder<'_> {
                 let mut e = TitleSceneElement::new(rounded_rect(r, size * 0.1), &color);
                 e.opacity = 0.34;
                 e.clip = Some(r.clip());
-                push(self, e);
+                e
             }
             super::EmphasisStyle::Underline => {
                 let r = BoxRect {
@@ -1242,7 +1625,7 @@ impl Builder<'_> {
                 };
                 let mut e = TitleSceneElement::new(rounded_rect(r, size * 0.028), &color);
                 e.clip = Some(r.clip());
-                push(self, e);
+                e
             }
             super::EmphasisStyle::Strike => {
                 let r = BoxRect {
@@ -1253,7 +1636,7 @@ impl Builder<'_> {
                 };
                 let mut e = TitleSceneElement::new(rounded_rect(r, size * 0.03), &color);
                 e.clip = Some(r.clip());
-                push(self, e);
+                e
             }
             super::EmphasisStyle::Box => {
                 let r = BoxRect {
@@ -1268,9 +1651,25 @@ impl Builder<'_> {
                     width: size * 0.045,
                 });
                 e.clip = Some(r.clip());
-                push(self, e);
+                e
             }
-        }
+        };
+        Some(Part {
+            element: e,
+            role: Role::Decoration,
+            line_idx: unit.0,
+            word_idx: unit.1,
+            char_idx: unit.2,
+            line_count: 1,
+            word_count: 1,
+            char_count: 1,
+            anchor: (x + w * 0.5, baseline - size * 0.35),
+            tracking: 0.0,
+            sweep: Some(line_clip),
+            typing: None,
+            emphasis: true,
+            shimmer: None,
+        })
     }
 
     // The shimmer loop sweeps a gradient bar across the emphasized area.
@@ -1354,15 +1753,10 @@ impl Builder<'_> {
             .map(|key| glyphs::measure(&face, key, size, 0.0) + size * 0.9)
             .collect();
         let total = widths.iter().sum::<f64>() + keys.len().saturating_sub(1) as f64 * gap;
-        let scale = (rect.w / total).min(rect.h / (size * 1.8)).min(1.0);
+        let scale = (rect.w / total).min(rect.h / (size * 1.95)).min(1.0);
         let key_h = size * 1.8 * scale;
         let align = self.style_for(Role::Primary).align;
-        let mut x = rect.x
-            + match align.as_str() {
-                "center" => (rect.w - total * scale) * 0.5,
-                "right" => rect.w - total * scale,
-                _ => 0.0,
-            };
+        let mut x = Self::align_x(rect, total * scale, &align);
         for (index, (key, width)) in keys.iter().zip(widths).enumerate() {
             let r = BoxRect {
                 x,
@@ -1390,13 +1784,14 @@ impl Builder<'_> {
             let mut ks = self.style_for(Role::Primary);
             ks.family = "mono".into();
             ks.size = size * scale;
+            ks.align = "center".into();
             self.text_at(
                 key,
                 BoxRect {
-                    x: x + size * 0.4 * scale,
-                    y: r.y + size * 0.15 * scale,
-                    w: r.w - size * 0.8 * scale,
-                    h: r.h - size * 0.3 * scale,
+                    x: r.x,
+                    y: r.y,
+                    w: r.w,
+                    h: r.h,
                 },
                 Role::Primary,
                 &ks,
@@ -1424,11 +1819,159 @@ impl Builder<'_> {
         }
     }
 
-    fn metric(&mut self, rect: BoxRect, step: bool) {
+    // Terminal chrome row: three dots and the shell tag on one line.
+    fn terminal_bar(&mut self, rect: BoxRect) {
+        let s = rect.h / 1.5;
+        let dot_r = s * 0.24;
+        let cy = rect.y + rect.h * 0.5;
+        for (i, shade) in [0.35_f64, 0.28, 0.22].iter().enumerate() {
+            self.circle(
+                rect.x + dot_r + i as f64 * dot_r * 3.0,
+                cy,
+                dot_r,
+                &self.foreground.clone(),
+                Role::Decoration,
+            );
+            if let Some(last) = self.layout.parts.last_mut() {
+                last.element.opacity = *shade;
+            }
+        }
+        let mut style = self.style_for(Role::Tag);
+        style.size = s;
+        if let Some(tag) = self
+            .details
+            .tag_text
+            .clone()
+            .filter(|t| !t.trim().is_empty())
+        {
+            let dots_w = dot_r * 2.0 + 2.0 * dot_r * 3.0;
+            self.text_at(
+                &tag,
+                BoxRect {
+                    x: rect.x + dots_w + s * 0.6,
+                    y: rect.y,
+                    w: rect.w - dots_w - s * 0.6,
+                    h: rect.h,
+                },
+                Role::Tag,
+                &style,
+                false,
+            );
+        }
+    }
+
+    fn checklist_items(&mut self, rect: BoxRect, fit: f64) {
+        let items = self.item_lines(5);
+        if items.is_empty() {
+            return;
+        }
+        let row_h = rect.h / items.len() as f64;
+        let mut style = self.style_for(Role::Secondary);
+        style.size *= fit;
+        let box_s = (style.size * 0.82).min(row_h * 0.5);
+        for (i, item) in items.iter().enumerate() {
+            let y = rect.y + i as f64 * row_h;
+            let bx = rect.x;
+            let by = y + (row_h - box_s) * 0.5;
+            // Checkbox: rounded square + accent tick.
+            self.rect(
+                BoxRect {
+                    x: bx,
+                    y: by,
+                    w: box_s,
+                    h: box_s,
+                },
+                box_s * 0.24,
+                &self.foreground.clone(),
+                0.16,
+                Role::Decoration,
+            );
+            {
+                let mut e = TitleSceneElement::new(check_path(bx, by, box_s), "rgba(0,0,0,0)");
+                e.stroke = Some(TitleSceneStroke {
+                    color: self.accent.clone(),
+                    width: (box_s * 0.13).max(1.5),
+                });
+                e.clip = Some(
+                    BoxRect {
+                        x: bx,
+                        y: by,
+                        w: box_s,
+                        h: box_s,
+                    }
+                    .clip(),
+                );
+                self.push_part(e, Role::Decoration, (bx + box_s * 0.5, by + box_s * 0.5));
+            }
+            self.text_at(
+                item,
+                BoxRect {
+                    x: bx + box_s * 1.5,
+                    y,
+                    w: rect.x + rect.w - bx - box_s * 1.5,
+                    h: row_h,
+                },
+                Role::Secondary,
+                &style,
+                false,
+            );
+        }
+    }
+
+    fn agenda_items(&mut self, rect: BoxRect, fit: f64) {
+        let items = self.item_lines(6);
+        if items.is_empty() {
+            return;
+        }
+        let row_h = rect.h / items.len() as f64;
+        let mut style = self.style_for(Role::Secondary);
+        style.size *= fit;
+        let dot_r = (style.size * 0.17).min(row_h * 0.3);
+        let text_x = rect.x + dot_r * 3.4 + style.size * 0.3;
+        for (i, item) in items.iter().enumerate() {
+            let y = rect.y + i as f64 * row_h;
+            let cy = y + row_h * 0.5;
+            let color = if i == 0 {
+                self.accent.clone()
+            } else {
+                self.secondary.clone()
+            };
+            self.circle(rect.x + dot_r, cy, dot_r, &color, Role::Decoration);
+            if i + 1 < items.len() {
+                self.rect(
+                    BoxRect {
+                        x: rect.x + dot_r - 1.0,
+                        y: cy + dot_r,
+                        w: 2.0,
+                        h: row_h - dot_r * 2.0,
+                    },
+                    0.0,
+                    &self.secondary.clone(),
+                    0.4,
+                    Role::Decoration,
+                );
+            }
+            self.text_at(
+                item,
+                BoxRect {
+                    x: text_x,
+                    y,
+                    w: rect.x + rect.w - text_x,
+                    h: row_h,
+                },
+                Role::Secondary,
+                &style,
+                false,
+            );
+        }
+    }
+
+    fn metric(&mut self, rect: BoxRect, step: bool, before_after: bool) {
         let metric = self.layout.design.metric.clone();
-        let style = self.style_for(Role::Primary);
+        // Metric digits size from the metric element (fourth size ratio), not
+        // the primary one — that is what makes stat/countdown numbers huge.
+        let style = self.metric_style();
         let mel = self.layout.design.elements.metric.clone();
-        let mel_size = mel.as_ref().and_then(|m| m.size);
         let mel_color = mel.and_then(|m| m.color);
         let face = glyphs::face("mono", &style.weight);
         let cells = format!("{:.*}", metric.decimals as usize, metric.from)
@@ -1439,19 +1982,71 @@ impl Builder<'_> {
         let advance = glyphs::measure(&face, "0", 1.0, 0.0);
         let prefix_w = glyphs::measure(&face, &prefix, 1.0, 0.0);
         let suffix_w = glyphs::measure(&face, &suffix, 1.0, 0.0);
-        let units = cells as f64 * advance + prefix_w + suffix_w;
-        let base = mel_size.unwrap_or(style.size);
-        let size = base.min(rect.h / 1.2).min(rect.w / units.max(1.0));
-        let x = rect.x
-            + match style.align.as_str() {
-                "center" => (rect.w - units * size) * 0.5,
-                "right" => rect.w - units * size,
-                _ => 0.0,
+        let to_units = cells as f64 * advance + prefix_w + suffix_w;
+        // Before→After draws a muted static `from` value and an accent arrow
+        // ahead of the animated counter on the same baseline.
+        const FROM_SCALE: f64 = 0.62;
+        const ARROW_UNITS: f64 = 0.9;
+        const GAP_UNITS: f64 = 0.35;
+        let from_text = if before_after {
+            format!(
+                "{}{:.*}{}",
+                prefix, metric.decimals as usize, metric.from, suffix
+            )
+        } else {
+            String::new()
+        };
+        let from_units = if before_after {
+            glyphs::measure(&face, &from_text, 1.0, 0.0) * FROM_SCALE
+        } else {
+            0.0
+        };
+        let units = to_units
+            + if before_after {
+                from_units + ARROW_UNITS + GAP_UNITS * 2.0
+            } else {
+                0.0
             };
+        let base = style.size;
+        let size = base.min(rect.h / 1.2).min(rect.w / units.max(1.0));
+        let total_w = units * size;
+        let x = Self::align_x(rect, total_w, &style.align);
         let baseline = rect.y + (rect.h - size * 1.2) * 0.5 + size * 0.95;
+        let mut counter_x = x;
+        if before_after {
+            let fs = size * FROM_SCALE;
+            // Static "from" value in the muted secondary color.
+            let mut e = TitleSceneElement::new(
+                glyphs::glyph_path(&face, &from_text),
+                &self.secondary.clone(),
+            );
+            e.translate_x = x;
+            e.translate_y = baseline;
+            e.scale_x = fs;
+            e.scale_y = fs;
+            e.clip = Some(rect.clip());
+            self.push_part(e, Role::Primary, rect.center());
+            let arrow_x = x + from_units * size + GAP_UNITS * size;
+            self.path(
+                arrow_path(
+                    arrow_x,
+                    baseline - size * 0.35,
+                    ARROW_UNITS * size,
+                    size * 0.3,
+                ),
+                &self.accent.clone(),
+                1.0,
+                Role::Decoration,
+                Some(rect.clip()),
+            );
+            counter_x = arrow_x + ARROW_UNITS * size + GAP_UNITS * size;
+        }
         for (text, x) in [
-            (&prefix, x),
-            (&suffix, x + (prefix_w + cells as f64 * advance) * size),
+            (&prefix, counter_x),
+            (
+                &suffix,
+                counter_x + (prefix_w + cells as f64 * advance) * size,
+            ),
         ] {
             if text.is_empty() {
                 continue;
@@ -1471,7 +2066,7 @@ impl Builder<'_> {
                 .map(|c| (c, glyphs::glyph_path(&face, &c.to_string())))
                 .collect(),
             cells,
-            x: x + prefix_w * size,
+            x: counter_x + prefix_w * size,
             y: baseline,
             size,
             advance: advance * size,
@@ -1479,6 +2074,7 @@ impl Builder<'_> {
             metric,
             step,
             anchor: rect.center(),
+            clip: rect.clip(),
         });
     }
 
@@ -1638,17 +2234,42 @@ impl Builder<'_> {
 
     fn accent_decor(&mut self) {
         let design = self.design().clone();
-        let inner = self.inner;
+        // Decorations hug the content stack, not the clip box.
+        let stack_rect = self
+            .stack_info
+            .as_ref()
+            .map(|s| s.rect)
+            .unwrap_or(self.inner);
+        let first_text = self
+            .stack_info
+            .as_ref()
+            .and_then(|s| {
+                s.blocks.iter().find(|bl| {
+                    matches!(
+                        bl.block,
+                        StackBlock::Primary { .. }
+                            | StackBlock::Secondary
+                            | StackBlock::Tag
+                            | StackBlock::Label { .. }
+                    )
+                })
+            })
+            .map(|bl| {
+                (
+                    bl.rect.y,
+                    bl.size * self.stack_info.as_ref().map_or(1.0, |s| s.fit),
+                )
+            });
         match design.accent.style {
             super::AccentStyle::None => {}
             super::AccentStyle::Bar => {
-                let w = (inner.w * 0.012).max(3.0);
+                let w = (stack_rect.w * 0.012).max(3.0);
                 self.rect(
                     BoxRect {
-                        x: inner.x - self.pad_x * 0.45,
-                        y: inner.y,
+                        x: stack_rect.x - self.pad_x.min(28.0) * 0.8,
+                        y: stack_rect.y,
                         w,
-                        h: inner.h,
+                        h: stack_rect.h,
                     },
                     w * 0.5,
                     &self.accent.clone(),
@@ -1657,31 +2278,33 @@ impl Builder<'_> {
                 );
             }
             super::AccentStyle::Dot => {
-                let r = (inner.h * 0.08).min(inner.w * 0.03);
+                let r = (stack_rect.h * 0.08).min(stack_rect.w * 0.03);
                 self.circle(
-                    inner.x - self.pad_x * 0.4,
-                    inner.y + inner.h * 0.14,
+                    stack_rect.x - self.pad_x.min(28.0) * 0.8,
+                    first_text.map_or(stack_rect.y + r, |(y, s)| y + s * 0.6),
                     r.max(3.0),
                     &self.accent.clone(),
                     Role::Decoration,
                 );
             }
             super::AccentStyle::Number => {
-                let r = (inner.h * 0.16).min(inner.w * 0.08).max(12.0);
-                let cx = inner.x + r;
-                let cy = inner.y + r * 1.2;
+                let line = first_text.unwrap_or((stack_rect.y, stack_rect.h * 0.4));
+                let r = (line.1 * 0.72).max(12.0);
+                let cx = stack_rect.x + r;
+                let cy = line.0 + line.1 * 0.6;
                 self.circle(cx, cy, r, &self.accent.clone(), Role::Decoration);
                 let mut style = self.style_for(Role::Tag);
                 style.color = self.surface.clone();
-                style.size = r;
+                style.align = "center".into();
+                style.size = r * 1.05;
                 let text = self.details.tag_text.clone().unwrap_or_else(|| "1".into());
                 self.text_at(
                     &text,
                     BoxRect {
                         x: cx - r,
-                        y: cy - r * 0.72,
+                        y: cy - r,
                         w: r * 2.0,
-                        h: r * 1.5,
+                        h: r * 2.0,
                     },
                     Role::Decoration,
                     &style,
@@ -1733,6 +2356,41 @@ fn circle_path(cx: f64, cy: f64, r: f64) -> String {
     )
 }
 
+// Counter-clockwise circle: inside a clockwise outer path it knocks a hole
+// out under both nonzero and even-odd fill rules (map pin center).
+fn circle_path_ccw(cx: f64, cy: f64, r: f64) -> String {
+    let k = r * 0.5523;
+    format!(
+        "M{} {}C{} {} {} {} {} {}C{} {} {} {} {} {}C{} {} {} {} {} {}C{} {} {} {} {} {}Z",
+        cx - r,
+        cy,
+        cx - r,
+        cy + k,
+        cx - k,
+        cy + r,
+        cx,
+        cy + r,
+        cx + k,
+        cy + r,
+        cx + r,
+        cy + k,
+        cx + r,
+        cy,
+        cx + r,
+        cy - k,
+        cx + k,
+        cy - r,
+        cx,
+        cy - r,
+        cx - k,
+        cy - r,
+        cx - r,
+        cy - k,
+        cx - r,
+        cy,
+    )
+}
+
 // Open tick path; drawn via the element's stroke rather than its fill.
 fn check_path(x: f64, y: f64, size: f64) -> String {
     format!(
@@ -1764,17 +2422,29 @@ fn arrow_path(x: f64, y: f64, w: f64, h: f64) -> String {
 }
 
 fn pin_path(cx: f64, y: f64, h: f64) -> String {
-    // Map pin: circular head plus a triangle tapering to the bottom point.
-    let r = h * 0.42;
-    let cy = y + r;
+    // Teardrop map pin: circular head tapering to a bottom point, with a
+    // counter-wound center circle that knocks the hole out under either fill
+    // rule.
+    let r = h * 0.36;
+    let head_cy = y + r;
+    let tip = y + h;
+    // The tail winds the same direction as the head so the two subpaths union
+    // under nonzero fill; the hole winds opposite to knock itself out.
     format!(
-        "{}M{} {}L{} {}L{} {}Z",
-        circle_path(cx, cy, r),
-        cx - r * 0.55,
-        cy + r * 0.7,
-        cx + r * 0.55,
-        cy + r * 0.7,
+        "{}M{} {}L{} {}Q{} {} {} {}Q{} {} {} {}Z{}",
+        circle_path(cx, head_cy, r),
+        cx - r * 0.78,
+        head_cy + r * 0.35,
+        cx + r * 0.78,
+        head_cy + r * 0.35,
+        cx + r * 0.62,
+        tip - h * 0.12,
         cx,
-        y + h,
+        tip,
+        cx - r * 0.62,
+        tip - h * 0.12,
+        cx - r * 0.78,
+        head_cy + r * 0.35,
+        circle_path_ccw(cx, head_cy, r * 0.4),
     )
 }

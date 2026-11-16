@@ -129,8 +129,10 @@ describe("creator title presets", () => {
   it("parses title defaults only when a versioned template is present", () => {
     const definition = getTextPresetRecordById("text-clean").definition
     expect(
-      textPresetValuesSchema.parse({ ...definition, titleDesign: { version: 2, template: "callout" } })
-        .titleDesign,
+      textPresetValuesSchema.parse({
+        ...definition,
+        titleDesign: { version: 2, template: "callout" },
+      }).titleDesign,
     ).toMatchObject({
       tempo: 1,
       typography: { lineHeight: 1.15 },
@@ -412,6 +414,113 @@ describe("creator title presets", () => {
     expect(clip.fontSize).toBeCloseTo(preset.fontSize * 0.5)
     expect(clip.titleDesign?.elements?.primary?.size).toBeCloseTo(50)
     expect(clip.titleDesign?.elements?.secondary?.size).toBeCloseTo(20)
+  })
+
+  // Minimum resolved sizes at the 1920x1080 design size. Roles the preset does
+  // not use by default are simply absent from its entry.
+  const typeFloors: Record<
+    keyof typeof templates,
+    Partial<Record<"primary" | "secondary" | "tag" | "metric", number>>
+  > = {
+    "text-clean": { primary: 56, secondary: 28 },
+    "text-hook": { primary: 56, secondary: 28, tag: 24 },
+    "text-emphasis": { primary: 56, secondary: 28, tag: 24 },
+    "text-editorial": { primary: 56, secondary: 28, tag: 22 },
+    "text-chapter": { primary: 56, secondary: 28, tag: 22 },
+    "text-kinetic": { primary: 56, secondary: 28 },
+    "text-highlight": { primary: 56 },
+    "text-banner": { primary: 56, secondary: 28 },
+    "text-speaker": { primary: 40, secondary: 28 },
+    "text-lower-third-glass": { primary: 40, secondary: 28 },
+    "text-lower-third-line": { primary: 40, secondary: 28 },
+    "text-source": { primary: 36, secondary: 28, tag: 22 },
+    "text-social-handle": { primary: 40, secondary: 28, tag: 24 },
+    "text-cta-follow": { primary: 56, secondary: 28 },
+    "text-cta-link": { primary: 56, secondary: 28, tag: 22 },
+    "text-cta": { primary: 56, secondary: 28, tag: 22 },
+    "text-step": { primary: 40, secondary: 28, tag: 22 },
+    "text-checklist": { primary: 40, secondary: 34 },
+    "text-shortcut": { primary: 44, secondary: 28 },
+    "text-command": { primary: 40, secondary: 28, tag: 22 },
+    "text-note": { primary: 40, secondary: 28 },
+    "text-quote": { primary: 40, secondary: 28 },
+    "text-location": { primary: 36, secondary: 28 },
+    "text-metric": { primary: 28, secondary: 28, tag: 22, metric: 160 },
+    "text-stat-delta": { primary: 28, secondary: 28, tag: 22, metric: 160 },
+    "text-countdown": { primary: 28, metric: 260 },
+    "text-agenda": { primary: 40, secondary: 34 },
+    "text-outro": { primary: 56, secondary: 28, tag: 24 },
+  }
+
+  it.each(TEXT_PRESETS.map((preset) => preset.id))(
+    "meets the type-scale floors at 1920x1080: %s",
+    (id) => {
+      const clip = createTextClipFromPreset(id)
+      expect(clip.titleDesign, id).toBeDefined()
+      const resolved = resolveTitleFontSizes(clip.titleDesign!, clip.fontSize)
+      for (const [role, floor] of Object.entries(typeFloors[id as keyof typeof templates])) {
+        expect(resolved[role as keyof typeof resolved], `${id} ${role}`).toBeGreaterThanOrEqual(
+          floor as number,
+        )
+      }
+    },
+  )
+
+  it.each([
+    [1920, 1080],
+    [1080, 1920],
+    [1280, 720],
+  ])("keeps every preset box inside a %i x %i canvas with 40px margins", (w, h) => {
+    for (const preset of TEXT_PRESETS) {
+      const clip = createTextClipFromDefinition(preset, { canvasWidth: w, canvasHeight: h })
+      expect(clip.x, `${preset.id} x`).toBeGreaterThanOrEqual(40)
+      expect(clip.y, `${preset.id} y`).toBeGreaterThanOrEqual(40)
+      expect(clip.x + clip.width, `${preset.id} right`).toBeLessThanOrEqual(w - 40)
+      expect(clip.y + clip.height, `${preset.id} bottom`).toBeLessThanOrEqual(h - 40)
+    }
+  })
+
+  it("keeps the TypeScript ratio table on the settled values shared with Rust", () => {
+    // Mirrors `size_ratios` in packages/overlay-engine/src/title_layout.rs —
+    // both tables must change together.
+    const ratios: Record<string, [number, number, number, number]> = {
+      hook: [1.3, 0.3, 0.22, 1],
+      "hook-emphasis": [1.15, 0.32, 0.28, 1],
+      clean: [1, 0.45, 0.33, 1],
+      editorial: [1.15, 0.3, 0.23, 1],
+      chapter: [1, 0.4, 1.8, 1],
+      "lower-third-bar": [1, 0.5, 0.4, 1],
+      "lower-third-glass": [1, 0.5, 0.4, 1],
+      "lower-third-line": [1, 0.5, 0.4, 1],
+      "social-handle": [0.9, 0.5, 0.4, 1],
+      "cta-follow": [0.9, 0.45, 0.36, 1],
+      "cta-link": [0.9, 0.45, 0.36, 1],
+      cta: [0.9, 0.45, 0.36, 1],
+      step: [0.9, 0.55, 0.7, 1],
+      checklist: [0.9, 0.6, 0.38, 1],
+      shortcut: [0.75, 0.5, 0.36, 1],
+      terminal: [0.7, 0.45, 0.36, 1],
+      callout: [0.9, 0.62, 0.5, 1],
+      quote: [1, 0.42, 0.32, 1],
+      location: [0.75, 0.55, 0.45, 1],
+      banner: [0.9, 0.38, 0.26, 1],
+      highlight: [1, 0.34, 0.26, 1],
+      kinetic: [1.25, 0.3, 0.24, 1],
+      agenda: [0.85, 0.58, 0.36, 1],
+      outro: [1.1, 0.32, 0.28, 1],
+      source: [0.75, 0.56, 0.45, 1],
+      stat: [0.36, 0.26, 0.24, 1.7],
+      "stat-before-after": [0.34, 0.26, 0.22, 1.5],
+      countdown: [0.22, 0.16, 0.16, 2.6],
+    }
+    for (const [template, [p, s, t, m]] of Object.entries(ratios)) {
+      const design = titleDesignSchema.parse({ version: 2, template })
+      const resolved = resolveTitleFontSizes(design, 100)
+      expect(resolved.primary, `${template} primary`).toBeCloseTo(100 * p)
+      expect(resolved.secondary, `${template} secondary`).toBeCloseTo(100 * s)
+      expect(resolved.tag, `${template} tag`).toBeCloseTo(100 * t)
+      expect(resolved.metric, `${template} metric`).toBeCloseTo(100 * m)
+    }
   })
 
   it("shares semantic content labels and groups with the title browser", () => {

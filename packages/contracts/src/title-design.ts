@@ -107,6 +107,19 @@ export const TITLE_TEMPLATE_V1_TO_V2: Record<TitleTemplateV1, TitleTemplate> = {
   "call-to-action": "cta",
 }
 
+// Clip-level `backdropStyle` (timeline.ts `textBackdropStyleSchema`) → v2
+// backdrop. Covers all seven clip values so a hand-edited or legacy value can
+// never produce an invalid v2 design.
+const CLIP_BACKDROP_TO_V2: Record<string, string> = {
+  none: "none",
+  solid: "box",
+  glass: "glass",
+  "accent-bar": "bar",
+  pill: "pill",
+  gradient: "box",
+  outline: "box",
+}
+
 // ─── v2 building blocks ───────────────────────────────────────────────────────
 
 export const titleFontFamilySchema = z.enum([
@@ -508,16 +521,9 @@ export function migrateTitleDesignV1(
   if (v1.appearance === "transparent") {
     backdropStyle = "none"
   } else if (clip?.backdropStyle) {
-    // Legacy clips styled the backdrop via clip fields; preserve the mapping so
-    // loaded projects look unchanged.
-    backdropStyle =
-      clip.backdropStyle === "none"
-        ? "none"
-        : clip.backdropStyle === "accent-bar"
-          ? "bar"
-          : clip.backdropStyle === "gradient" || clip.backdropStyle === "outline"
-            ? "box"
-            : clip.backdropStyle
+    // Legacy clips styled the backdrop via clip fields; map every clip-level
+    // style to a v2 value — unknown values must not leak into the v2 enum.
+    backdropStyle = CLIP_BACKDROP_TO_V2[clip.backdropStyle] ?? "box"
   }
 
   const animation =
@@ -566,9 +572,25 @@ function preprocessTitleDesign(input: unknown): unknown {
   if (typeof input === "object" && input !== null) {
     const version = (input as Record<string, unknown>).version
     if (version === 1) return migrateTitleDesignV1(input as Record<string, unknown>)
-    // Older app builds may have written `version: 2` designs; anything without a
-    // recognizable version is left for the v2 parser to reject.
-    if (version === 2) return input
+    if (version === 2) {
+      // Dev builds wrote clip-level style names ("solid", "accent-bar", …) into
+      // v2 designs before the enum settled; normalize aliases so those files load.
+      const backdrop = (input as Record<string, unknown>).backdrop
+      const style =
+        typeof backdrop === "object" && backdrop !== null
+          ? (backdrop as Record<string, unknown>).style
+          : undefined
+      if (typeof style === "string" && style in CLIP_BACKDROP_TO_V2) {
+        return {
+          ...(input as Record<string, unknown>),
+          backdrop: {
+            ...(backdrop as Record<string, unknown>),
+            style: CLIP_BACKDROP_TO_V2[style],
+          },
+        }
+      }
+      return input
+    }
   }
   return input
 }

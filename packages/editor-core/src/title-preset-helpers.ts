@@ -29,72 +29,72 @@ export const TITLE_PRESET_GROUPS: readonly TitlePresetGroupMeta[] = [
 ] as const
 
 const TEMPLATE_GROUP: Record<TitleTemplate, string> = {
-  "clean": "openers",
-  "hook": "openers",
+  clean: "openers",
+  hook: "openers",
   "hook-emphasis": "openers",
-  "editorial": "openers",
-  "chapter": "openers",
-  "kinetic": "openers",
-  "highlight": "openers",
-  "banner": "openers",
+  editorial: "openers",
+  chapter: "openers",
+  kinetic: "openers",
+  highlight: "openers",
+  banner: "openers",
   "lower-third-bar": "lower-thirds",
   "lower-third-glass": "lower-thirds",
   "lower-third-line": "lower-thirds",
-  "source": "lower-thirds",
+  source: "lower-thirds",
   "social-handle": "social",
   "cta-follow": "social",
   "cta-link": "social",
-  "cta": "social",
-  "step": "tutorial",
-  "checklist": "tutorial",
-  "shortcut": "tutorial",
-  "terminal": "tutorial",
-  "callout": "tutorial",
-  "quote": "tutorial",
-  "location": "tutorial",
-  "stat": "data",
+  cta: "social",
+  step: "tutorial",
+  checklist: "tutorial",
+  shortcut: "tutorial",
+  terminal: "tutorial",
+  callout: "tutorial",
+  quote: "tutorial",
+  location: "tutorial",
+  stat: "data",
   "stat-before-after": "data",
-  "countdown": "data",
-  "agenda": "data",
-  "outro": "outro",
+  countdown: "data",
+  agenda: "data",
+  outro: "outro",
 }
 
 export const TITLE_PRESET_LABELS: Record<TitleTemplate, string> = {
-  "clean": "Clean Title",
-  "hook": "Hook Headline",
+  clean: "Clean Title",
+  hook: "Hook Headline",
   "hook-emphasis": "Emphasis",
-  "editorial": "Editorial Opener",
-  "chapter": "Chapter Card",
-  "kinetic": "Kinetic Words",
-  "highlight": "Marker Highlight",
-  "banner": "Announcement Banner",
+  editorial: "Editorial Opener",
+  chapter: "Chapter Card",
+  kinetic: "Kinetic Words",
+  highlight: "Marker Highlight",
+  banner: "Announcement Banner",
   "lower-third-bar": "Lower Third · Bar",
   "lower-third-glass": "Lower Third · Glass",
   "lower-third-line": "Lower Third · Line",
-  "source": "Source Credit",
+  source: "Source Credit",
   "social-handle": "Social Handle",
   "cta-follow": "Subscribe / Follow CTA",
   "cta-link": "Link CTA",
-  "cta": "Call to Action",
-  "step": "Numbered Step",
-  "checklist": "Checklist",
-  "shortcut": "Keyboard Shortcut",
-  "terminal": "Terminal Command",
-  "callout": "Callout",
-  "quote": "Quote / Testimonial",
-  "location": "Location / Date Stamp",
-  "stat": "Stat Counter",
+  cta: "Call to Action",
+  step: "Numbered Step",
+  checklist: "Checklist",
+  shortcut: "Keyboard Shortcut",
+  terminal: "Terminal Command",
+  callout: "Callout",
+  quote: "Quote / Testimonial",
+  location: "Location / Date Stamp",
+  stat: "Stat Counter",
   "stat-before-after": "Before → After",
-  "countdown": "Countdown 3-2-1",
-  "agenda": "Agenda / Progress List",
-  "outro": "End Screen / Outro",
+  countdown: "Countdown 3-2-1",
+  agenda: "Agenda / Progress List",
+  outro: "End Screen / Outro",
 }
 
 // Legacy v1 template ids still appear in older custom presets and project files.
 // Mapped here once so preset UI and migration code share the table.
 const V1_TEMPLATE_ALIASES: Record<string, TitleTemplate> = {
   "clean-text": "clean",
-  "emphasis": "hook-emphasis",
+  emphasis: "hook-emphasis",
   "editorial-opener": "editorial",
   "kinetic-hook": "hook",
   "chapter-marker": "chapter",
@@ -102,9 +102,9 @@ const V1_TEMPLATE_ALIASES: Record<string, TitleTemplate> = {
   "source-credit": "source",
   "step-guide": "step",
   "command-line": "terminal",
-  "note": "callout",
+  note: "callout",
   "pull-quote": "quote",
-  "metric": "stat",
+  metric: "stat",
   "call-to-action": "cta",
 }
 
@@ -164,7 +164,6 @@ export function getTitlePresetHeightRatio(template: TitleTemplate | string | und
   switch (resolveTitleTemplate(template)) {
     case "editorial":
     case "hook":
-    case "kinetic":
     case "stat":
     case "stat-before-after":
     case "outro":
@@ -179,6 +178,7 @@ export function getTitlePresetHeightRatio(template: TitleTemplate | string | und
       return 0.5
     case "banner":
     case "chapter":
+    case "kinetic":
     case "cta":
       return 0.34
     case "source":
@@ -244,7 +244,9 @@ const titleLabels: Record<TitleTemplate, TitleContentLabels> = {
 export function getTitleContentLabels(template?: TitleTemplate | string): TitleContentLabels {
   const resolved = resolveTitleTemplate(template)
   return {
-    ...(template ? titleLabels[resolved] : { primary: "Primary text", secondary: "Secondary text", tag: "Tag" }),
+    ...(template
+      ? titleLabels[resolved]
+      : { primary: "Primary text", secondary: "Secondary text", tag: "Tag" }),
   }
 }
 
@@ -260,33 +262,33 @@ export interface TitleFontSizeRatios {
 // `titleDesign.elements.<role>.size` override replaces that default.
 const titleFontSizeRatios: Record<TitleTemplate, TitleFontSizeRatios> = {
   hook: { primary: 1.3, secondary: 0.3, tag: 0.22, metric: 1 },
-  "hook-emphasis": { primary: 1.15, secondary: 0.3, tag: 0.22, metric: 1 },
-  clean: { primary: 1, secondary: 0.34, tag: 0.27, metric: 1 },
+  "hook-emphasis": { primary: 1.15, secondary: 0.32, tag: 0.28, metric: 1 },
+  clean: { primary: 1, secondary: 0.45, tag: 0.33, metric: 1 },
   editorial: { primary: 1.15, secondary: 0.3, tag: 0.23, metric: 1 },
-  chapter: { primary: 1, secondary: 0.33, tag: 1.8, metric: 1 },
-  "lower-third-bar": { primary: 1, secondary: 0.42, tag: 0.24, metric: 1 },
-  "lower-third-glass": { primary: 1, secondary: 0.42, tag: 0.24, metric: 1 },
-  "lower-third-line": { primary: 1, secondary: 0.42, tag: 0.24, metric: 1 },
-  "social-handle": { primary: 0.9, secondary: 0.34, tag: 0.24, metric: 1 },
-  "cta-follow": { primary: 0.9, secondary: 0.34, tag: 0.24, metric: 1 },
-  "cta-link": { primary: 0.9, secondary: 0.34, tag: 0.24, metric: 1 },
-  cta: { primary: 0.9, secondary: 0.34, tag: 0.24, metric: 1 },
-  step: { primary: 0.9, secondary: 0.33, tag: 0.7, metric: 1 },
-  checklist: { primary: 0.6, secondary: 0.4, tag: 0.24, metric: 1 },
-  shortcut: { primary: 0.57, secondary: 0.33, tag: 0.24, metric: 1 },
-  terminal: { primary: 0.62, secondary: 0.25, tag: 0.22, metric: 1 },
-  callout: { primary: 0.85, secondary: 0.31, tag: 0.25, metric: 1 },
-  quote: { primary: 1, secondary: 0.27, tag: 0.23, metric: 1 },
-  location: { primary: 0.8, secondary: 0.3, tag: 0.22, metric: 1 },
-  banner: { primary: 0.9, secondary: 0.3, tag: 0.2, metric: 1 },
-  highlight: { primary: 1, secondary: 0.3, tag: 0.2, metric: 1 },
+  chapter: { primary: 1, secondary: 0.4, tag: 1.8, metric: 1 },
+  "lower-third-bar": { primary: 1, secondary: 0.5, tag: 0.4, metric: 1 },
+  "lower-third-glass": { primary: 1, secondary: 0.5, tag: 0.4, metric: 1 },
+  "lower-third-line": { primary: 1, secondary: 0.5, tag: 0.4, metric: 1 },
+  "social-handle": { primary: 0.9, secondary: 0.5, tag: 0.4, metric: 1 },
+  "cta-follow": { primary: 0.9, secondary: 0.45, tag: 0.36, metric: 1 },
+  "cta-link": { primary: 0.9, secondary: 0.45, tag: 0.36, metric: 1 },
+  cta: { primary: 0.9, secondary: 0.45, tag: 0.36, metric: 1 },
+  step: { primary: 0.9, secondary: 0.55, tag: 0.7, metric: 1 },
+  checklist: { primary: 0.9, secondary: 0.6, tag: 0.38, metric: 1 },
+  shortcut: { primary: 0.75, secondary: 0.5, tag: 0.36, metric: 1 },
+  terminal: { primary: 0.7, secondary: 0.45, tag: 0.36, metric: 1 },
+  callout: { primary: 0.9, secondary: 0.62, tag: 0.5, metric: 1 },
+  quote: { primary: 1, secondary: 0.42, tag: 0.32, metric: 1 },
+  location: { primary: 0.75, secondary: 0.55, tag: 0.45, metric: 1 },
+  banner: { primary: 0.9, secondary: 0.38, tag: 0.26, metric: 1 },
+  highlight: { primary: 1, secondary: 0.34, tag: 0.26, metric: 1 },
   kinetic: { primary: 1.25, secondary: 0.3, tag: 0.24, metric: 1 },
-  agenda: { primary: 0.6, secondary: 0.36, tag: 0.24, metric: 1 },
-  outro: { primary: 1.1, secondary: 0.3, tag: 0.26, metric: 1 },
-  source: { primary: 0.7, secondary: 0.28, tag: 0.23, metric: 1 },
-  stat: { primary: 0.34, secondary: 0.24, tag: 0.23, metric: 1.7 },
-  "stat-before-after": { primary: 0.3, secondary: 0.22, tag: 0.2, metric: 1.5 },
-  countdown: { primary: 0.2, secondary: 0.15, tag: 0.15, metric: 2.6 },
+  agenda: { primary: 0.85, secondary: 0.58, tag: 0.36, metric: 1 },
+  outro: { primary: 1.1, secondary: 0.32, tag: 0.28, metric: 1 },
+  source: { primary: 0.75, secondary: 0.56, tag: 0.45, metric: 1 },
+  stat: { primary: 0.36, secondary: 0.26, tag: 0.24, metric: 1.7 },
+  "stat-before-after": { primary: 0.34, secondary: 0.26, tag: 0.22, metric: 1.5 },
+  countdown: { primary: 0.22, secondary: 0.16, tag: 0.16, metric: 2.6 },
 }
 
 export type TitleFontSizeKey = keyof TitleFontSizeRatios

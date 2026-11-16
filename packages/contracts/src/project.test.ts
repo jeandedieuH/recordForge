@@ -162,6 +162,79 @@ describe("project contract", () => {
     })
   })
 
+  it("maps every legacy clip backdrop style to a valid v2 backdrop", () => {
+    const base = {
+      kind: "text",
+      assetId: "synthetic:text:title",
+      startMs: 0,
+      durationMs: 4_000,
+      sourceInMs: 0,
+      sourceOutMs: 4_000,
+      primaryText: "Backdrop test",
+      presetId: "text-emphasis",
+      titleDesign: { version: 1, template: "emphasis", appearance: "dark" },
+    }
+    const expected: Record<string, string> = {
+      none: "none",
+      solid: "box",
+      glass: "glass",
+      "accent-bar": "bar",
+      pill: "pill",
+      gradient: "box",
+      outline: "box",
+    }
+    for (const [clipStyle, v2Style] of Object.entries(expected)) {
+      const project = projectSchema.parse({
+        ...minimalProject,
+        tracks: [
+          {
+            id: "titles",
+            kind: "titles",
+            name: "Text & Titles",
+            clips: [{ ...base, id: `clip-${clipStyle}`, backdropStyle: clipStyle }],
+          },
+        ],
+      })
+      expect(project.tracks[0].clips[0]).toMatchObject({
+        titleDesign: { version: 2, backdrop: { style: v2Style } },
+      })
+    }
+  })
+
+  it("normalizes clip-era backdrop names left inside stored v2 designs", () => {
+    const project = projectSchema.parse({
+      ...minimalProject,
+      tracks: [
+        {
+          id: "titles",
+          kind: "titles",
+          name: "Text & Titles",
+          clips: [
+            {
+              kind: "text",
+              id: "clip-solid",
+              assetId: "synthetic:text:title",
+              startMs: 0,
+              durationMs: 4_000,
+              sourceInMs: 0,
+              sourceOutMs: 4_000,
+              primaryText: "Saved by a dev build",
+              presetId: "text-emphasis",
+              titleDesign: {
+                version: 2,
+                template: "hook-emphasis",
+                backdrop: { style: "solid" },
+              },
+            },
+          ],
+        },
+      ],
+    })
+    expect(project.tracks[0].clips[0]).toMatchObject({
+      titleDesign: { version: 2, backdrop: { style: "box" } },
+    })
+  })
+
   it("keeps generated zoom metadata editable in the durable project shape", () => {
     const parsed = projectSchema.parse({
       ...minimalProject,

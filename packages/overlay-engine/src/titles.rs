@@ -946,6 +946,7 @@ struct MetricLayout {
     // `step` renders integer steps (countdown) instead of a smooth count.
     step: bool,
     anchor: (f64, f64),
+    clip: TitleClip,
 }
 
 #[derive(Debug, Clone)]
@@ -1372,16 +1373,19 @@ impl TitleLayout {
                 elapsed,
                 duration,
             );
-            let mut value = metric.metric.from + (metric.metric.to - metric.metric.from) * p;
+            let raw = metric.metric.from + (metric.metric.to - metric.metric.from) * p;
+            let mut value = raw;
             if metric.step {
                 value = value.ceil().min(metric.metric.from.max(metric.metric.to));
             }
             let text = format!("{:.*}", metric.metric.decimals as usize, value);
             let offset = metric.cells.saturating_sub(text.chars().count()) as f64 * metric.advance;
             let opacity = (1.0 - q).clamp(0.0, 1.0);
-            // Countdown steps pop on each change.
-            let step_pulse = if metric.step {
-                let frac = (metric.metric.from - value).abs() % 1.0;
+            // Countdown steps pop as each new integer lands: the fractional
+            // part of the continuous value (not the stepped one) marks the
+            // transition, and the pulse is released once counting completes.
+            let step_pulse = if metric.step && p < 1.0 {
+                let frac = (metric.metric.from - raw).abs() % 1.0;
                 1.0 + 0.12 * (1.0 - frac.min(1.0))
             } else {
                 1.0
@@ -1396,7 +1400,7 @@ impl TitleLayout {
                         translate_y: metric.y,
                         scale_x: metric.size * step_pulse,
                         scale_y: metric.size * step_pulse,
-                        clip: None,
+                        clip: Some(metric.clip),
                         gradient: None,
                         stroke: None,
                     };
