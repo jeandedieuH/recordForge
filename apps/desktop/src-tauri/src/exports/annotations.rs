@@ -1341,9 +1341,17 @@ mod tests {
         .expect("valid designed title");
         let plan = build_overlay_render_plan_from_legacy(1920, 1080, &[], &[text], &[]);
         let value = serde_json::to_value(plan).expect("serializable overlay plan");
-        assert_eq!(value["items"][0]["titleDesign"]["template"], "emphasis");
-        assert_eq!(value["items"][0]["titleDesign"]["motion"], "none");
-        assert_eq!(value["items"][0]["titleDesign"]["emphasisText"], "clear");
+        // The v1 design migrates to v2 on deserialize (emphasis → hook-emphasis,
+        // emphasisText → emphasis.text) so export and preview agree.
+        assert_eq!(value["items"][0]["titleDesign"]["version"], 2);
+        assert_eq!(
+            value["items"][0]["titleDesign"]["template"],
+            "hook-emphasis"
+        );
+        assert_eq!(
+            value["items"][0]["titleDesign"]["emphasis"]["text"],
+            "clear"
+        );
     }
 
     #[test]

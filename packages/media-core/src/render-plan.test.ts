@@ -1112,8 +1112,10 @@ describe("render-plan", () => {
     expect(plan.ok).toBe(true)
     if (!plan.ok) return
     expect(plan.value.overlayRenderPlan).toBeDefined()
+    // v1 clip designs migrate to v2 at the render-plan boundary (kinetic-hook
+    // → hook, "subtle" motion → v2 animation specs).
     expect(previewPlan.items.find((item) => item.id === "overlay-text")).toMatchObject({
-      titleDesign: { version: 1, template: "kinetic-hook", motion: "subtle", tempo: 1.5 },
+      titleDesign: { version: 2, template: "hook", tempo: 1.5 },
     })
     expect(plan.value.overlayRenderPlan?.items).toEqual(previewPlan.items)
     expect(plan.value.overlayRenderPlan?.items.map((item) => item.kind)).toEqual([

@@ -64,7 +64,7 @@ describe("PresetRegistry", () => {
   it("externalizes the built-in annotation and text catalogs", () => {
     expect(ANNOTATION_PRESET_CATALOG.version).toBe(1)
     expect(ANNOTATION_PRESET_CATALOG.presets).toHaveLength(ANNOTATION_SHAPES.length)
-    expect(TEXT_PRESET_CATALOG.version).toBe(1)
+    expect(TEXT_PRESET_CATALOG.version).toBe(2)
     expect(TEXT_PRESET_CATALOG.presets).toHaveLength(TEXT_PRESETS.length)
     expect(ANNOTATION_PRESET_CATALOG.categories).toContain("pointer")
     expect(TEXT_PRESET_CATALOG.categories).toContain("lower-third")

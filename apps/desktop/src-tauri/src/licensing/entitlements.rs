@@ -30,6 +30,9 @@ pub const PRO_FEATURE_KEYS: &[&str] = &[
     "camera-cutout",
     "face-tracking",
     "hide-during-silence",
+    // Save-time gate only — applied looks are ordinary timeline values, so
+    // export checks never see this key.
+    "custom-looks",
 ];
 
 const HIGH_RES_EXPORT: &str = "high-res-export";
@@ -199,10 +202,11 @@ fn is_sixteen_nine(width: u32, height: u32) -> bool {
     ((width as f64 / height as f64) / SIXTEEN_NINE - 1.0).abs() <= ASPECT_TOLERANCE
 }
 
-/// Only `clean-text` is Free; a missing `titleDesign` means the clip came
-/// from a pre-template preset, which is Pro per the product rules.
+/// Only the Clean title is Free; a missing `titleDesign` means the clip came
+/// from a pre-template preset, which is Pro per the product rules. The engine
+/// maps the legacy v1 `clean-text` id onto `Clean` at deserialization.
 fn text_is_free(design: Option<&overlay_engine::titles::TitleDesign>) -> bool {
-    design.is_some_and(|design| design.template == TitleTemplate::CleanText)
+    design.is_some_and(|design| design.template == TitleTemplate::Clean)
 }
 
 fn overlay_item_enabled(item: &serde_json::Value) -> bool {
@@ -244,10 +248,14 @@ fn has_premium_titles(plan: &RenderPlan) -> bool {
         {
             return false;
         }
-        item.get("titleDesign")
-            .and_then(|design| design.get("template"))
-            .and_then(serde_json::Value::as_str)
-            != Some("clean-text")
+        // v2 emits "clean"; un-migrated legacy payloads may still say
+        // "clean-text" — both are Free, anything else (or missing) is Pro.
+        !matches!(
+            item.get("titleDesign")
+                .and_then(|design| design.get("template"))
+                .and_then(serde_json::Value::as_str),
+            Some("clean" | "clean-text")
+        )
     })
 }
 
@@ -470,7 +478,8 @@ mod tests {
     #[test]
     fn clean_text_template_is_free_others_are_pro() {
         let mut plan = plan_with_canvas(1920, 1080);
-        plan.texts.push(text_with_template("clean-text"));
+        plan.texts.push(text_with_template("clean"));
+        plan.texts.push(text_with_template("clean-text")); // legacy v1 id
         assert!(required_pro_features(&plan, &mp4_settings("balanced")).is_empty());
 
         plan.texts.push(text_with_template("emphasis"));
@@ -543,7 +552,7 @@ mod tests {
 
     #[test]
     fn title_design_deserializes_clean_text_default() {
-        // Default TitleDesign (template CleanText) must count as free.
+        // Default TitleDesign (template Clean) must count as free.
         let design = TitleDesign::default();
         assert!(text_is_free(Some(&design)));
     }

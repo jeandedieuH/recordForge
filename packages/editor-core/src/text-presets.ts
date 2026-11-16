@@ -180,19 +180,26 @@ export function createTextClipFromPreset(
 
 // Element size overrides are absolute clip units, so they scale with the clip's
 // authored font size when a preset is placed on a differently sized canvas.
-function scaleTitleFontSizes(
-  sizes: TitleDesign["fontSizes"],
+function scaleTitleElementSizes(
+  elements: TitleDesign["elements"],
   factor: number,
-): TitleDesign["fontSizes"] {
+): TitleDesign["elements"] {
   const clamp = (value?: number) =>
-    value === undefined ? undefined : Math.min(600, Math.max(4, value * factor))
-  return {
-    primary: clamp(sizes.primary),
-    secondary: clamp(sizes.secondary),
-    tag: clamp(sizes.tag),
-    metric: clamp(sizes.metric),
-  }
+    value === undefined ? undefined : Math.min(1200, Math.max(4, value * factor))
+  const scale = (style: TitleDesign["elements"][keyof TitleDesign["elements"]]) =>
+    style === undefined ? undefined : { ...style, size: clamp(style.size) }
+  const scaled: TitleDesign["elements"] = {}
+  if (elements.tag) scaled.tag = scale(elements.tag)
+  if (elements.primary) scaled.primary = scale(elements.primary)
+  if (elements.secondary) scaled.secondary = scale(elements.secondary)
+  if (elements.metric) scaled.metric = scale(elements.metric)
+  return scaled
 }
+
+// v2 titles carry an anchor + safe margins in 1080p design space. Margins are
+// resolved to canvas pixels in `createTextClipFromDefinition` (scaled by the
+// canvas/1080p basis), not by the preset's box-fit factor, so the safe area
+// tracks the real canvas rather than how much the box had to shrink.
 
 /** Uniform design scale for a project canvas (1 = 1920x1080). */
 export function titleCanvasDesignScale(canvasWidth: number, canvasHeight: number): number {
@@ -271,7 +278,7 @@ function scaleTextPresetValues(preset: TextPresetDefinition, scale: number): Tex
     titleDesign: preset.titleDesign
       ? {
           ...preset.titleDesign,
-          fontSizes: scaleTitleFontSizes(preset.titleDesign.fontSizes, scale),
+          elements: scaleTitleElementSizes(preset.titleDesign.elements, scale),
         }
       : undefined,
   }
@@ -305,20 +312,17 @@ export function createTextClipFromDefinition(
   let x = Math.round((canvasWidth - width) / 2)
   let y = Math.round((canvasHeight - height) / 2)
   if (titleDesign) {
-    const template = titleDesign.template
-    if (template === "speaker-id" || template === "source-credit") {
-      x = margin
-      y = canvasHeight - height - margin
-    } else if (template === "step-guide" || template === "note") {
-      x = margin
-      y = margin
-    } else if (
-      template === "shortcut" ||
-      template === "command-line" ||
-      template === "call-to-action"
-    ) {
-      y = canvasHeight - height - margin
-    }
+    // v2 placement: resolve the 9-point anchor inside the canvas safe area.
+    // Margins/offsets live in 1080p design space, so scale by the canvas basis.
+    const placement = titleDesign.placement
+    const safeX = placement.marginX * basisScale
+    const safeY = placement.marginY * basisScale
+    const horizontal: Record<string, number> = { l: 0, c: 0.5, r: 1 }
+    const vertical: Record<string, number> = { t: 0, c: 0.5, b: 1 }
+    const ax = horizontal[placement.anchor[1]] ?? 0.5
+    const ay = vertical[placement.anchor[0]] ?? 0.5
+    x = safeX + (canvasWidth - safeX * 2 - width) * ax + placement.offsetX * basisScale
+    y = safeY + (canvasHeight - safeY * 2 - height) * ay + placement.offsetY * basisScale
     x = Math.min(Math.max(margin, x), canvasWidth - width - margin)
     y = Math.min(Math.max(margin, y), canvasHeight - height - margin)
   } else if (preset.category === "lower-third") {

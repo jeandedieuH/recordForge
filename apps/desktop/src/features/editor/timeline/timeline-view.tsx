@@ -2382,6 +2382,7 @@ export function TimelineView({
                   canvasHeight={timeline.canvas.height}
                   canvasPadding={timeline.canvas.padding}
                   cameraLayouts={timeline.cameraLayouts}
+                  assetUrls={overlayAssetUrls}
                   previewScale={videoBounds?.scale ?? 1}
                   selectedClipId={
                     view.selection?.kind === "clip" ? view.selection.primaryClipId : null

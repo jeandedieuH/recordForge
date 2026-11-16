@@ -1,12 +1,17 @@
 //! Tauri commands for offline camera AI (#4a–c runtime plumbing).
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
 use tracing::{instrument, warn};
 
+use crate::database::media as media_db;
+use crate::database::media::{MediaJob, MediaJobKind, MediaJobOutputs, MediaJobStatus};
 use crate::errors::{AppError, ErrorCategory, InternalError, Result};
+use crate::events::EventPublisher;
 use crate::media::camera_ai::{self, CameraAiOptions, CameraAiResult};
 use crate::ml;
 use crate::state::AppState;
@@ -55,6 +60,161 @@ fn emit_progress(app: &AppHandle, job_id: &str, phase: &str, percent: u8) {
             "percent": percent,
         }),
     );
+}
+
+fn emit_job_update(app: &AppHandle, job: &MediaJob) {
+    if let Err(error) = EventPublisher::new(app).media_job_update(job) {
+        warn!(error = %error, "camera AI job update emit failed");
+    }
+}
+
+/// Camera AI derives a durable `media_jobs` row keyed by the UI's job id, so
+/// progress, cancellation, and the completed artifact paths outlive the editor
+/// view. The in-memory registry only owns the busy gate and the FFmpeg child.
+fn begin_camera_ai_job(
+    db: &Mutex<rusqlite::Connection>,
+    request: &CameraAiRequest,
+    stream_index: i32,
+) -> Result<MediaJob> {
+    let options = serde_json::json!({
+        "assetId": request.asset_id,
+        "streamIndex": stream_index,
+        "features": {
+            "matte": request.features.matte,
+            "faceTrack": request.features.face_track,
+        },
+        "force": request.force,
+    });
+    let conn = db
+        .lock()
+        .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
+    let existing = media_db::list_jobs(&conn, &request.recording_id)?
+        .into_iter()
+        .find(|job| job.id == request.job_id);
+    let job = match existing {
+        None => media_db::insert_job_with_id(
+            &conn,
+            &request.job_id,
+            &request.recording_id,
+            MediaJobKind::CameraAi,
+            options,
+        )?,
+        Some(job) if job.kind != MediaJobKind::CameraAi => {
+            return Err(InternalError::Media(format!(
+                "job id '{}' belongs to a different job kind",
+                job.id
+            ))
+            .into())
+        }
+        Some(job) => match job.status {
+            MediaJobStatus::Failed | MediaJobStatus::Cancelled => {
+                media_db::retry_job(&conn, &job.id)?
+            }
+            MediaJobStatus::Pending => job,
+            _ => {
+                return Err(InternalError::Media(format!(
+                    "camera AI job '{}' already finished; start a new job",
+                    job.id
+                ))
+                .into())
+            }
+        },
+    };
+    media_db::start_job(&conn, &job.id)
+}
+
+fn publish_camera_ai_progress(
+    app: &AppHandle,
+    db: &Mutex<rusqlite::Connection>,
+    job_id: &str,
+    phase: &str,
+    percent: u8,
+) {
+    let job = db.lock().ok().and_then(|conn| {
+        if let Err(error) =
+            media_db::update_job_progress(&conn, job_id, f64::from(percent) / 100.0, phase, None)
+        {
+            warn!(error = %error, "camera AI job progress update failed");
+        }
+        media_db::get_job(&conn, job_id).ok()
+    });
+    if let Some(job) = job {
+        emit_job_update(app, &job);
+    }
+}
+
+fn complete_camera_ai_job(
+    app: &AppHandle,
+    db: &Mutex<rusqlite::Connection>,
+    recording_id: &str,
+    job_id: &str,
+    result: &CameraAiResult,
+) {
+    let job = db.lock().ok().and_then(|conn| {
+        let mut derivatives = std::collections::HashMap::new();
+        if let Some(path) = result.matte_path.clone() {
+            derivatives.insert("matte".to_string(), path);
+        }
+        if let Some(path) = result.face_track_path.clone() {
+            derivatives.insert("faceTrack".to_string(), path);
+        }
+        // Derivative paths are deterministic, so a re-run replaces the same
+        // paths; refresh the registry rows instead of stacking duplicates.
+        let paths = derivatives.values().cloned().collect::<Vec<_>>();
+        if let Err(error) = media_db::delete_derivatives_for_paths(&conn, recording_id, &paths) {
+            warn!(error = %error, "camera AI derivative cleanup failed");
+        }
+        for (key, path) in &derivatives {
+            let derivative = media_db::DerivativeFile {
+                id: uuid::Uuid::new_v4().to_string(),
+                recording_id: recording_id.to_string(),
+                job_id: job_id.to_string(),
+                kind: if key == "matte" {
+                    "matte"
+                } else {
+                    "face_track"
+                }
+                .to_string(),
+                path: path.clone(),
+                size_bytes: std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0),
+                created_at: chrono::Utc::now().to_rfc3339(),
+            };
+            if let Err(error) = media_db::insert_derivative(&conn, &derivative) {
+                warn!(error = %error, "camera AI derivative record failed");
+            }
+        }
+        media_db::complete_job(
+            &conn,
+            job_id,
+            &MediaJobOutputs {
+                derivatives,
+                ..Default::default()
+            },
+        )
+        .ok()
+    });
+    if let Some(job) = job {
+        emit_job_update(app, &job);
+    }
+}
+
+fn fail_camera_ai_job(
+    app: &AppHandle,
+    db: &Mutex<rusqlite::Connection>,
+    job_id: &str,
+    error: &str,
+    cancelled: bool,
+) {
+    let job = db.lock().ok().and_then(|conn| {
+        if cancelled {
+            media_db::cancel_job(&conn, job_id).ok()
+        } else {
+            media_db::fail_job(&conn, job_id, error).ok()
+        }
+    });
+    if let Some(job) = job {
+        emit_job_update(app, &job);
+    }
 }
 
 fn camera_ai_pro_required(features: &[&'static str]) -> AppError {
@@ -186,6 +346,10 @@ pub async fn analyze_camera_ai(
     if request.job_id.trim().is_empty() || request.recording_id.trim().is_empty() {
         return Err(InternalError::Media("jobId and recordingId are required".into()).into());
     }
+    // The UI id becomes the durable media-job key; keep it bounded.
+    if request.job_id.len() > 128 {
+        return Err(InternalError::Media("jobId is too long".into()).into());
+    }
     let registration = state.camera_ai.begin(&request.job_id)?;
 
     let status = ml::status(state.path_policy.app_data_dir());
@@ -304,6 +468,10 @@ pub async fn analyze_camera_ai(
         .or_else(|| stream.as_ref().and_then(|stream| stream.duration_ms))
         .unwrap_or(0);
 
+    let db = Arc::clone(&state.db);
+    let job = begin_camera_ai_job(&db, &request, stream_index)?;
+    emit_job_update(&app, &job);
+
     let options = CameraAiOptions {
         ffmpeg_path: state.ffmpeg_path.clone(),
         source_path,
@@ -318,23 +486,90 @@ pub async fn analyze_camera_ai(
         force: request.force,
     };
     let app_data_dir = state.path_policy.app_data_dir().to_path_buf();
-    let job = registration.job().clone();
+    let cancel_job = registration.job().clone();
     let job_id = request.job_id.clone();
+    let recording_id = request.recording_id.clone();
     let progress_app = app.clone();
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        camera_ai::run(&app_data_dir, &options, &job, move |phase, percent| {
-            emit_progress(&progress_app, &job_id, phase, percent);
-        })
+    let progress_db = Arc::clone(&db);
+    let progress_job_id = job_id.clone();
+    // Progress arrives once per decoded frame; persist/emit the shared job row
+    // at most ~4x/s (plus every phase change) so inference is not competing
+    // with SQLite and window broadcasts.
+    let progress_state = Arc::new(Mutex::new((String::new(), u8::MAX, None::<Instant>)));
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
+        camera_ai::run(
+            &app_data_dir,
+            &options,
+            &cancel_job,
+            move |phase, percent| {
+                emit_progress(&progress_app, &progress_job_id, phase, percent);
+                let should_publish = match progress_state.lock() {
+                    Ok(mut last) => {
+                        let phase_changed = last.0 != phase;
+                        let due = last
+                            .2
+                            .is_none_or(|at| at.elapsed() >= Duration::from_millis(250));
+                        if phase_changed || percent >= 100 || (percent != last.1 && due) {
+                            last.0 = phase.to_string();
+                            last.1 = percent;
+                            last.2 = Some(Instant::now());
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    Err(_) => false,
+                };
+                if should_publish {
+                    publish_camera_ai_progress(
+                        &progress_app,
+                        &progress_db,
+                        &progress_job_id,
+                        phase,
+                        percent,
+                    );
+                }
+            },
+        )
     })
-    .await
-    .map_err(|error| InternalError::Media(format!("camera AI task: {error}")))??;
-    emit_progress(&app, &request.job_id, "finalizing", 100);
+    .await;
+
+    let result = match outcome {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => {
+            fail_camera_ai_job(
+                &app,
+                &db,
+                &job_id,
+                &error.to_string(),
+                registration.job().is_cancelled(),
+            );
+            return Err(error);
+        }
+        Err(error) => {
+            let error: AppError = InternalError::Media(format!("camera AI task: {error}")).into();
+            fail_camera_ai_job(&app, &db, &job_id, &error.to_string(), false);
+            return Err(error);
+        }
+    };
+    emit_progress(&app, &job_id, "finalizing", 100);
+    complete_camera_ai_job(&app, &db, &recording_id, &job_id, &result);
     Ok(result)
 }
 
 #[tauri::command]
-pub fn cancel_camera_ai(job_id: String, state: State<'_, AppState>) -> Result<()> {
+pub fn cancel_camera_ai(job_id: String, app: AppHandle, state: State<'_, AppState>) -> Result<()> {
     state.camera_ai.cancel(&job_id);
+    // The worker's own exit path emits the final row; marking it cancelled here
+    // stops the shared jobs UI from showing a running job immediately.
+    let cancelled = state
+        .db
+        .lock()
+        .ok()
+        .and_then(|conn| media_db::cancel_job(&conn, &job_id).ok());
+    if let Some(job) = cancelled {
+        emit_job_update(&app, &job);
+    }
     Ok(())
 }
 
@@ -490,6 +725,52 @@ pub fn warn_if_invalid_cube(path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn camera_ai_job_row_uses_the_ui_id_and_rejects_other_kinds() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open in-memory database");
+        crate::database::migrations::run_migrations(&mut conn).expect("run migrations");
+        let db = Mutex::new(conn);
+        let request = CameraAiRequest {
+            job_id: "camera-job-1".into(),
+            recording_id: "recording-1".into(),
+            asset_id: "asset-1".into(),
+            stream_index: Some(2),
+            features: CameraAiFeatures {
+                matte: true,
+                face_track: true,
+            },
+            force: false,
+        };
+
+        let job = begin_camera_ai_job(&db, &request, 2).expect("begin camera AI job");
+        assert_eq!(job.id, "camera-job-1");
+        assert_eq!(job.kind, MediaJobKind::CameraAi);
+        assert_eq!(job.status, MediaJobStatus::Running);
+        assert_eq!(job.options["streamIndex"], 2);
+        assert_eq!(job.options["features"]["matte"].as_bool(), Some(true));
+
+        // A failed row is retried with the same identity.
+        media_db::fail_job(&db.lock().expect("db lock"), &job.id, "boom")
+            .expect("fail camera AI job");
+        let retried = begin_camera_ai_job(&db, &request, 2).expect("retry camera AI job");
+        assert_eq!(retried.status, MediaJobStatus::Running);
+        assert_eq!(retried.error, None);
+        assert!(retried.attempts >= 1);
+
+        // A colliding id owned by another job kind is never hijacked.
+        let foreign = media_db::insert_job(
+            &db.lock().expect("db lock"),
+            "recording-1",
+            MediaJobKind::Prepare,
+        )
+        .expect("insert prepare job");
+        let colliding = CameraAiRequest {
+            job_id: foreign.id,
+            ..request
+        };
+        assert!(begin_camera_ai_job(&db, &colliding, 2).is_err());
+    }
 
     #[test]
     fn cube_validation_reports_entries() {

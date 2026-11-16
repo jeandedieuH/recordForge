@@ -1,5 +1,6 @@
 import { create } from "zustand"
 import type { MediaJob, PrepareMediaOptions } from "@recordforge/contracts"
+import { cancelCameraAi } from "../lib/camera-ai"
 import {
   cancelMediaJob,
   deleteDerivatives,
@@ -91,7 +92,14 @@ export const useJobsStore = create<JobsStore>((set, get) => ({
   },
 
   cancel: async (jobId) => {
-    await cancelMediaJob(jobId)
+    // Camera AI runs on its own cancellable registry (it kills the inference
+    // and FFmpeg children); the media job row is the durable record it updates.
+    const cameraAi = get().jobs.find((job) => job.id === jobId)?.kind === "camera_ai"
+    if (cameraAi) {
+      await cancelCameraAi(jobId)
+    } else {
+      await cancelMediaJob(jobId)
+    }
     const job = await getMediaJob(jobId)
     get().upsertJob(job)
   },

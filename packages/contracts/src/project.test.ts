@@ -145,14 +145,19 @@ describe("project contract", () => {
     })
     const restored = projectSchema.parse(JSON.parse(JSON.stringify(project)))
     expect(restored.tracks[0].clips[0]).not.toHaveProperty("titleDesign")
+    // v1 designs migrate to v2 at load: emphasis → hook-emphasis, the emphasis
+    // phrase moves into the emphasis block, and "none" motion becomes in/out
+    // none specs.
     expect(restored.tracks[0].clips[1]).toMatchObject({
       primaryText: "A title with meaning",
       titleDesign: {
-        version: 1,
-        template: "emphasis",
-        emphasisText: "meaning",
-        appearance: "light",
-        motion: "none",
+        version: 2,
+        template: "hook-emphasis",
+        emphasis: { text: "meaning" },
+        animation: {
+          in: { preset: "none" },
+          out: { preset: "none" },
+        },
       },
     })
   })

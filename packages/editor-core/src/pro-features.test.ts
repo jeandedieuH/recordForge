@@ -3,6 +3,7 @@ import {
   annotationClipSchema,
   defaultCursorSettings,
   textClipSchema,
+  titleDesignSchema,
   type AnnotationClip,
   type TextClip,
   type TimelineClip,
@@ -131,7 +132,7 @@ describe("canvasResolutionTier", () => {
 describe("textClipIsFree", () => {
   it("treats clean-text designs as free", () => {
     const clip = textClip({
-      titleDesign: { version: 1, template: "clean-text" } as TextClip["titleDesign"],
+      titleDesign: titleDesignSchema.parse({ version: 1, template: "clean-text" }),
     })
     expect(textClipIsFree(clip)).toBe(true)
   })
@@ -140,7 +141,7 @@ describe("textClipIsFree", () => {
     expect(
       textClipIsFree(
         textClip({
-          titleDesign: { version: 1, template: "kinetic-hook" } as TextClip["titleDesign"],
+          titleDesign: titleDesignSchema.parse({ version: 1, template: "kinetic-hook" }),
         }),
       ),
     ).toBe(false)
@@ -173,9 +174,9 @@ describe("analyzeProFeatureUsage", () => {
 
   it("flags non-clean text designs and counts them", () => {
     const timeline = makeTimeline([
-      textClip({ titleDesign: { version: 1, template: "emphasis" } as TextClip["titleDesign"] }),
+      textClip({ titleDesign: titleDesignSchema.parse({ version: 1, template: "emphasis" }) }),
       textClip({ presetId: "title-modern", titleDesign: undefined }),
-      textClip({ titleDesign: { version: 1, template: "clean-text" } as TextClip["titleDesign"] }),
+      textClip({ titleDesign: titleDesignSchema.parse({ version: 1, template: "clean-text" }) }),
     ])
     const analysis = analyzeProFeatureUsage(timeline)
     expect(analysis.features).toEqual([

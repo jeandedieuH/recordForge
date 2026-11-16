@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use serde::Serialize;
 
-use crate::errors::{InternalError, Result};
+use crate::errors::{AppError, ErrorCategory, InternalError, Result};
 use crate::ml::{
     self,
     inference::{FaceModel, MatteModel, MatteSmoother},
@@ -27,6 +27,16 @@ use crate::transcript::TranscriptionJob;
 const CAMERA_AI_SHORT_SIDE: u32 = 512;
 /// YuNet runs at roughly 8 Hz regardless of the camera frame rate.
 const FACE_HZ: f64 = 8.0;
+
+/// Error returned when `cancel_camera_ai` wins the race. The dedicated code lets
+/// the UI show a neutral "cancelled" message instead of a failure.
+pub fn camera_ai_cancelled() -> AppError {
+    AppError::new(
+        ErrorCategory::Media,
+        "camera_ai_cancelled",
+        "Camera AI cancelled",
+    )
+}
 
 pub struct CameraAiOptions {
     pub ffmpeg_path: PathBuf,
@@ -166,7 +176,7 @@ pub fn run(
     loop {
         if job.is_cancelled() {
             kill_children(&mut decoder, encoder.as_mut());
-            return Err(crate::transcript::transcription_cancelled());
+            return Err(camera_ai_cancelled());
         }
         match decoder_stdout.read_exact(&mut frame) {
             Ok(()) => {}
@@ -235,7 +245,7 @@ pub fn run(
     if job.is_cancelled() {
         let _ = std::fs::remove_file(&matte_out);
         let _ = std::fs::remove_file(&matte_partial);
-        return Err(crate::transcript::transcription_cancelled());
+        return Err(camera_ai_cancelled());
     }
     if !decode_status.success() {
         let _ = std::fs::remove_file(&matte_out);

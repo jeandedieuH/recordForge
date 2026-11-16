@@ -21,6 +21,16 @@
       "family": "heading",
       "file": "Outfit-VariableFont_wght.ttf",
       "role": "heading"
+    },
+    {
+      "family": "display",
+      "file": "BebasNeue-Regular.ttf",
+      "role": "condensed display (titles v2)"
+    },
+    {
+      "family": "grotesk",
+      "file": "SpaceGrotesk[wght].ttf",
+      "role": "geometric display (titles v2)"
     }
   ],
   "licenseFile": "LICENSE.md",

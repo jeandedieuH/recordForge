@@ -46,15 +46,16 @@ export function TitleContentSection({ clip, onChange }: TitleSectionProps) {
       {text("primaryText", labels.primary, true)}
       {text("secondaryText", `${labels.secondary} (optional)`, true)}
       {text("tagText", `${labels.tag} (optional)`)}
-      {design?.template === "emphasis" && (
+      {(design?.template === "hook-emphasis" || design?.template === "highlight") && (
         <>
           {text("emphasisText", "Emphasis phrase", false, 500)}
           <p className="text-xs text-muted-foreground">
-            Use a phrase from your title to give it accent emphasis.
+            Use a phrase from your title to give it accent emphasis. Leave empty to highlight the
+            last phrase automatically.
           </p>
         </>
       )}
-      {design?.template === "note" && (
+      {design?.template === "callout" && (
         <TitleSelect
           label="Note tone"
           value={design.noteTone}
@@ -66,7 +67,10 @@ export function TitleContentSection({ clip, onChange }: TitleSectionProps) {
           onChange={(noteTone) => onChange({ titleDesign: { ...design, noteTone } })}
         />
       )}
-      {design?.template === "metric" && (
+      {design &&
+        (design.template === "stat" ||
+          design.template === "stat-before-after" ||
+          design.template === "countdown") && (
         <>
           <div className="grid grid-cols-2 gap-2">
             <NumberField
@@ -109,9 +113,9 @@ export function TitleContentSection({ clip, onChange }: TitleSectionProps) {
           </div>
         </>
       )}
-      {design?.template === "command-line" && (
+      {design?.template === "terminal" && (
         <p className="text-xs text-muted-foreground">
-          Designed motion types the command automatically. Choose None in Motion to show it
+          Designed motion types the command automatically. Set the in animation to None to show it
           immediately.
         </p>
       )}

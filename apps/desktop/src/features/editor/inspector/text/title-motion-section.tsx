@@ -1,9 +1,124 @@
-import type { OverlayEasing, TextAnimation } from "@recordforge/contracts"
+import type {
+  OverlayEasing,
+  TextAnimation,
+  TitleAnimationEasing,
+  TitleAnimationPreset,
+  TitleAnimationSpec,
+  TitleAnimationUnit,
+} from "@recordforge/contracts"
 import { Button } from "@recordforge/ui"
 import { Play } from "lucide-react"
 import { useTimelineStore } from "../../../../stores/timeline-store"
 import { InspectorSection } from "../fields"
 import { TitleSelect, TitleSlider, type TitleSectionProps } from "./title-inspector-fields"
+
+const inOptions: readonly (readonly [TitleAnimationPreset, string])[] = [
+  ["none", "None"],
+  ["fade", "Fade"],
+  ["rise", "Rise"],
+  ["drop", "Drop"],
+  ["slide-left", "Slide from right"],
+  ["slide-right", "Slide from left"],
+  ["scale-pop", "Scale pop"],
+  ["zoom", "Zoom"],
+  ["blur-in", "Blur in"],
+  ["typewriter", "Typewriter"],
+  ["mask-wipe", "Mask wipe"],
+  ["split-reveal", "Split reveal"],
+  ["tracking-expand", "Tracking expand"],
+  ["flip", "Flip"],
+  ["bounce", "Bounce"],
+  ["highlight-sweep", "Highlight sweep"],
+  ["underline-draw", "Underline draw"],
+  ["counter", "Counter"],
+]
+
+const outOptions: readonly (readonly [TitleAnimationPreset, string])[] = [
+  ["none", "None"],
+  ["fade", "Fade"],
+  ["rise", "Rise away"],
+  ["drop", "Drop away"],
+  ["slide-left", "Slide to left"],
+  ["slide-right", "Slide to right"],
+  ["scale-pop", "Scale out"],
+  ["zoom", "Zoom out"],
+]
+
+const unitOptions: readonly (readonly [TitleAnimationUnit, string])[] = [
+  ["block", "Whole block"],
+  ["line", "Line by line"],
+  ["word", "Word by word"],
+  ["char", "Character by character"],
+]
+
+const easingOptions: readonly (readonly [TitleAnimationEasing, string])[] = [
+  ["expo-out", "Expo out · snappy"],
+  ["expo-in", "Expo in"],
+  ["expo-in-out", "Expo in/out"],
+  ["cubic-out", "Cubic out"],
+  ["cubic-in", "Cubic in"],
+  ["cubic-in-out", "Cubic in/out"],
+  ["back-out", "Back · overshoot"],
+  ["elastic-out", "Elastic"],
+  ["spring", "Spring"],
+  ["linear", "Linear"],
+]
+
+function SpecEditor({
+  title,
+  spec,
+  presets,
+  onChange,
+}: {
+  title: string
+  spec: TitleAnimationSpec
+  presets: readonly (readonly [TitleAnimationPreset, string])[]
+  onChange: (spec: TitleAnimationSpec) => void
+}) {
+  return (
+    <div className="flex flex-col gap-2 rounded-md bg-surface-dim p-2">
+      <span className="text-xs font-medium">{title}</span>
+      <div className="grid grid-cols-2 gap-2">
+        <TitleSelect<TitleAnimationPreset>
+          label="Preset"
+          value={spec.preset}
+          options={presets}
+          onChange={(preset) => onChange({ ...spec, preset })}
+        />
+        <TitleSelect<TitleAnimationUnit>
+          label="Per"
+          value={spec.unit}
+          options={unitOptions}
+          onChange={(unit) => onChange({ ...spec, unit })}
+        />
+      </div>
+      <TitleSlider
+        label="Duration"
+        value={spec.durationMs}
+        min={0}
+        max={3000}
+        step={50}
+        unit="ms"
+        onChange={(durationMs) => onChange({ ...spec, durationMs })}
+      />
+      <TitleSlider
+        label="Stagger"
+        value={spec.staggerMs}
+        min={0}
+        max={800}
+        step={10}
+        unit="ms"
+        onChange={(staggerMs) => onChange({ ...spec, staggerMs })}
+      />
+      <TitleSelect<TitleAnimationEasing>
+        label="Easing"
+        value={spec.easing}
+        options={easingOptions}
+        onChange={(easing) => onChange({ ...spec, easing })}
+      />
+    </div>
+  )
+}
 
 export function TitleMotionSection({ clip, onChange }: TitleSectionProps) {
   const design = clip.titleDesign
@@ -14,57 +129,73 @@ export function TitleMotionSection({ clip, onChange }: TitleSectionProps) {
     timeline.play()
   }
   return (
-    // Animation
-    <InspectorSection title="Motion">
+    <InspectorSection title="Animation">
       {design ? (
         <>
-          <TitleSelect
-            label="Motion style"
-            value={design.motion}
-            options={[
-              ["designed", "Designed · template choreography"],
-              ["subtle", "Subtle · gentle movement"],
-              ["none", "None · static title"],
-            ]}
-            onChange={(motion) => onChange({ titleDesign: { ...design, motion } })}
+          <SpecEditor
+            title="In"
+            spec={design.animation.in}
+            presets={inOptions}
+            onChange={(spec) =>
+              onChange({ titleDesign: { ...design, animation: { ...design.animation, in: spec } } })
+            }
           />
-          {design.motion !== "none" && (
-            <TitleSlider
-              label="Tempo"
-              value={design.tempo}
-              min={0.5}
-              max={2}
-              step={0.1}
-              unit="×"
-              onChange={(tempo) => onChange({ titleDesign: { ...design, tempo } })}
-            />
-          )}
-          <div
-            className="grid grid-cols-3 gap-1 rounded-md bg-surface-dim p-2 text-center text-xs"
-            aria-label="Title motion phases"
-          >
-            <span>
-              <strong className="block font-medium">In</strong>
-              {design.motion === "none" ? "Immediate" : "Reveal"}
-            </span>
-            <span>
-              <strong className="block font-medium">Hold</strong>Read
-            </span>
-            <span>
-              <strong className="block font-medium">Out</strong>
-              {design.motion === "none" ? "Cut" : "Resolve"}
-            </span>
-          </div>
+          <SpecEditor
+            title="Out"
+            spec={design.animation.out}
+            presets={outOptions}
+            onChange={(spec) =>
+              onChange({
+                titleDesign: { ...design, animation: { ...design.animation, out: spec } },
+              })
+            }
+          />
+          <TitleSelect
+            label="Emphasis loop"
+            value={design.animation.emphasis?.preset ?? "none"}
+            options={[
+              ["none", "None"],
+              ["pulse", "Pulse"],
+              ["shimmer", "Shimmer"],
+              ["float", "Float"],
+            ]}
+            onChange={(preset) =>
+              onChange({
+                titleDesign: {
+                  ...design,
+                  animation: {
+                    ...design.animation,
+                    emphasis:
+                      preset === "none"
+                        ? undefined
+                        : {
+                            preset,
+                            periodMs: design.animation.emphasis?.periodMs ?? 2400,
+                            amplitude: design.animation.emphasis?.amplitude ?? 0.5,
+                          },
+                  },
+                },
+              })
+            }
+          />
+          <TitleSlider
+            label="Tempo"
+            value={design.tempo}
+            min={0.5}
+            max={2}
+            step={0.1}
+            unit="×"
+            onChange={(tempo) => onChange({ titleDesign: { ...design, tempo } })}
+          />
           <p className="text-xs text-muted-foreground">
-            {design.motion === "none"
-              ? "Your title stays still for the full clip."
-              : "The template coordinates entrance, a readable hold, and exit. Higher tempo makes the transitions faster."}{" "}
-            Clip length: {(clip.durationMs / 1000).toFixed(1)} s.
+            Clip length: {(clip.durationMs / 1000).toFixed(1)} s. Higher tempo makes every
+            transition faster.
           </p>
         </>
       ) : (
         <p className="text-xs text-muted-foreground">
-          This title uses legacy motion. Fine-tune its intro, outro, timing, and easing in Advanced.
+          This title uses legacy motion. Fine-tune its intro, outro, timing, and easing in
+          Advanced.
         </p>
       )}
       <Button variant="outline" size="sm" onClick={replay} className="gap-2">

@@ -56,6 +56,9 @@ pub enum MediaJobKind {
     Prepare,
     #[serde(rename = "asset_derivative")]
     AssetDerivative,
+    /// Offline camera-AI matte / face-track derivatives (#4b/#4c).
+    #[serde(rename = "camera_ai")]
+    CameraAi,
     Export,
 }
 
@@ -68,6 +71,7 @@ impl MediaJobKind {
             MediaJobKind::Waveform => "waveform",
             MediaJobKind::Prepare => "prepare",
             MediaJobKind::AssetDerivative => "asset_derivative",
+            MediaJobKind::CameraAi => "camera_ai",
             MediaJobKind::Export => "export",
         }
     }
@@ -84,6 +88,7 @@ impl std::str::FromStr for MediaJobKind {
             "waveform" => Ok(MediaJobKind::Waveform),
             "prepare" => Ok(MediaJobKind::Prepare),
             "asset_derivative" => Ok(MediaJobKind::AssetDerivative),
+            "camera_ai" => Ok(MediaJobKind::CameraAi),
             "export" => Ok(MediaJobKind::Export),
             _ => Err(()),
         }
@@ -295,7 +300,26 @@ pub fn insert_job_with_options(
     kind: MediaJobKind,
     options: serde_json::Value,
 ) -> Result<MediaJob> {
-    let id = uuid::Uuid::new_v4().to_string();
+    insert_job_with_id(
+        conn,
+        &uuid::Uuid::new_v4().to_string(),
+        recording_id,
+        kind,
+        options,
+    )
+}
+
+/// Create a durable job under a caller-supplied id.
+///
+/// Camera AI accepts the UI's job id so its progress/cancel channel and the
+/// persisted row share one identity; other kinds use a generated UUID.
+pub fn insert_job_with_id(
+    conn: &Connection,
+    id: &str,
+    recording_id: &str,
+    kind: MediaJobKind,
+    options: serde_json::Value,
+) -> Result<MediaJob> {
     let now = Utc::now().to_rfc3339();
     let outputs_json = serde_json::to_string(&MediaJobOutputs::default())
         .map_err(|e| InternalError::Storage(format!("serialize outputs: {e}")))?;
@@ -328,7 +352,7 @@ pub fn insert_job_with_options(
     .map_err(|e| InternalError::Storage(format!("insert media job: {e}")))?;
 
     Ok(MediaJob {
-        id,
+        id: id.to_string(),
         recording_id: recording_id.to_string(),
         kind,
         status: MediaJobStatus::Pending,
@@ -926,6 +950,52 @@ mod tests {
                 .expect("find completed job with proxy file")
                 .map(|job| job.id),
             Some(completed_with_proxy.id)
+        );
+    }
+
+    #[test]
+    fn camera_ai_jobs_keep_the_caller_id_and_derivative_outputs() {
+        let mut conn = Connection::open_in_memory().expect("open in-memory database");
+        run_migrations(&mut conn).expect("run migrations");
+        let job = insert_job_with_id(
+            &conn,
+            "job-from-ui",
+            "recording-1",
+            MediaJobKind::CameraAi,
+            serde_json::json!({ "streamIndex": 2, "features": { "matte": true } }),
+        )
+        .expect("insert camera AI job");
+        assert_eq!(job.id, "job-from-ui");
+        assert_eq!(job.kind, MediaJobKind::CameraAi);
+
+        let started = start_job(&conn, &job.id).expect("start camera AI job");
+        assert_eq!(started.status, MediaJobStatus::Running);
+        update_job_progress(&conn, &job.id, 0.42, "matte", None).expect("progress camera AI job");
+        let outputs = MediaJobOutputs {
+            derivatives: [
+                ("matte".to_string(), "C:/work/matte.mp4".to_string()),
+                (
+                    "faceTrack".to_string(),
+                    "C:/work/face_track.json".to_string(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        complete_job(&conn, &job.id, &outputs).expect("complete camera AI job");
+
+        let stored = get_job(&conn, &job.id).expect("reload camera AI job");
+        assert_eq!(stored.kind, MediaJobKind::CameraAi);
+        assert_eq!(stored.kind.as_str(), "camera_ai");
+        assert_eq!(stored.status, MediaJobStatus::Completed);
+        assert_eq!(
+            stored.outputs.derivatives.get("matte").map(String::as_str),
+            Some("C:/work/matte.mp4")
+        );
+        assert_eq!(
+            "camera_ai".parse::<MediaJobKind>().expect("parse kind"),
+            MediaJobKind::CameraAi
         );
     }
 

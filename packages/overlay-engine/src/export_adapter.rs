@@ -1321,6 +1321,40 @@ fn build_title_scene_svg(
         if el.path.is_empty() {
             continue;
         }
+        // Gradient fills are authored in the element's path-local space, so
+        // userSpaceOnUse inside the transformed <g> matches the canvas
+        // renderer, which builds the gradient after applying the CTM.
+        let fill_attr = if let Some(g) = &el.gradient {
+            let mut stops = String::new();
+            for stop in &g.stops {
+                let _ = write!(
+                    stops,
+                    r#"<stop offset="{}" stop-color="{}" />"#,
+                    stop.offset.clamp(0.0, 1.0),
+                    escape_xml(&stop.color)
+                );
+            }
+            let _ = write!(
+                defs,
+                r#"<linearGradient id="ts-grad-{i}" gradientUnits="userSpaceOnUse" x1="{}" y1="{}" x2="{}" y2="{}">{stops}</linearGradient>"#,
+                g.x0, g.y0, g.x1, g.y1
+            );
+            format!("url(#ts-grad-{i})")
+        } else {
+            escape_xml(&el.fill)
+        };
+        let stroke_attr = el.stroke.as_ref().map_or_else(String::new, |s| {
+            format!(
+                r#" stroke="{}" stroke-width="{}" stroke-linejoin="round""#,
+                escape_xml(&s.color),
+                s.width
+            )
+        });
+        let path = format!(
+            r#"<path d="{}" fill="{}"{stroke_attr} />"#,
+            escape_xml(&el.path),
+            fill_attr,
+        );
         if let Some(c) = &el.clip {
             let _ = write!(
                 defs,
@@ -1332,26 +1366,22 @@ fn build_title_scene_svg(
             // is set in the item's local CTM before the per-element transform.
             let _ = write!(
                 content,
-                r#"<g clip-path="url(#ts-clip-{i})"><g transform="translate({}, {}) scale({}, {})" opacity="{}"><path d="{}" fill="{}" /></g></g>"#,
+                r#"<g clip-path="url(#ts-clip-{i})"><g transform="translate({}, {}) scale({}, {})" opacity="{}">{path}</g></g>"#,
                 el.translate_x,
                 el.translate_y,
                 el.scale_x,
                 el.scale_y,
                 el.opacity.clamp(0.0, 1.0),
-                escape_xml(&el.path),
-                escape_xml(&el.fill),
             );
         } else {
             let _ = write!(
                 content,
-                r#"<g transform="translate({}, {}) scale({}, {})" opacity="{}"><path d="{}" fill="{}" /></g>"#,
+                r#"<g transform="translate({}, {}) scale({}, {})" opacity="{}">{path}</g>"#,
                 el.translate_x,
                 el.translate_y,
                 el.scale_x,
                 el.scale_y,
                 el.opacity.clamp(0.0, 1.0),
-                escape_xml(&el.path),
-                escape_xml(&el.fill),
             );
         }
     }

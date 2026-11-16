@@ -1,5 +1,10 @@
 import { useEffect, useMemo, useState } from "react"
-import { getTitlePresetGroup, type TextClip, type TextPresetRecord } from "@recordforge/editor-core"
+import {
+  getTitlePresetGroup,
+  getTitlePresetGroupLabel,
+  type TextClip,
+  type TextPresetRecord,
+} from "@recordforge/editor-core"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -43,9 +48,9 @@ export interface TitlePresetBrowserProps {
   previewClip?: TextClip
 }
 
-/** Only the Clean Text preset is Free; everything else needs Pro. */
+/** Only the Clean Title preset is Free; everything else needs Pro. */
 function presetRequiresPro(preset: TextPresetRecord): boolean {
-  return preset.definition.titleDesign?.template !== "clean-text"
+  return preset.definition.titleDesign?.template !== "clean"
 }
 
 /** Browsing is deliberately non-mutating: only the explicit action buttons edit the timeline. */
@@ -185,7 +190,7 @@ export function TitlePresetBrowser({
             <option value="all">All Purposes</option>
             {TITLE_GROUPS.map((value) => (
               <option key={value} value={value}>
-                {capitalize(value)}
+                {value === "legacy" ? "Legacy" : getTitlePresetGroupLabel(value)}
               </option>
             ))}
           </NativeSelect>
@@ -312,9 +317,11 @@ export function TitlePresetBrowser({
                       <span className="flex min-w-0 flex-1 items-center gap-1.5 truncate text-xs text-muted-foreground">
                         {custom
                           ? "Custom"
-                          : capitalize(
-                              getTitlePresetGroup(preset.definition.titleDesign?.template),
-                            )}
+                          : preset.definition.titleDesign
+                            ? getTitlePresetGroupLabel(
+                                getTitlePresetGroup(preset.definition.titleDesign.template),
+                              )
+                            : "Legacy"}
                         {!isPro && presetRequiresPro(preset) ? <ProBadge /> : null}
                       </span>
                       <IconButton

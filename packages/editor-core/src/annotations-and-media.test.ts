@@ -211,7 +211,7 @@ describe("Annotations & Vector Shapes", () => {
 
 describe("Titles & Text Presets", () => {
   it("lists presets by category and retrieves preset by ID", () => {
-    const titles = listTextPresetsByCategory("title")
+    const titles = listTextPresetsByCategory("openers")
     expect(titles.length).toBeGreaterThan(0)
     const lowerThirds = listTextPresetsByCategory("lower-third")
     expect(lowerThirds.length).toBeGreaterThan(0)

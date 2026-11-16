@@ -14,6 +14,7 @@ The durable job scheduler manages background media and project work:
 | ------------------ | ----------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
 | `prepare`          | Probe, thumbnail, waveform, and audio/video track generation for a recording; optional low-res preview proxy on request | After recording stop or recovery; proxy stage runs when the editor picks a reduced preview-quality mode |
 | `asset_derivative` | Generate thumbnails, waveforms, previews, or proxies for one imported asset                                             | Asset import or relink                                                                                  |
+| `camera_ai`        | Generate the portrait matte and/or face-track derivative for one camera stream (offline ONNX)                           | User runs Camera AI from the camera inspector; deterministic artifacts are cached per stream            |
 | `export`           | Render timeline to final MP4                                                                                            | User initiates export                                                                                   |
 | `upload`           | Send exported file to S3/Drive/local folder                                                                             | User initiates upload                                                                                   |
 
@@ -25,7 +26,7 @@ The durable job scheduler manages background media and project work:
 {
   "id": "job-uuid",
   "recordingId": "recording-uuid",
-  "kind": "prepare", // prepare | asset_derivative | export | upload
+  "kind": "prepare", // prepare | asset_derivative | camera_ai | export | upload
   "status": "running", // pending | running | completed | failed | cancelled
   "progress": 0.45, // 0.0–1.0
   "stage": "proxy", // Current sub-stage label

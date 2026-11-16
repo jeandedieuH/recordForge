@@ -28,6 +28,8 @@ import {
   downloadCameraAiEngine,
   getCameraAiArtifacts,
   getCameraAiStatus,
+  isCameraAiCancelled,
+  notifyCameraAiArtifactsChanged,
   onCameraAiProgress,
   onCameraAiSetupProgress,
   readCameraLut,
@@ -214,6 +216,9 @@ export function CameraClipInspector({
         force: false,
       })
       refreshAi()
+      // The editor preview may already have cutout enabled with no matte; tell
+      // it the deterministic artifact paths now resolve.
+      notifyCameraAiArtifactsChanged()
       toast({
         title: "Camera AI finished",
         description: features.matte
@@ -221,7 +226,11 @@ export function CameraClipInspector({
           : "Face track ready for this camera clip.",
       })
     } catch (error) {
-      toast({ title: "Camera AI failed", description: toErrorMessage(error) })
+      if (isCameraAiCancelled(error)) {
+        toast({ title: "Camera AI cancelled" })
+      } else {
+        toast({ title: "Camera AI failed", description: toErrorMessage(error) })
+      }
     } finally {
       aiJobRef.current = null
       setAiBusy(false)

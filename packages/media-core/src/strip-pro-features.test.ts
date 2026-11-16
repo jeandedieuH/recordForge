@@ -119,14 +119,15 @@ describe("stripProTimelineFeatures", () => {
     }
   })
 
-  it("converts premium and legacy text designs to clean-text", () => {
+  it("converts premium and legacy text designs to the free clean design", () => {
     const stripped = stripProTimelineFeatures(makeTimeline([premiumText(), legacyText()]))
     const [premium, legacy] = stripped.tracks[1].clips as TextClip[]
-    expect(premium.titleDesign?.template).toBe("clean-text")
+    expect(premium.titleDesign?.template).toBe("clean")
     expect(premium.primaryText).toBe("Keep this wording")
-    // Compatible style controls are preserved from the original design.
-    expect(premium.titleDesign?.appearance).toBe("light")
-    expect(legacy.titleDesign?.template).toBe("clean-text")
+    // The v1 design migrated at parse and the compatible style sections
+    // (typography/elements/fill) carry over into the free clean design.
+    expect(premium.titleDesign?.version).toBe(2)
+    expect(legacy.titleDesign?.template).toBe("clean")
     expect(legacy.presetId).toBe("lower-third-bold")
   })
 
@@ -175,13 +176,13 @@ describe("buildRenderPlan with stripProFeatures", () => {
     if (!result.ok) return
     const plan = result.value
     expect(plan.annotations).toEqual([])
-    expect(plan.texts.every((text) => text.titleDesign?.template === "clean-text")).toBe(true)
+    expect(plan.texts.every((text) => text.titleDesign?.template === "clean")).toBe(true)
     expect(plan.texts.map((text) => text.primaryText)).toContain("Keep this wording")
     expect(plan.chapterMode).toBe("none")
     const overlayKinds = plan.overlayRenderPlan?.items.map((item) => item.kind) ?? []
     expect(overlayKinds).not.toContain("annotation")
     const overlayTexts = plan.overlayRenderPlan?.items.filter((item) => item.kind === "text") ?? []
-    expect(overlayTexts.every((item) => item.titleDesign?.template === "clean-text")).toBe(true)
+    expect(overlayTexts.every((item) => item.titleDesign?.template === "clean")).toBe(true)
   })
 
   it("still flags Pro requirements when strip is off", () => {

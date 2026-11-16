@@ -64,6 +64,14 @@ short side, runs the matte model on every frame and YuNet at ~8 Hz, and writes:
 The job is cancellable, reports progress, and caches by deterministic path.
 **Export never runs inference**: it consumes the matte and face track.
 
+Each run is also a durable `media_jobs` row (`kind: "camera_ai"`) keyed by the
+UI's job id. Progress/stage updates and the completed matte/face-track paths are
+persisted there (and registered as `derivatives` rows), so the shared jobs
+surface sees the work, cancellation survives a view change, and a startup sweep
+fails a row interrupted by an app exit. The in-memory camera-AI registry is only
+the busy gate and cancel channel that owns the decoder/encoder children; the
+SQLite row is the durable record.
+
 ### 4. Colour is one composed table
 
 `overlay-engine/src/color.rs` is the single source of truth. It parses `.cube`
@@ -95,7 +103,27 @@ composes adjustments ∘ LUT ∘ intensity into one 33³ table.
 - Hide-during-silence reuses Smart Cut's analysed ranges and replaces only
   `source: "silence"` camera-layout segments in one undoable command.
 
-### 6. Entitlements
+### 6. The preview composites the cutout
+
+`camera-preview.tsx` plays the finished matte on a second dual-slot video pair
+synced to the same source time as the camera track, and `camera-lut-canvas.tsx`
+samples camera + matte + LUT in one WebGL2 pass:
+
+- the shader applies the renderer's alpha math (`edgeShrink` shifts the matte
+  luma, `edgeSoftness` blurs it) and composites `none` (transparent over the
+  screen), `blur` (9-tap disc blur of the graded camera), `color`, or `image`
+  (cover-fitted, asset resolved through the project registry) backgrounds;
+- the plain `<video>` surfaces are hidden while the canvas draws, and the canvas
+  reproduces the CSS framing (`object-cover` without a crop, `object-fill` with
+  one) so grading and cutout stay aligned;
+- the exact background paint and blur kernel remain the exporter's; the preview
+  approximates the box blur and is not a pixel-parity reference.
+
+Until a matte exists the preview keeps the plain camera frame; the inspector
+shows matte readiness and offers Generate matte, so the export is never the
+first place a missing matte appears.
+
+### 7. Entitlements
 
 Cutout, face tracking and hide-during-silence are Pro keys
 (`camera-cutout`, `face-tracking`, `hide-during-silence`) enforced in Rust at
@@ -104,7 +132,7 @@ export admission and mirrored in `editor-core/pro-features.ts`. Colour grading,
 Free. Free "export without Pro" disables cutout/face tracking, keeps their
 settings for upgrade, and drops generated silence layouts.
 
-### 7. Security review
+### 8. Security review
 
 - **No new Tauri capability.** Model/runtime downloads use the existing Rust
   `reqwest` client, not the webview. Model files live under the app-data dir;
@@ -126,10 +154,13 @@ settings for upgrade, and drops generated silence layouts.
   because inference is precomputed.
 - CPU inference is the default on Windows; DirectML is opt-in through a custom
   runtime build. Face tracking and matte quality are model-bound and offline.
-- The editor previews the colour grade in WebGL2 and applies the face-track
-  crop. The **cutout matte is not composited in the editor preview yet**; the
-  exported file is authoritative, and the camera inspector shows matte
-  readiness so the user knows when the export will differ.
+- The editor previews the colour grade, face-tracked crop, and the cutout with
+  its background mode in WebGL2 from the same matte the export consumes. The
+  preview's blur kernel and edge softening are close approximations rather than
+  pixel parity; the exported file stays authoritative.
+- Camera-AI runs are durable `media_jobs` rows, so progress and cancellation
+  behave like every other media job and a row interrupted by an app exit shows
+  as failed instead of silently disappearing.
 - Intel macOS has no Camera AI runtime until a pinned x64 build is published.
 - Older app versions strip the new optional camera fields on save, as with
   every optional project-v1 addition; release notes call this out.

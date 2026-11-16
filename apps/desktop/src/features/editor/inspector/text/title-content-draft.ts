@@ -4,7 +4,8 @@ export type TitleContentField =
   "primaryText" | "secondaryText" | "tagText" | "emphasisText" | "prefix" | "suffix"
 
 function fieldValue(clip: TextClip, field: TitleContentField): string {
-  if (field === "emphasisText") return clip.titleDesign?.emphasisText ?? ""
+  // v2 designs nest the emphasis phrase and metric affixes in sub-objects.
+  if (field === "emphasisText") return clip.titleDesign?.emphasis.text ?? ""
   if (field === "prefix" || field === "suffix") return clip.titleDesign?.metric[field] ?? ""
   return clip[field] ?? ""
 }
@@ -42,9 +43,10 @@ export function createTitleContentDraft(
           }
           const design = patch.titleDesign ?? {
             ...clip.titleDesign,
+            emphasis: { ...clip.titleDesign.emphasis },
             metric: { ...clip.titleDesign.metric },
           }
-          if (field === "emphasisText") design.emphasisText = value
+          if (field === "emphasisText") design.emphasis.text = value
           else design.metric[field] = value
           patch.titleDesign = design
         } else patch[field] = value

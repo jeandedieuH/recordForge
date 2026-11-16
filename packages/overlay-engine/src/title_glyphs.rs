@@ -10,6 +10,8 @@ pub(super) fn face(family: &str, weight: &str) -> Face<'static> {
         "serif" => include_bytes!("../fonts/sourceserif4.ttf"),
         "mono" => include_bytes!("../fonts/jetbrainsmono.ttf"),
         "heading" | "outfit" => include_bytes!("../fonts/outfit.ttf"),
+        "display" => include_bytes!("../fonts/bebasneue.ttf"),
+        "grotesk" => include_bytes!("../fonts/spacegrotesk.ttf"),
         _ => include_bytes!("../fonts/inter.ttf"),
     };
     let mut face = Face::from_slice(bytes, 0).expect("embedded OFL font must be valid");

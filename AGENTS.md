@@ -26,7 +26,7 @@ RecordForge is a **local-first, low-end-friendly cross-platform desktop screen r
 | Validation               | Zod                                                                                                               |
 | UI kit                   | `@recordforge/ui` (shadcn model: Radix + Tailwind v4 + CVA, spec-010)                                             |
 | Icons                    | lucide-react (no emoji in product UI)                                                                             |
-| Font                     | Inter Variable for the shell; overlay bundle uses Inter, Source Serif 4, JetBrains Mono, and Outfit under OFL-1.1 |
+| Font                     | Inter Variable for the shell; overlay bundle uses Inter, Source Serif 4, JetBrains Mono, Outfit, Bebas Neue, and Space Grotesk under OFL-1.1 |
 | License                  | GNU General Public License v3.0 (GPL-3.0-or-later), open core — see `LICENSING.md`                                |
 | Licensing                | Ed25519 offline tokens, `machine-uid` device binding, OS-vault license key (`src-tauri/src/licensing/`)           |
 

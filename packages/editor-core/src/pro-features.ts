@@ -9,7 +9,11 @@ import { canvasIsSixteenNine, canvasResolutionTier } from "./composition"
  * re-checks independently at export admission, so the two must agree.
  */
 
-export const CLEAN_TEXT_TEMPLATE = "clean-text" as const
+export const CLEAN_TEXT_TEMPLATE = "clean" as const
+
+// Projects saved before the v2 redesign still carry v1 ids until migrated;
+// treat the v1 clean-text id as free too so un-migrated data stays honest.
+const FREE_TITLE_TEMPLATES = new Set([CLEAN_TEXT_TEMPLATE, "clean-text"])
 
 export interface ProFeatureUsage {
   feature: ProFeatureKey
@@ -30,9 +34,9 @@ export interface ProUsageAnalysis {
   outputCappedTo1080p: boolean
 }
 
-/** Only Clean Text is Free; a missing design means a pre-template preset — Pro. */
+/** Only Clean Title is Free; a missing design means a pre-template preset — Pro. */
 export function textClipIsFree(clip: TextClip): boolean {
-  return clip.titleDesign?.template === CLEAN_TEXT_TEMPLATE
+  return clip.titleDesign != null && FREE_TITLE_TEMPLATES.has(clip.titleDesign.template)
 }
 
 const HIGH_RES_PRESETS = new Set(["ultra-4k", "ultra-4k-60"])

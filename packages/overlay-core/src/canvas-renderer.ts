@@ -495,6 +495,17 @@ function renderText(
   context.restore()
 }
 
+function titleGradient(
+  context: CanvasRenderingContext2D,
+  gradient: { x0: number; y0: number; x1: number; y1: number; stops: Array<{ offset: number; color: string }> },
+): CanvasGradient {
+  const g = context.createLinearGradient(gradient.x0, gradient.y0, gradient.x1, gradient.y1)
+  for (const stop of gradient.stops) {
+    g.addColorStop(Math.min(1, Math.max(0, stop.offset)), stop.color)
+  }
+  return g
+}
+
 function renderTitleScene(
   context: CanvasRenderingContext2D,
   scene: NonNullable<Extract<OverlayDisplayItem, { kind: "text" }>["titleScene"]>,
@@ -506,7 +517,6 @@ function renderTitleScene(
   for (const element of scene.elements) {
     context.save()
     context.globalAlpha *= element.opacity
-    context.fillStyle = withOpacity(element.fill, 1)
     if (element.clip) {
       context.beginPath()
       context.rect(element.clip.x, element.clip.y, element.clip.width, element.clip.height)
@@ -514,7 +524,19 @@ function renderTitleScene(
     }
     context.translate(element.translateX, element.translateY)
     context.scale(element.scaleX, element.scaleY)
-    context.fill(cachedPath2D(element.path))
+    // Gradient coordinates are authored in path-local space (post-translate/
+    // scale), matching the SVG userSpaceOnUse behaviour used in export.
+    context.fillStyle = element.gradient
+      ? titleGradient(context, element.gradient)
+      : withOpacity(element.fill, 1)
+    const path = cachedPath2D(element.path)
+    context.fill(path)
+    if (element.stroke && element.stroke.width > 0) {
+      context.strokeStyle = withOpacity(element.stroke.color, 1)
+      context.lineWidth = element.stroke.width
+      context.lineJoin = "round"
+      context.stroke(path)
+    }
     context.restore()
   }
 }

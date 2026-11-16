@@ -833,6 +833,16 @@ impl JobManager {
                 )?;
                 continue;
             }
+            if matches!(job.kind, crate::database::media::MediaJobKind::CameraAi) {
+                // Camera AI is a foreground editor action: its matte and face
+                // track are deterministic derivatives, so a restart simply
+                // fails the row and the user runs Camera AI again.
+                self.fail_unresumable_job(
+                    &job.id,
+                    "Camera AI was interrupted when the app exited. Run Camera AI again.",
+                )?;
+                continue;
+            }
             if !matches!(job.kind, crate::database::media::MediaJobKind::Prepare) {
                 continue;
             }

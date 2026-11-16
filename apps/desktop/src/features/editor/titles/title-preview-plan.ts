@@ -22,7 +22,12 @@ export const TITLE_PREVIEW_STILL_MS = 1600
  */
 export function getTitleEditTime(clip: TextClip): number {
   const design = clip.titleDesign
-  const designIntro = design && design.motion !== "none" ? 720 / design.tempo : 0
+  // Designed titles choreograph their entrance from zero opacity; use the v2
+  // in-animation duration (+ stagger) as the "becomes readable" point.
+  const designIntro =
+    design && design.animation.in.preset !== "none"
+      ? (design.animation.in.durationMs + design.animation.in.staggerMs * 4) / design.tempo
+      : 0
   const overlayIntro =
     clip.overlayAnimation.inType === "none" ? 0 : clip.overlayAnimation.inDurationMs
   const intro = Math.max(designIntro, overlayIntro)

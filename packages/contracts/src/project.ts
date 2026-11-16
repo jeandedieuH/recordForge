@@ -1,5 +1,6 @@
 import { z } from "zod"
 import { cursorDpiScaleSchema, cursorTelemetryTimebaseSchema } from "./cursor"
+import { migrateTitleDesignV1 } from "./title-design"
 import { boundsSchema } from "./recording"
 import { mediaKindSchema, projectAssetImportStrategySchema, projectAssetRoleSchema } from "./media"
 import {
@@ -103,8 +104,21 @@ export function normalizeOverlayClipInput(value: unknown): unknown {
   const outType =
     existingAnimation.outType ?? mapLegacyAnimation(value.animationOut, "out") ?? "fade"
 
+  // Titles v1 → v2 (M5): migrate with clip context so the legacy backdrop and
+  // shadow fields the v1 engine read from the clip survive as design fields.
+  const titleDesign =
+    isRecord(value.titleDesign) && value.titleDesign.version === 1
+      ? migrateTitleDesignV1(value.titleDesign, {
+          backdropStyle: typeof value.backdropStyle === "string" ? value.backdropStyle : undefined,
+          shadowEnabled: value.shadowEnabled === true,
+          shadowColor: typeof value.shadowColor === "string" ? value.shadowColor : undefined,
+          shadowBlur: typeof value.shadowBlur === "number" ? value.shadowBlur : undefined,
+        })
+      : value.titleDesign
+
   return {
     ...value,
+    ...(titleDesign !== value.titleDesign ? { titleDesign } : {}),
     rotation: value.rotation ?? 0,
     anchorX: value.anchorX ?? 0.5,
     anchorY: value.anchorY ?? 0.5,

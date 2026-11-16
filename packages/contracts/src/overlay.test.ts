@@ -23,18 +23,28 @@ describe("overlay transport contract", () => {
   })
 
   it("rejects unsupported designs and unsafe motion or numeric parameters", () => {
-    const design = { version: 1, template: "metric" }
+    const design = { version: 2, template: "stat" }
     for (const invalid of [
-      { version: 2 },
       { template: "unrecognized-template" },
       { tempo: 0 },
       { tempo: 100 },
       { metric: { to: Infinity } },
       { metric: { decimals: 4 } },
-      { lineHeight: 0 },
+      { typography: { lineHeight: 0.5 } },
+      { fill: { kind: "radial" } },
+      { animation: { in: { preset: "explode" } } },
     ]) {
       expect(titleDesignSchema.safeParse({ ...design, ...invalid }).success).toBe(false)
     }
+    // v1 payloads migrate, but invalid v1 fields still fail inside the migration.
+    for (const invalid of [{ tempo: 0 }, { metric: { decimals: 9 } }]) {
+      expect(
+        titleDesignSchema.safeParse({ version: 1, template: "metric", ...invalid }).success,
+      ).toBe(false)
+    }
+    expect(
+      titleDesignSchema.safeParse({ version: 1, template: "bogus-template" }).success,
+    ).toBe(false)
   })
 
   it("provides stable defaults for the engine boundary", () => {

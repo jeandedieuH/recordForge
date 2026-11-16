@@ -2,7 +2,7 @@ import { z } from "zod"
 import type { PresetDefinition, PresetStorage, PresetStorageData } from "@recordforge/editor-core"
 import { getSetting, setSetting } from "../../../lib/settings"
 
-export type EditorPresetKind = "annotation" | "text"
+export type EditorPresetKind = "annotation" | "text" | "look"
 
 const presetStorageSchema = z.object({
   id: z.string(),
@@ -24,6 +24,10 @@ const STORAGE_KEYS: Record<EditorPresetKind, { presets: string; favorites: strin
   text: {
     presets: "editorTextPresets",
     favorites: "editorTextPresetFavorites",
+  },
+  look: {
+    presets: "editorLookPresets",
+    favorites: "editorLookPresetFavorites",
   },
 }
 

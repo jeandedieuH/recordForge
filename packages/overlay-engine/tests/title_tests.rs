@@ -135,11 +135,25 @@ fn per_element_font_size_overrides_apply_independently() {
     let mut p = plan("metric", "none", 4000);
     p["items"][0]["titleDesign"]["fontSizes"] = json!({ "metric": 40.0 });
     assert_ne!(title(&engine(&p), 2100), metric_default);
-    // Out-of-range overrides invalidate the design and fall back to legacy rendering.
-    for bad in [3.0, 601.0] {
+
+    // v2 per-element sizes land under `elements.<role>.size` and apply
+    // independently of each other and of the shared base size.
+    let v2 = |elements: Value| -> Value {
         let mut p = plan("clean-text", "none", 4000);
-        p["items"][0]["titleDesign"]["fontSizes"] = json!({ "primary": bad });
-        assert!(title(&engine(&p), 2100).is_null(), "{bad}");
+        p["items"][0]["titleDesign"] = json!({
+            "version": 2, "template": "clean", "elements": elements
+        });
+        title(&engine(&p), 2100)
+    };
+    assert_eq!(v2(json!({})), v2(json!({"primary": null})));
+    for role in ["tag", "primary", "secondary"] {
+        let scene = v2(json!({ role: { "size": 30.0 } }));
+        assert_ne!(scene, v2(json!({})), "{role} size should change the scene");
+    }
+    // Out-of-range sizes invalidate the design: the clip falls back to
+    // legacy rendering with no title scene.
+    for bad in [1.0, 9999.0] {
+        assert!(v2(json!({ "primary": { "size": bad } })).is_null(), "{bad}");
     }
 }
 #[cfg(feature = "native-render")]

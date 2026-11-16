@@ -35,6 +35,24 @@
   font-display: swap;
 }
 
+/* Titles v2 display faces; the same vendored files are embedded in the overlay
+   engine so preview pickers and the export rasterizer agree on metrics. */
+@font-face {
+  font-family: "Bebas Neue";
+  src: url("/fonts/bebasneue.ttf") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Space Grotesk";
+  src: url("/fonts/spacegrotesk.ttf") format("truetype");
+  font-weight: 300 700;
+  font-style: normal;
+  font-display: swap;
+}
+
 html {
   font-size: 14px; /* compact desktop density: rem base 14 */
 }

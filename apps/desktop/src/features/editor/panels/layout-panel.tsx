@@ -41,6 +41,7 @@ import { ShadowControls } from "./layout/shadow-controls"
 import { BorderControls } from "./layout/border-controls"
 import { EffectsControls } from "./layout/effects-controls"
 import { CameraLayoutsCard } from "./layout/camera-layouts-card"
+import { LooksCard } from "./layout/looks-card"
 
 const PADDING_PRESETS = [0, 24, 48, 64, 96]
 const RADIUS_PRESETS = [
@@ -170,6 +171,9 @@ export function LayoutPanel() {
           {canvas.width} × {canvas.height}
         </span>
       </div>
+
+      {/* Whole-look presets (M5) — one-click canvas + camera + cursor styling */}
+      <LooksCard />
 
       {/* Aspect Ratio Framing */}
       <div className="flex flex-col gap-2">

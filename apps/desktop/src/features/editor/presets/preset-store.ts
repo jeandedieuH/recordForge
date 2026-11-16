@@ -2,12 +2,15 @@ import { useEffect, useState, useSyncExternalStore } from "react"
 import {
   ANNOTATION_PRESET_CATALOG,
   annotationPresetValuesSchema,
+  LOOK_PRESET_CATALOG,
+  lookValuesSchema,
   migrateAnnotationPresetDesignScale,
   migrateTextPresetDesignScale,
   TEXT_PRESET_CATALOG,
   textPresetValuesSchema,
   PresetRegistry,
   type AnnotationPresetValues,
+  type LookValues,
   type PresetRegistrySnapshot,
   type TextPresetValues,
 } from "@recordforge/editor-core"
@@ -34,6 +37,19 @@ export function getAnnotationPresetRegistry(): PresetRegistry<AnnotationPresetVa
 
 export function getTextPresetRegistry(): PresetRegistry<TextPresetValues> {
   return textPresetRegistry
+}
+
+const lookPresetRegistry = new PresetRegistry<LookValues>(LOOK_PRESET_CATALOG, {
+  definitionSchema: lookValuesSchema,
+  storage: createPresetStorage<LookValues>("look"),
+})
+
+export function getLookPresetRegistry(): PresetRegistry<LookValues> {
+  return lookPresetRegistry
+}
+
+export function useLookPresetRegistry(): PresetRegistryHook<LookValues> {
+  return usePresetRegistry(lookPresetRegistry)
 }
 
 export function useAnnotationPresetRegistry(): PresetRegistryHook<AnnotationPresetValues> {

@@ -10,6 +10,8 @@ import {
   clipTransformSchema,
   cursorEffectSettingsSchema,
   imageClipSchema,
+  lookScopeSchema,
+  lookValuesSchema,
   maskColorSchema,
   overlayAnimationSchema,
   maskModeSchema,
@@ -486,6 +488,17 @@ export const updateCursorSettingsCommandSchema = commandMetaSchema.extend({
 
 export type UpdateCursorSettingsCommand = z.infer<typeof updateCursorSettingsCommandSchema>
 
+// Whole-look presets (M5): one command applies canvas + camera + cursor
+// styling as a single undoable transaction.
+export const applyLookCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("apply-look"),
+  look: lookValuesSchema,
+  scope: lookScopeSchema.default("all"),
+  includeAspectRatio: z.boolean().default(false),
+})
+
+export type ApplyLookCommand = z.infer<typeof applyLookCommandSchema>
+
 export const addCursorRangeCommandSchema = commandMetaSchema.extend({
   kind: z.literal("add-cursor-range"),
   trackId: z.string().optional(),
@@ -840,6 +853,7 @@ export const commandRecordSchema = z.discriminatedUnion("kind", [
   updateCanvasCommandSchema,
   updateSmartZoomSettingsCommandSchema,
   updateCursorSettingsCommandSchema,
+  applyLookCommandSchema,
   addCursorRangeCommandSchema,
   splitCursorRangeCommandSchema,
   resizeCursorRangeCommandSchema,

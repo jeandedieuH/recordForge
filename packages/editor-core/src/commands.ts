@@ -74,6 +74,7 @@ import {
   type TimelineWord,
 } from "./captions/caption-transcript"
 import { getClipGroupId } from "./grouping"
+import { applyLookToState } from "./looks"
 import { clipDurationFromSourceRange, timelineToSource } from "./time-mapping"
 import { snapRangeEdgeToFrame } from "./smart-cut"
 import { warpTimeline } from "./time-warp"
@@ -91,6 +92,7 @@ import type {
   AddTrackCommand,
   AddVideoClipCommand,
   AddZoomSegmentCommand,
+  ApplyLookCommand,
   CommandRecord,
   DeleteCameraLayoutCommand,
   DeleteCameraLayoutsCommand,
@@ -1127,6 +1129,8 @@ export function canApplyCommand(state: TimelineState, command: CommandRecord): C
       return { ok: true, value: undefined }
     case "update-cursor-settings":
       return { ok: true, value: undefined }
+    case "apply-look":
+      return { ok: true, value: undefined }
     case "trim-timeline-ends": {
       if (command.startMs >= command.endMs) {
         return {
@@ -1263,6 +1267,8 @@ export function applyCommand(
       return applyUpdateSmartZoomSettings(state, command)
     case "update-cursor-settings":
       return applyUpdateCursorSettings(state, command)
+    case "apply-look":
+      return applyApplyLook(state, command)
     case "add-cursor-range":
       return applyAddCursorRange(state, command)
     case "split-cursor-range":
@@ -4066,6 +4072,24 @@ function applyUpdateCursorSettings(
   }
 }
 
+// apply-look is a single command so canvas + every camera transform + cursor
+// settings commit (and undo) as one step.
+function applyApplyLook(
+  state: TimelineState,
+  command: ApplyLookCommand,
+): CommandResult<TimelineState> {
+  return {
+    ok: true,
+    value: {
+      ...applyLookToState(state, command.look, {
+        scope: command.scope,
+        includeAspectRatio: command.includeAspectRatio,
+      }),
+      updatedAt: now(),
+    },
+  }
+}
+
 function applyAddCursorRange(
   state: TimelineState,
   command: AddCursorRangeCommand,
@@ -5820,6 +5844,23 @@ export function createUpdateCursorSettingsCommand(
     cursorSettings,
     coalesce: true,
     coalesceKey: "cursor",
+  }
+}
+
+export function createApplyLookCommand(
+  look: import("@recordforge/contracts").LookValues,
+  options?: {
+    scope?: import("@recordforge/contracts").LookScope
+    includeAspectRatio?: boolean
+    name?: string
+  },
+): CommandRecord {
+  return {
+    kind: "apply-look",
+    name: options?.name ?? "Apply look",
+    look,
+    scope: options?.scope ?? "all",
+    includeAspectRatio: options?.includeAspectRatio ?? false,
   }
 }
 

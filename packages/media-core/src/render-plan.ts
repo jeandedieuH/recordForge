@@ -1416,18 +1416,20 @@ function buildAudioTracks(state: TimelineState, range: ExportRange | undefined):
  * free template. Clips without a design (legacy presets) get the default.
  */
 function cleanTextDesign(design: TitleDesign | undefined): TitleDesign {
-  const base = design ?? titleDesignSchema.parse({ version: 1, template: "clean-text" })
-  // Keep the shared look controls, but drop template-specific sizing and content
-  // (metric overrides, emphasis phrase, element sizes) that do not apply to the
-  // clean-text layout.
+  const base = design ?? titleDesignSchema.parse({ version: 2, template: "clean" })
+  // Keep the shared look controls, but drop template-specific content (metric
+  // overrides, emphasis phrase, checklist items) that does not apply to the
+  // clean layout. The clip's own placement survives so Free exports stay put.
   return titleDesignSchema.parse({
-    version: 1,
-    template: "clean-text",
-    appearance: base.appearance,
-    motion: base.motion,
-    tempo: base.tempo,
-    letterSpacing: base.letterSpacing,
-    lineHeight: base.lineHeight,
+    version: 2,
+    template: "clean",
+    typography: base.typography,
+    elements: base.elements,
+    fill: base.fill,
+    stroke: base.stroke,
+    shadow: base.shadow,
+    glow: base.glow,
+    placement: base.placement,
   })
 }
 
@@ -1459,7 +1461,7 @@ export function stripProTimelineFeatures(state: TimelineState): TimelineState {
         if (clip.kind === "annotation") {
           return clip.enabled === false ? clip : { ...clip, enabled: false }
         }
-        if (clip.kind === "text" && clip.titleDesign?.template !== "clean-text") {
+        if (clip.kind === "text" && clip.titleDesign?.template !== "clean") {
           return { ...clip, titleDesign: cleanTextDesign(clip.titleDesign) }
         }
         if (clip.kind === "camera") {

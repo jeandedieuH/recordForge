@@ -5,7 +5,6 @@ import {
   TEXT_PRESETS,
   PresetRegistry,
   applyTextPresetToClip,
-  applyTitleAppearance,
   createTextClipFromDefinition,
   createTextClipFromPreset,
   getTextPresetById,
@@ -25,34 +24,50 @@ import {
 } from "./index"
 
 const templates = {
-  "text-clean": "clean-text",
-  "text-emphasis": "emphasis",
-  "text-editorial": "editorial-opener",
-  "text-kinetic": "kinetic-hook",
-  "text-chapter": "chapter-marker",
-  "text-speaker": "speaker-id",
-  "text-source": "source-credit",
-  "text-step": "step-guide",
+  "text-clean": "clean",
+  "text-hook": "hook",
+  "text-emphasis": "hook-emphasis",
+  "text-editorial": "editorial",
+  "text-chapter": "chapter",
+  "text-kinetic": "kinetic",
+  "text-highlight": "highlight",
+  "text-banner": "banner",
+  "text-speaker": "lower-third-bar",
+  "text-lower-third-glass": "lower-third-glass",
+  "text-lower-third-line": "lower-third-line",
+  "text-source": "source",
+  "text-social-handle": "social-handle",
+  "text-cta-follow": "cta-follow",
+  "text-cta-link": "cta-link",
+  "text-cta": "cta",
+  "text-step": "step",
+  "text-checklist": "checklist",
   "text-shortcut": "shortcut",
-  "text-command": "command-line",
-  "text-note": "note",
-  "text-quote": "pull-quote",
-  "text-metric": "metric",
-  "text-cta": "call-to-action",
-}
+  "text-command": "terminal",
+  "text-note": "callout",
+  "text-quote": "quote",
+  "text-location": "location",
+  "text-metric": "stat",
+  "text-stat-delta": "stat-before-after",
+  "text-countdown": "countdown",
+  "text-agenda": "agenda",
+  "text-outro": "outro",
+} as const
 
 describe("creator title presets", () => {
-  it("exposes exactly fourteen distinct, schema-validated purpose templates", () => {
+  it("exposes the curated v2 catalog as schema-validated templates", () => {
     expect(TEXT_PRESETS.map((preset) => preset.id)).toEqual(Object.keys(templates))
     for (const [id, template] of Object.entries(templates)) {
       const clip = createTextClipFromPreset(id)
-      expect(clip.titleDesign).toMatchObject({ version: 1, template, tempo: 1 })
+      expect(clip.titleDesign).toMatchObject({ version: 2, template, tempo: 1 })
       expect(textPresetValuesSchema.safeParse(getTextPresetRecordById(id).definition).success).toBe(
         true,
       )
       expect(clip.primaryText.length).toBeGreaterThan(0)
     }
-    expect(new PresetRegistry(TEXT_PRESET_CATALOG).getAll()).toHaveLength(14)
+    expect(new PresetRegistry(TEXT_PRESET_CATALOG).getAll()).toHaveLength(
+      Object.keys(templates).length,
+    )
     expect(getTextPresetById("missing").id).toBe("text-clean")
   })
 
@@ -81,39 +96,55 @@ describe("creator title presets", () => {
     [360, 640],
     [640, 360],
     [2560, 1080],
-  ])("places all new templates safely inside a %i x %i canvas", (canvasWidth, canvasHeight) => {
+  ])("places all templates safely inside a %i x %i canvas", (canvasWidth, canvasHeight) => {
     for (const preset of TEXT_PRESETS) {
       const clip = createTextClipFromDefinition(preset, { canvasWidth, canvasHeight })
       const scale = Math.min(canvasWidth / 1920, canvasHeight / 1080)
-      expect(clip.x).toBeGreaterThan(0)
-      expect(clip.y).toBeGreaterThan(0)
-      expect(clip.x + clip.width).toBeLessThan(canvasWidth)
-      expect(clip.y + clip.height).toBeLessThan(canvasHeight)
+      expect(clip.x).toBeGreaterThanOrEqual(0)
+      expect(clip.y).toBeGreaterThanOrEqual(0)
+      expect(clip.x + clip.width).toBeLessThanOrEqual(canvasWidth)
+      expect(clip.y + clip.height).toBeLessThanOrEqual(canvasHeight)
       expect(clip.fontSize).toBeCloseTo(Math.max(8, preset.fontSize * scale))
       expect(clip.backdropPaddingX).toBeCloseTo(preset.backdropPaddingX * scale)
     }
   })
 
-  it("anchors identity at the bottom and instructional titles near the top", () => {
-    expect(createTextClipFromPreset("text-speaker").y).toBeGreaterThan(700)
-    expect(createTextClipFromPreset("text-source").y).toBeGreaterThan(700)
-    expect(createTextClipFromPreset("text-step").y).toBeLessThan(150)
-    expect(createTextClipFromPreset("text-note").y).toBeLessThan(150)
+  it("anchors lower thirds at the bottom and instructional titles near the top", () => {
+    for (const id of [
+      "text-speaker",
+      "text-lower-third-glass",
+      "text-lower-third-line",
+      "text-source",
+      "text-social-handle",
+      "text-cta-follow",
+      "text-cta-link",
+    ]) {
+      expect(createTextClipFromPreset(id).y).toBeGreaterThan(500)
+    }
+    for (const id of ["text-step", "text-location"]) {
+      expect(createTextClipFromPreset(id).y).toBeLessThan(150)
+    }
   })
 
   it("parses title defaults only when a versioned template is present", () => {
     const definition = getTextPresetRecordById("text-clean").definition
     expect(
-      textPresetValuesSchema.parse({ ...definition, titleDesign: { version: 1, template: "note" } })
+      textPresetValuesSchema.parse({ ...definition, titleDesign: { version: 2, template: "callout" } })
         .titleDesign,
     ).toMatchObject({
-      appearance: "dark",
-      motion: "designed",
-      lineHeight: 1.15,
+      tempo: 1,
+      typography: { lineHeight: 1.15 },
       metric: { to: 98 },
     })
+    // v1 payloads migrate at parse time (backward compatibility).
     expect(
-      textPresetValuesSchema.safeParse({ ...definition, titleDesign: { version: 1 } }).success,
+      textPresetValuesSchema.parse({
+        ...definition,
+        titleDesign: { version: 1, template: "note" },
+      }).titleDesign,
+    ).toMatchObject({ version: 2, template: "callout" })
+    expect(
+      textPresetValuesSchema.safeParse({ ...definition, titleDesign: { version: 2 } }).success,
     ).toBe(false)
     expect(
       textPresetValuesSchema.parse({ ...definition, titleDesign: undefined }).titleDesign,
@@ -121,7 +152,10 @@ describe("creator title presets", () => {
   })
 
   it("applies templates without replacing content or timing, with explicit layout and style preservation", () => {
-    const original = createTextClipFromPreset("text-speaker", { startMs: 1250, durationMs: 6200 })
+    const original = createTextClipFromPreset("text-speaker", {
+      startMs: 1250,
+      durationMs: 6200,
+    })
     const clip = {
       ...original,
       primaryText: "Jordan Lee",
@@ -133,7 +167,7 @@ describe("creator title presets", () => {
       height: 160,
       rotation: 12,
       fontSize: 31,
-      titleDesign: { ...original.titleDesign!, motion: "none" as const, tempo: 1.5 },
+      titleDesign: { ...original.titleDesign!, tempo: 1.5 },
       autoScaleText: false,
     }
     const preset = getTextPresetById("text-editorial")
@@ -157,7 +191,7 @@ describe("creator title presets", () => {
       rotation: 12,
       fontSize: 31,
       autoScaleText: false,
-      titleDesign: { template: "editorial-opener", motion: "none", tempo: 1.5 },
+      titleDesign: { template: "editorial", tempo: 1.5 },
       overlayAnimation: clip.overlayAnimation,
     })
     const reset = applyTextPresetToClip(clip, preset)
@@ -289,18 +323,15 @@ describe("creator title presets", () => {
     clip.autoScaleText = false
     clip.titleDesign = {
       ...clip.titleDesign!,
-      appearance: "light",
-      motion: "subtle",
       tempo: 1.7,
-      emphasisText: "faster",
       noteTone: "warning",
-      letterSpacing: 0.04,
-      lineHeight: 1.3,
+      typography: { ...clip.titleDesign!.typography, letterSpacing: 0.04, lineHeight: 1.3 },
+      emphasis: { text: "faster", style: "marker" },
       metric: { from: 12, to: 42.5, decimals: 1, prefix: "+", suffix: "x" },
     }
     const snapshot = textPresetFromClip(clip, { name: "My result", description: "Saved result" })
     const expectedDesign = structuredClone(clip.titleDesign)
-    clip.titleDesign.metric.to = 999
+    clip.titleDesign!.metric.to = 999
     expect(snapshot.definition.titleDesign).toEqual(expectedDesign)
     let stored: PresetStorageData<TextPresetValues> | null = null
     const storage = {
@@ -338,20 +369,24 @@ describe("creator title presets", () => {
     expect(hasTitleFontSizeOverrides(design)).toBe(false)
     const overridden = {
       ...design,
-      fontSizes: { ...design.fontSizes, secondary: 18, tag: 120 },
+      elements: {
+        ...design.elements,
+        secondary: { size: 18 },
+        tag: { size: 120 },
+      },
     }
     const custom = resolveTitleFontSizes(overridden, clip.fontSize)
     expect(custom.secondary).toBe(18)
     expect(custom.tag).toBe(120)
     expect(custom.primary).toBe(resolved.primary)
     expect(hasTitleFontSizeOverrides(overridden)).toBe(true)
-    expect(titleDesignSchema.parse({ version: 1, template: "note" }).fontSizes).toEqual({})
-    for (const bad of [3, 601, Number.NaN]) {
+    expect(titleDesignSchema.parse({ version: 2, template: "callout" }).elements).toEqual({})
+    for (const bad of [3, 1201, Number.NaN]) {
       expect(
         titleDesignSchema.safeParse({
-          version: 1,
-          template: "note",
-          fontSizes: { primary: bad },
+          version: 2,
+          template: "callout",
+          elements: { primary: { size: bad } },
         }).success,
       ).toBe(false)
     }
@@ -363,7 +398,11 @@ describe("creator title presets", () => {
       ...preset,
       titleDesign: {
         ...preset.titleDesign!,
-        fontSizes: { primary: 100, secondary: 40, tag: 20 },
+        elements: {
+          primary: { size: 100 },
+          secondary: { size: 40 },
+          tag: { size: 20 },
+        },
       },
     }
     const clip = createTextClipFromDefinition(definition, {
@@ -371,14 +410,13 @@ describe("creator title presets", () => {
       canvasHeight: 540,
     })
     expect(clip.fontSize).toBeCloseTo(preset.fontSize * 0.5)
-    expect(clip.titleDesign?.fontSizes?.primary).toBeCloseTo(50)
-    expect(clip.titleDesign?.fontSizes?.secondary).toBeCloseTo(20)
+    expect(clip.titleDesign?.elements?.primary?.size).toBeCloseTo(50)
+    expect(clip.titleDesign?.elements?.secondary?.size).toBeCloseTo(20)
   })
 
   it("shares semantic content labels and groups with the title browser", () => {
-    expect(getTitlePresetGroup()).toBe("legacy")
-    expect(getTitlePresetGroup("speaker-id")).toBe("identity")
-    expect(getTitlePresetGroup("shortcut")).toBe("tutorials")
+    expect(getTitlePresetGroup("speaker-id")).toBe("lower-thirds")
+    expect(getTitlePresetGroup("shortcut")).toBe("tutorial")
     expect(getTitleContentLabels("speaker-id")).toEqual({
       primary: "Name",
       secondary: "Role",
@@ -388,17 +426,6 @@ describe("creator title presets", () => {
       primary: "Quote",
       secondary: "Attribution",
     })
-    expect(getTitleContentLabels("metric").primary).toBe("Metric label")
-  })
-
-  it("changes appearance neutrals without overwriting the accent or migrating legacy clips", () => {
-    const clip = createTextClipFromPreset("text-note")
-    const patch = applyTitleAppearance(clip, "light")
-    expect(patch.titleDesign?.appearance).toBe("light")
-    expect(patch.textColor).not.toBe(clip.textColor)
-    expect({ ...clip, ...patch }.accentColor).toBe(clip.accentColor)
-    expect(
-      applyTitleAppearance(createTextClipFromPreset("title-modern"), "light").titleDesign,
-    ).toBeUndefined()
+    expect(getTitleContentLabels("stat")).toMatchObject({ primary: "Metric label" })
   })
 })

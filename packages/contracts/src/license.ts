@@ -24,6 +24,7 @@ export const PRO_FEATURE_KEYS = [
   "camera-cutout",
   "face-tracking",
   "hide-during-silence",
+  "custom-looks",
 ] as const
 
 export const proFeatureKeySchema = z.enum(PRO_FEATURE_KEYS)
@@ -108,6 +109,10 @@ export const PRO_FEATURES: Record<ProFeatureKey, ProFeature> = {
   "hide-during-silence": {
     label: "Hide camera during silence",
     description: "Automatically hide the camera bubble while you are not speaking.",
+  },
+  "custom-looks": {
+    label: "Custom looks",
+    description: "Save your own whole-look presets. Built-in looks stay free.",
   },
 }
 

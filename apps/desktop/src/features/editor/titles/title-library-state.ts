@@ -5,12 +5,14 @@ import { getTextPresetRegistry } from "../presets/preset-store"
 
 export const TITLE_RECENTS_KEY = "recordforge:title-recents:v1"
 export const MAX_TITLE_RECENTS = 20
+// Matches TITLE_PRESET_GROUPS in editor-core (titles v2 catalog categories).
 export const TITLE_GROUPS = [
-  "essentials",
   "openers",
-  "identity",
-  "tutorials",
-  "highlights",
+  "lower-thirds",
+  "social",
+  "tutorial",
+  "data",
+  "outro",
   "legacy",
 ] as const
 export type TitleCollection = "all" | "favorites" | "recent" | "custom"

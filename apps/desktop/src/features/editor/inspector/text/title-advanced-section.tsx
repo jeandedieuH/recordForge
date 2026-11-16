@@ -16,21 +16,32 @@ export function TitleAdvancedSection({
         <>
           <TitleSlider
             label="Letter spacing"
-            value={design.letterSpacing}
+            value={design.typography.letterSpacing}
             min={-0.05}
-            max={0.2}
+            max={0.3}
             step={0.01}
             unit="em"
-            onChange={(letterSpacing) => onChange({ titleDesign: { ...design, letterSpacing } })}
+            onChange={(letterSpacing) =>
+              onChange({
+                titleDesign: {
+                  ...design,
+                  typography: { ...design.typography, letterSpacing },
+                },
+              })
+            }
           />
           <TitleSlider
             label="Line height"
-            value={design.lineHeight}
-            min={0.9}
-            max={1.8}
+            value={design.typography.lineHeight}
+            min={0.8}
+            max={2}
             step={0.05}
             unit="×"
-            onChange={(lineHeight) => onChange({ titleDesign: { ...design, lineHeight } })}
+            onChange={(lineHeight) =>
+              onChange({
+                titleDesign: { ...design, typography: { ...design.typography, lineHeight } },
+              })
+            }
           />
         </>
       ) : (

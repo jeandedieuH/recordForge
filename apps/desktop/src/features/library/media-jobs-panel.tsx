@@ -7,7 +7,7 @@ interface MediaJobsPanelProps {
   recordingId?: string
 }
 
-// Show active media preparation jobs.
+// Show active media preparation, export, and camera-AI jobs.
 export function MediaJobsPanel({ recordingId }: MediaJobsPanelProps) {
   const startListening = useJobsStore((state) => state.startListening)
   const stopListening = useJobsStore((state) => state.stopListening)
@@ -31,11 +31,16 @@ export function MediaJobsPanel({ recordingId }: MediaJobsPanelProps) {
 
   const visibleJobs = useMemo(
     () =>
-      jobs.filter(
-        (j) =>
-          (!recordingId || j.recordingId === recordingId) &&
-          (j.status === "pending" || j.status === "running" || j.status === "failed"),
-      ),
+      jobs.filter((job) => {
+        if (recordingId && job.recordingId !== recordingId) return false
+        // Camera AI keeps its durable row after a failure, but the editor
+        // inspector owns that error surface; the library only shows it while
+        // it can still be cancelled.
+        if (job.kind === "camera_ai") {
+          return job.status === "pending" || job.status === "running"
+        }
+        return job.status === "pending" || job.status === "running" || job.status === "failed"
+      }),
     [jobs, recordingId],
   )
 
@@ -43,11 +48,13 @@ export function MediaJobsPanel({ recordingId }: MediaJobsPanelProps) {
 
   return (
     <div className="space-y-3 rounded-lg border border-border bg-muted p-4">
-      <h3 className="text-sm font-medium">Media preparation</h3>
+      <h3 className="text-sm font-medium">Background jobs</h3>
       {visibleJobs.map((job) => (
         <div key={job.id} className="space-y-1.5">
           <div className="flex items-center justify-between text-sm">
-            <span className="capitalize text-foreground/80">{job.stage}</span>
+            <span className="capitalize text-foreground/80">
+              {job.kind === "camera_ai" ? `Camera AI · ${job.stage}` : job.stage}
+            </span>
             <span className="text-foreground/60">{Math.round(job.progress * 100)}%</span>
           </div>
           <Progress value={job.progress} />

@@ -42,6 +42,16 @@ export function cancelCameraAi(jobId: string): Promise<void> {
   return invokeValidated("cancel_camera_ai", { jobId })
 }
 
+/** Whether a rejected `analyzeCameraAi` call was cancelled by the user. */
+export function isCameraAiCancelled(error: unknown): boolean {
+  if (error && typeof error === "object") {
+    const { code, message } = error as { code?: unknown; message?: unknown }
+    if (code === "camera_ai_cancelled") return true
+    if (typeof message === "string" && message.includes("camera_ai_cancelled")) return true
+  }
+  return typeof error === "string" && error.includes("camera_ai_cancelled")
+}
+
 export function getCameraAiArtifacts(
   recordingId: string,
   streamIndex?: number,
@@ -68,6 +78,22 @@ export async function readCameraFaceTrack(
 
 export function readCameraLut(recordingId: string, assetId: string): Promise<string> {
   return invokeValidated("read_camera_lut", { recordingId, assetId })
+}
+
+// A completed run writes deterministic matte/face-track paths; the inspector and
+// the editor preview are separate surfaces, so the finished run notifies the
+// preview to reload them.
+const artifactListeners = new Set<() => void>()
+
+export function notifyCameraAiArtifactsChanged(): void {
+  for (const listener of artifactListeners) listener()
+}
+
+export function onCameraAiArtifactsChanged(listener: () => void): () => void {
+  artifactListeners.add(listener)
+  return () => {
+    artifactListeners.delete(listener)
+  }
 }
 
 export function onCameraAiProgress(

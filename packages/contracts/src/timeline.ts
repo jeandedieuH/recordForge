@@ -654,13 +654,20 @@ export const annotationClipSchema = timelineClipBaseSchema.extend({
 
 export type AnnotationClip = z.infer<typeof annotationClipSchema>
 
-// Text / Title preset categories and backdrop styling options.
+// Text / Title preset categories and backdrop styling options. The v2 browser
+// groups presets into openers/social/tutorial/data/outro; the original values
+// stay valid so custom presets saved before M5 keep loading.
 export const titlePresetCategorySchema = z.enum([
   "title",
   "lower-third",
   "callout",
   "badge",
   "minimal",
+  "openers",
+  "social",
+  "tutorial",
+  "data",
+  "outro",
 ])
 export type TitlePresetCategory = z.infer<typeof titlePresetCategorySchema>
 

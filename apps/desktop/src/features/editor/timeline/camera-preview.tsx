@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import type {
   CameraClip,
+  CameraColor,
   CameraLayoutSegment,
   ClipTransform,
   FaceTrack,
   MediaVideoTrackOutput,
   TimelineClip,
 } from "@recordforge/contracts"
+import { cameraColorSchema } from "@recordforge/contracts"
 import {
   buildPreviewSegments,
   faceCropAt,
@@ -21,8 +23,14 @@ import { BorderOverlay } from "../canvas/border-overlay"
 import { useDualMediaSlots } from "./playback/use-dual-media-slots"
 import { usePlayheadMs } from "./use-playback-state"
 import { useTimelineStore } from "../../../stores/timeline-store"
-import { readCameraFaceTrack, readCameraLut } from "../../../lib/camera-ai"
+import {
+  getCameraAiArtifacts,
+  onCameraAiArtifactsChanged,
+  readCameraFaceTrack,
+  readCameraLut,
+} from "../../../lib/camera-ai"
 import { CameraLutCanvas } from "../canvas/camera-lut-canvas"
+import { centerCoverCrop, type NormalizedCrop } from "../canvas/camera-cutout"
 
 interface CameraPreviewProps {
   clips: CameraClip[]
@@ -37,6 +45,8 @@ interface CameraPreviewProps {
   canvasPadding?: number
   /** Camera layout lane (#5); an active window overrides the clip transform. */
   cameraLayouts?: CameraLayoutSegment[]
+  /** Image asset URLs, used for the cutout background-image mode. */
+  assetUrls?: Readonly<Record<string, string>>
   /** CSS px per canvas px in the preview, so border widths match the render. */
   previewScale?: number
   selectedClipId?: string | null
@@ -52,6 +62,9 @@ interface CameraPreviewProps {
 // stays visible instead of the canvas drawing a black frame.
 const WEBGL2_AVAILABLE =
   typeof document !== "undefined" && Boolean(document.createElement("canvas").getContext("webgl2"))
+
+// Cutout without a grade still needs a colour object for the shared LUT path.
+const DEFAULT_CAMERA_COLOR: CameraColor = cameraColorSchema.parse({})
 
 interface CameraGesture {
   clipId: string
@@ -191,6 +204,7 @@ interface CameraStreamSurfaceProps {
   canvasHeight: number
   canvasPadding?: number
   cameraLayouts?: CameraLayoutSegment[]
+  assetUrls?: Readonly<Record<string, string>>
   previewScale?: number
   selectedClipId?: string | null
   onSelectClip?: (clipId: string) => void
@@ -211,6 +225,7 @@ function CameraStreamSurface({
   canvasHeight,
   canvasPadding = 0,
   cameraLayouts,
+  assetUrls = {},
   previewScale = 1,
   selectedClipId,
   onSelectClip,
@@ -281,6 +296,14 @@ function CameraStreamSurface({
   // as the render plan. The track is loaded once per clip; the transform below
   // then follows the playhead.
   const recordingId = useTimelineStore((state) => state.project?.recordingId ?? state.recording?.id)
+  // A finished Camera AI run rewrites deterministic artifact paths; the bump
+  // reloads the matte and face track without remounting the surface. Starting
+  // from the mount time also avoids a stale asset-protocol cache.
+  const [artifactsVersion, setArtifactsVersion] = useState(() => Date.now())
+  useEffect(
+    () => onCameraAiArtifactsChanged(() => setArtifactsVersion((version) => version + 1)),
+    [],
+  )
   const [faceTrack, setFaceTrack] = useState<FaceTrack | null>(null)
   useEffect(() => {
     if (!recordingId || !activeClip?.faceTracking?.enabled) {
@@ -298,7 +321,64 @@ function CameraStreamSurface({
     return () => {
       cancelled = true
     }
-  }, [recordingId, activeClip?.id, activeClip?.streamIndex, activeClip?.faceTracking?.enabled])
+  }, [
+    recordingId,
+    activeClip?.id,
+    activeClip?.streamIndex,
+    activeClip?.faceTracking?.enabled,
+    artifactsVersion,
+  ])
+
+  // Cutout (#4b): the matte is a separate grayscale derivative aligned to the
+  // same source time as the camera track, so it drives a second dual-slot pair.
+  const matteSlot0 = useRef<HTMLVideoElement>(null)
+  const matteSlot1 = useRef<HTMLVideoElement>(null)
+  const matteSlots = useMemo(
+    () =>
+      [matteSlot0, matteSlot1] as [
+        React.RefObject<HTMLVideoElement | null>,
+        React.RefObject<HTMLVideoElement | null>,
+      ],
+    [],
+  )
+  const [matteUrl, setMatteUrl] = useState<string | null>(null)
+  const cutoutEnabled = activeClip?.cutout?.enabled === true
+  useEffect(() => {
+    if (!recordingId || !cutoutEnabled) {
+      setMatteUrl(null)
+      return
+    }
+    let cancelled = false
+    void getCameraAiArtifacts(recordingId, activeClip?.streamIndex ?? 0)
+      .then((artifacts) => {
+        if (cancelled) return
+        const base = artifacts.mattePath ? toAssetUrl(artifacts.mattePath) : null
+        // Re-running Camera AI rewrites the same deterministic path; the version
+        // keeps the media elements from serving the previous matte.
+        setMatteUrl(base ? `${base}${base.includes("?") ? "&" : "?"}v=${artifactsVersion}` : null)
+      })
+      .catch(() => {
+        if (!cancelled) setMatteUrl(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [recordingId, cutoutEnabled, activeClip?.streamIndex, artifactsVersion])
+
+  const { activeSlot: activeMatteSlot } = useDualMediaSlots({
+    segments,
+    playheadMs,
+    isPlaying,
+    playbackRate,
+    frameMs,
+    kind: "camera",
+    enabled: Boolean(matteUrl) && segments.length > 0,
+    slots: matteSlots,
+    sourceUrlOf: () => matteUrl,
+    onSync: (_slot, _segment: PreviewSegment | null, element) => {
+      element.muted = true
+    },
+  })
 
   const [lutCubeText, setLutCubeText] = useState<string | null>(null)
   useEffect(() => {
@@ -393,6 +473,28 @@ function CameraStreamSurface({
           height: crop.height / sourceHeight,
         }
       : null
+  const cutout = activeClip?.cutout
+  // The matte must exist before the canvas can hide the plain camera video;
+  // until then the preview keeps the current (ungraded but visible) frame.
+  const cutoutActive = Boolean(cutout?.enabled && matteUrl && WEBGL2_AVAILABLE)
+  const useCanvas = graded || cutoutActive
+  const backgroundImageUrl =
+    cutout?.background === "image" && cutout.imageAssetId
+      ? (assetUrls[cutout.imageAssetId] ?? null)
+      : null
+  // The plain surface is `object-cover` without a crop and `object-fill` with
+  // one; the canvas reproduces that framing so grading/cutout stay aligned.
+  const displayCrop: NormalizedCrop =
+    cropNormalized ??
+    (() => {
+      const sourceW = group.width ?? naturalDimensions?.width ?? 0
+      const sourceH = group.height ?? naturalDimensions?.height ?? 0
+      const targetAspect = transform.width / Math.max(1, transform.height)
+      return centerCoverCrop(
+        sourceW > 0 && sourceH > 0 ? sourceW / sourceH : targetAspect,
+        targetAspect,
+      )
+    })()
   const borderColor = mixBorderColor(transform.borderColor, transform.borderOpacity)
   const borderStyle = transform.borderStyle ?? "solid"
   // Solid keeps the CSS border; every richer treatment needs the SVG ring so a
@@ -593,7 +695,7 @@ function CameraStreamSurface({
             top: `${cropTop}%`,
             width: `${cropVideoWidth}%`,
             height: `${cropVideoHeight}%`,
-            opacity: graded ? 0 : 1,
+            opacity: useCanvas ? 0 : 1,
             visibility: activeSlot === 0 ? "visible" : "hidden",
           }}
         />
@@ -611,16 +713,39 @@ function CameraStreamSurface({
             top: `${cropTop}%`,
             width: `${cropVideoWidth}%`,
             height: `${cropVideoHeight}%`,
-            opacity: graded ? 0 : 1,
+            opacity: useCanvas ? 0 : 1,
             visibility: activeSlot === 1 ? "visible" : "hidden",
           }}
         />
-        {graded ? (
+        {/* Matte slots mirror the camera slots; only the canvas samples them. */}
+        <video
+          ref={matteSlot0}
+          muted
+          playsInline
+          preload="auto"
+          aria-hidden
+          className="pointer-events-none absolute top-0 left-0 h-px w-px opacity-0"
+        />
+        <video
+          ref={matteSlot1}
+          muted
+          playsInline
+          preload="auto"
+          aria-hidden
+          className="pointer-events-none absolute top-0 left-0 h-px w-px opacity-0"
+        />
+        {useCanvas ? (
           <CameraLutCanvas
             videoRef={activeSlot === 0 ? slot0 : slot1}
-            color={color}
+            matteVideoRef={activeMatteSlot === 0 ? matteSlot0 : matteSlot1}
+            matteEnabled={cutoutActive}
+            color={color ?? DEFAULT_CAMERA_COLOR}
             cubeText={lutCubeText}
-            crop={cropNormalized}
+            crop={displayCrop}
+            cutout={cutoutActive ? cutout : null}
+            backgroundImageUrl={backgroundImageUrl}
+            displayWidth={transform.width}
+            displayHeight={transform.height}
             className="pointer-events-none absolute inset-0 size-full"
           />
         ) : null}
@@ -792,6 +917,7 @@ export function CameraPreview({
   canvasHeight,
   canvasPadding,
   cameraLayouts,
+  assetUrls,
   previewScale,
   selectedClipId,
   onSelectClip,
@@ -814,6 +940,7 @@ export function CameraPreview({
           canvasHeight={canvasHeight}
           canvasPadding={canvasPadding}
           cameraLayouts={cameraLayouts}
+          assetUrls={assetUrls}
           previewScale={previewScale}
           selectedClipId={selectedClipId}
           onSelectClip={onSelectClip}
