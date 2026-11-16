@@ -58,10 +58,9 @@ interface CameraPreviewProps {
   ) => void
 }
 
-// Colour preview needs WebGL2; when it is unavailable the plain camera video
-// stays visible instead of the canvas drawing a black frame.
-const WEBGL2_AVAILABLE =
-  typeof document !== "undefined" && Boolean(document.createElement("canvas").getContext("webgl2"))
+// Colour preview needs WebGL2; when it is unavailable CameraLutCanvas reports
+// onUnavailable and the plain camera video stays visible instead of a black
+// frame — the real per-canvas context check replaced a module-level probe.
 
 // Cutout without a grade still needs a colour object for the shared LUT path.
 const DEFAULT_CAMERA_COLOR: CameraColor = cameraColorSchema.parse({})
@@ -399,6 +398,34 @@ function CameraStreamSurface({
       cancelled = true
     }
   }, [recordingId, activeClip?.color?.lutId])
+  const color = activeClip?.color
+  const graded = Boolean(
+    color &&
+    (color.lutId ||
+      color.exposure !== 0 ||
+      color.contrast !== 0 ||
+      color.saturation !== 0 ||
+      color.temperature !== 0 ||
+      color.tint !== 0),
+  )
+  const cutout = activeClip?.cutout
+  // The matte must exist before the canvas can hide the plain camera video;
+  // until then the preview keeps the current (ungraded but visible) frame.
+  const cutoutActive = Boolean(cutout?.enabled && matteUrl)
+  // The canvas reports its own health: the plain videos stay visible until it
+  // proves it can draw, and come back if the GL pipeline dies (context loss or
+  // persistent upload failures), so grading can never blank the bubble.
+  const [canvasLive, setCanvasLive] = useState(false)
+  const [canvasFailed, setCanvasFailed] = useState(false)
+  const useCanvas = (graded || cutoutActive) && !canvasFailed
+  // A new grade/cutout input is a new pipeline: retry after a fatal failure.
+  useEffect(() => {
+    setCanvasFailed(false)
+  }, [color, cutoutActive, lutCubeText])
+  // While the canvas is away the plain video must cover the bubble again.
+  useEffect(() => {
+    if (!useCanvas) setCanvasLive(false)
+  }, [useCanvas])
   // Camera layout lane (#5): an active window owns the camera geometry, so the
   // preview shows exactly what the export plan will render.
   const layoutPose =
@@ -453,17 +480,6 @@ function CameraStreamSurface({
   const cropTop = crop ? -(crop.y / cropHeight) * 100 : 0
   const cropVideoWidth = crop ? (sourceWidth / cropWidth) * 100 : 100
   const cropVideoHeight = crop ? (sourceHeight / cropHeight) * 100 : 100
-  const color = activeClip?.color
-  const graded = Boolean(
-    WEBGL2_AVAILABLE &&
-    color &&
-    (color.lutId ||
-      color.exposure !== 0 ||
-      color.contrast !== 0 ||
-      color.saturation !== 0 ||
-      color.temperature !== 0 ||
-      color.tint !== 0),
-  )
   const cropNormalized =
     crop && sourceWidth > 0 && sourceHeight > 0
       ? {
@@ -473,11 +489,6 @@ function CameraStreamSurface({
           height: crop.height / sourceHeight,
         }
       : null
-  const cutout = activeClip?.cutout
-  // The matte must exist before the canvas can hide the plain camera video;
-  // until then the preview keeps the current (ungraded but visible) frame.
-  const cutoutActive = Boolean(cutout?.enabled && matteUrl && WEBGL2_AVAILABLE)
-  const useCanvas = graded || cutoutActive
   const backgroundImageUrl =
     cutout?.background === "image" && cutout.imageAssetId
       ? (assetUrls[cutout.imageAssetId] ?? null)
@@ -686,6 +697,10 @@ function CameraStreamSurface({
           muted
           playsInline
           preload="auto"
+          // The asset protocol is a different origin; anonymous CORS keeps the
+          // frames origin-clean so the WebGL canvas can upload them (a tainted
+          // video makes texImage2D throw and blanked the bubble).
+          crossOrigin="anonymous"
           className={cn(
             "pointer-events-none absolute max-h-none max-w-none",
             crop ? "object-fill" : "object-cover",
@@ -695,7 +710,7 @@ function CameraStreamSurface({
             top: `${cropTop}%`,
             width: `${cropVideoWidth}%`,
             height: `${cropVideoHeight}%`,
-            opacity: useCanvas ? 0 : 1,
+            opacity: useCanvas && canvasLive ? 0 : 1,
             visibility: activeSlot === 0 ? "visible" : "hidden",
           }}
         />
@@ -704,6 +719,7 @@ function CameraStreamSurface({
           muted
           playsInline
           preload="auto"
+          crossOrigin="anonymous"
           className={cn(
             "pointer-events-none absolute max-h-none max-w-none",
             crop ? "object-fill" : "object-cover",
@@ -713,7 +729,7 @@ function CameraStreamSurface({
             top: `${cropTop}%`,
             width: `${cropVideoWidth}%`,
             height: `${cropVideoHeight}%`,
-            opacity: useCanvas ? 0 : 1,
+            opacity: useCanvas && canvasLive ? 0 : 1,
             visibility: activeSlot === 1 ? "visible" : "hidden",
           }}
         />
@@ -723,6 +739,7 @@ function CameraStreamSurface({
           muted
           playsInline
           preload="auto"
+          crossOrigin="anonymous"
           aria-hidden
           className="pointer-events-none absolute top-0 left-0 h-px w-px opacity-0"
         />
@@ -731,6 +748,7 @@ function CameraStreamSurface({
           muted
           playsInline
           preload="auto"
+          crossOrigin="anonymous"
           aria-hidden
           className="pointer-events-none absolute top-0 left-0 h-px w-px opacity-0"
         />
@@ -747,6 +765,11 @@ function CameraStreamSurface({
             displayWidth={transform.width}
             displayHeight={transform.height}
             className="pointer-events-none absolute inset-0 size-full"
+            onReady={() => setCanvasLive(true)}
+            onUnavailable={() => {
+              setCanvasFailed(true)
+              setCanvasLive(false)
+            }}
           />
         ) : null}
         {transform.borderWidth && borderStyle !== "solid" ? (

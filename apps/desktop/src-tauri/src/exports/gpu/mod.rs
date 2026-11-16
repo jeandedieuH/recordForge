@@ -280,44 +280,22 @@ pub(crate) fn effect_support(
             }
         }
 
-        // Motion blur (M2 #1): the cursor is exact (same Rust rasterizer), the
-        // zoom/pan taps are GPU-only.
-        if let Some(blur) = plan
-            .canvas
-            .as_ref()
-            .and_then(|canvas| canvas.motion_blur.as_ref())
-            .filter(|blur| blur.is_active())
+        // Camera layouts (#5): the FFmpeg graph animates the camera pose and
+        // screen rect per frame like the compositor, but the baked camera
+        // border/shadow plates cannot follow a moving rect, so they hide for
+        // the animated span — the same frames `posed` suppresses on GPU.
+        if !plan.camera_layouts.is_empty()
+            && plan.overlays.iter().any(|overlay| {
+                overlay.role.as_deref() == Some("camera")
+                    && (overlay.border_width.is_some_and(|width| width > 0.0)
+                        || overlay.shadow_enabled.unwrap_or(false))
+            })
         {
-            if blur.zoom > 0.0 || blur.pan > 0.0 {
-                downgrades.push(EffectDowngrade {
-                    effect: "motion-blur".into(),
-                    reason: "Rendered without zoom/pan motion blur: the compatibility renderer blurs the cursor only"
-                        .into(),
-                });
-            }
-        }
-
-        // Glass Loupe (M2 #2): the lens is not rendered on this renderer.
-        if plan
-            .zoom_segments
-            .iter()
-            .any(|segment| segment.enabled && segment.style.as_deref() == Some("loupe"))
-        {
-            downgrades.push(EffectDowngrade {
-                effect: "loupe-glass".into(),
-                reason:
-                    "Rendered without the Glass Loupe: this renderer keeps the frame at its zoom"
-                        .into(),
-            });
-        }
-
-        // Camera layouts (#5): the FFmpeg graph composites one static camera
-        // geometry, so an animated layout renders at the segment's dominant
-        // rect instead of moving.
-        if !plan.camera_layouts.is_empty() {
             downgrades.push(EffectDowngrade {
                 effect: "camera-layouts".into(),
-                reason: "Animated camera layouts render at a fixed rect on this renderer".into(),
+                reason:
+                    "Camera border and shadow hide during animated layout windows on this renderer"
+                        .into(),
             });
         }
 
@@ -353,8 +331,33 @@ pub(crate) fn effect_support(
 
 /// True when a side-by-side camera window (or a camera layout lane) moves the
 /// screen rect mid-timeline, so a static per-window plate cannot follow it.
+/// A camera layout only counts when its screen keyframes actually differ —
+/// among themselves or from the padding-inset base rect — mirroring the
+/// `layout_varies` gate in the filter graph; a PiP-only layout leaves the
+/// screen static.
 fn screen_rect_varies(plan: &RenderPlan, canvas: &super::cursor::RenderCanvas) -> bool {
-    if !plan.camera_layouts.is_empty() {
+    let base = (
+        canvas.padding as f64,
+        canvas.padding as f64,
+        (canvas.width as f64 - 2.0 * canvas.padding as f64).max(0.0),
+        (canvas.height as f64 - 2.0 * canvas.padding as f64).max(0.0),
+    );
+    let differs = |keyframe: &super::RenderLayoutKeyframe, rect: (f64, f64, f64, f64)| {
+        (keyframe.x - rect.0).abs() > 0.5
+            || (keyframe.y - rect.1).abs() > 0.5
+            || (keyframe.width - rect.2).abs() > 0.5
+            || (keyframe.height - rect.3).abs() > 0.5
+    };
+    if plan.camera_layouts.iter().any(|layout| {
+        layout.screen.as_ref().is_some_and(|keyframes| {
+            keyframes.len() > 1
+                && keyframes.iter().any(|keyframe| {
+                    let first = &keyframes[0];
+                    differs(keyframe, (first.x, first.y, first.width, first.height))
+                        || differs(keyframe, base)
+                })
+        })
+    }) {
         return true;
     }
     let windows = super::merge_ms_windows(
@@ -1089,13 +1092,13 @@ pub(crate) fn render_timeline_on_gpu(
             let blur = if bypass {
                 None
             } else {
-                motion_blur_strip(&plan.zoom_segments, canvas, output_ms, plane, content)
+                motion_blur_strip(&plan.zoom_segments, canvas, output_ms, content)
             };
             let request = compositor::FrameRequest {
                 crop: if bypass {
                     FULL_FRAME
                 } else {
-                    zoom_crop(&state, plane.0, plane.1, content)
+                    zoom_crop(&state, width, height, content)
                 },
                 dest,
                 has_screen,
@@ -1948,27 +1951,9 @@ fn mask_config(
 
 /// Parse the canvas background into sRGB floats. Gradients and images arrive
 /// through the plate, so this only has to handle the solid forms the plate
-/// generator short-circuits on (`#rgb`, `#rrggbb`, `rgb()`, `rgba()`).
+/// generator short-circuits on — every CSS color `safe_filter_color` resolves.
 fn solid_background(value: &str) -> [f32; 3] {
-    let trimmed = value.trim();
-    if trimmed.starts_with("rgb") {
-        if let Some(start) = trimmed.find('(') {
-            if let Some(end) = trimmed[start..].find(')') {
-                let parts: Vec<f32> = trimmed[start + 1..start + end]
-                    .split(',')
-                    .filter_map(|part| part.trim().parse::<f32>().ok())
-                    .collect();
-                if parts.len() >= 3 {
-                    return [
-                        (parts[0] / 255.0).clamp(0.0, 1.0),
-                        (parts[1] / 255.0).clamp(0.0, 1.0),
-                        (parts[2] / 255.0).clamp(0.0, 1.0),
-                    ];
-                }
-            }
-        }
-    }
-    let color = super::parse_color_hex(&super::safe_filter_color(trimmed), 1.0);
+    let color = super::parse_color_hex(&super::safe_filter_color(value.trim()), 1.0);
     [color.red(), color.green(), color.blue()]
 }
 
@@ -1980,10 +1965,15 @@ fn solid_background(value: &str) -> [f32; 3] {
 /// `content` is the decoded screen rect: the decode pass fits the screen into
 /// that rect, and the compatibility graph zooms the *fitted* stream (scale to
 /// `screen_w`×`screen_h`, then `zoompan`), so the crop space is that rect.
+/// `canvas_width`/`canvas_height` are the logical canvas the `state.crop_*`
+/// fields are expressed in — NOT the decoded plane size. The plane is larger
+/// than the canvas whenever zoom clarity (#3) upscales it, and passing the
+/// plane dims here would inflate the zoom factor and pull the crop toward the
+/// top-left, cropping the right/bottom of the frame.
 fn zoom_crop(
     state: &ZoomTransformState,
-    width: u32,
-    height: u32,
+    canvas_width: u32,
+    canvas_height: u32,
     content: (f64, f64, f64, f64),
 ) -> compositor::Crop {
     let content_w = content.2.max(2.0);
@@ -1992,8 +1982,8 @@ fn zoom_crop(
         (state.crop_x, state.crop_y, state.crop_w, state.crop_h),
         content_w,
         content_h,
-        width as f64,
-        height as f64,
+        canvas_width as f64,
+        canvas_height as f64,
         1,
         1,
     );
@@ -2015,7 +2005,6 @@ fn motion_blur_strip(
     zoom_segments: &[super::RenderPlanZoomSegment],
     canvas: &super::cursor::RenderCanvas,
     output_ms: f64,
-    plane: (u32, u32),
     content: (f64, f64, f64, f64),
 ) -> Option<compositor::CropStrip> {
     let blur = canvas
@@ -2042,8 +2031,8 @@ fn motion_blur_strip(
         canvas.padding,
         output_ms + half,
     );
-    let before_crop = zoom_crop(&before, plane.0, plane.1, content);
-    let after_crop = zoom_crop(&after, plane.0, plane.1, content);
+    let before_crop = zoom_crop(&before, canvas.width, canvas.height, content);
+    let after_crop = zoom_crop(&after, canvas.width, canvas.height, content);
 
     let zoom_weight = blur.zoom.clamp(0.0, 1.0);
     let pan_weight = blur.pan.clamp(0.0, 1.0);
@@ -3253,6 +3242,40 @@ mod tests {
                 height: 1080
             }
         );
+    }
+
+    /// The decoded plane can be larger than the canvas when zoom clarity (#3)
+    /// upscales it, but `state.crop_*` stays in canvas px. `zoom_crop` must map
+    /// that canvas crop onto the plane's content rect — feeding the plane dims
+    /// in as the canvas size inflates the zoom factor and drags the crop toward
+    /// the top-left, which cropped the right side of exported frames.
+    #[test]
+    fn zoom_crop_maps_canvas_coordinates_into_the_detail_plane() {
+        // A 1.25x zoom anchored on the right half of a 1920x1080 canvas.
+        let state = ZoomTransformState {
+            progress: 1.0,
+            scale: 1.25,
+            crop_x: 384.0,
+            crop_y: 216.0,
+            crop_w: 1536.0,
+            crop_h: 864.0,
+        };
+        // Detail plane content rect: the fitted picture at 1.25x detail scale.
+        let content = (0.0, 0.0, 2400.0, 1350.0);
+        let crop = zoom_crop(&state, 1920, 1080, content);
+        // zoom = 1920/1536 = 1.25 → the plate crop covers the same fraction:
+        // w = 2400/1.25 = 1920 centred at (384+768)/1920 * 2400 = 1440 → x = 480.
+        // The right edge stays at the content edge, matching the preview.
+        assert_eq!(
+            crop,
+            compositor::Crop {
+                x: 480,
+                y: 270,
+                width: 1920,
+                height: 1080
+            }
+        );
+        assert_eq!(crop.x + crop.width, 2400);
     }
 
     /// The transition crop must track `zoompan`'s per-frame integer crop:

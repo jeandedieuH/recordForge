@@ -869,6 +869,10 @@ export function TimelineView({
           <video
             key={`${mediaUrl}-${slot}`}
             ref={screenSlots[slot]}
+            // Same asset-protocol origin fix as the camera slots: keeps the
+            // frames origin-clean for canvas/WebGL samplers (mask shader). Set
+            // before `src` so the resource fetch runs in CORS mode.
+            crossOrigin="anonymous"
             src={mediaUrl}
             {...playbackVideoProps}
             className="absolute inset-0 size-full object-contain cursor-pointer"

@@ -1348,26 +1348,269 @@ fn collect_zoompan_segment_exprs(
     segment_exprs
 }
 
-pub(crate) fn build_zoompan_expressions(
+/// The unwrapped crop triple behind `build_zoompan_expressions`: `z` is the
+/// zoom factor and `cx`/`cy` the crop *centre* in screen-plate pixels before
+/// the `x`/`y` top-left clamp. The motion-blur tap branches need the centres
+/// (they blend the trajectory before clamping), so the wrap stays separate.
+pub(crate) fn build_zoompan_crop_expressions(
     plan: &RenderPlan,
     canvas: &cursor::RenderCanvas,
     screen_w: f64,
     screen_h: f64,
 ) -> (String, String, String) {
     let segment_exprs = collect_zoompan_segment_exprs(plan, canvas, screen_w, screen_h);
-    let (z_expr, cx_expr, cy_expr) = build_zoompan_segment_exprs(
+    build_zoompan_segment_exprs(
         &segment_exprs,
         &(
             "1.0".to_string(),
             compact_num(screen_w / 2.0),
             compact_num(screen_h / 2.0),
         ),
-    );
+    )
+}
 
+/// Turn crop-centre expressions into zoompan's `x`/`y` top-left expressions.
+/// `zoom` inside is bound by zoompan to the branch's own evaluated `z`, so the
+/// same wrap serves the sharp stage and every blur tap.
+pub(crate) fn wrap_zoompan_xy(cx_expr: &str, cy_expr: &str) -> (String, String) {
     let x_expr = format!("if(lte(zoom,1.001),0,max(0,min(iw-iw/zoom,({cx_expr})-(iw/zoom)/2)))");
     let y_expr = format!("if(lte(zoom,1.001),0,max(0,min(ih-ih/zoom,({cy_expr})-(ih/zoom)/2)))");
+    (x_expr, y_expr)
+}
+
+/// Kept for the expression tests (and as the readable form of the crop+wrap
+/// pair); the live zoom stage composes `build_zoompan_crop_expressions` and
+/// `wrap_zoompan_xy` directly so blur taps can reuse the centres.
+#[allow(dead_code)]
+pub(crate) fn build_zoompan_expressions(
+    plan: &RenderPlan,
+    canvas: &cursor::RenderCanvas,
+    screen_w: f64,
+    screen_h: f64,
+) -> (String, String, String) {
+    let (z_expr, cx_expr, cy_expr) =
+        build_zoompan_crop_expressions(plan, canvas, screen_w, screen_h);
+    let (x_expr, y_expr) = wrap_zoompan_xy(&cx_expr, &cy_expr);
 
     (z_expr, x_expr, y_expr)
+}
+
+/// Retarget a zoompan expression to a frame time `offset_s` seconds away: the
+/// only time-varying token the expression builder emits is `it` (the input
+/// timestamp), so a whole-identifier replace shifts the sampled crop — the
+/// trick behind the motion-blur shutter taps.
+pub(crate) fn shift_zoompan_time(expr: &str, offset_s: f64) -> String {
+    if offset_s.abs() < 1e-9 {
+        return expr.to_string();
+    }
+    let replacement = if offset_s > 0.0 {
+        format!("(it+{})", compact_num(offset_s))
+    } else {
+        format!("(it-{})", compact_num(-offset_s))
+    };
+    let mut out = String::with_capacity(expr.len() + 8);
+    let is_ident = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+    let bytes = expr.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'i'
+            && bytes.get(i + 1) == Some(&b't')
+            && (i == 0 || !is_ident(bytes[i - 1]))
+            && bytes.get(i + 2).is_none_or(|next| !is_ident(*next))
+        {
+            out.push_str(&replacement);
+            i += 2;
+        } else {
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Shutter settings for zoom/pan motion blur (M2 #1) shared by both renderers:
+/// `half_ms` is half the shutter window, and the two weights scale the size
+/// (zoom) and centre (pan) components of the swept crop independently — the
+/// same split `motion_blur_strip` applies on the GPU.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MotionBlurParams {
+    pub half_ms: f64,
+    pub zoom_weight: f64,
+    pub pan_weight: f64,
+}
+
+/// `None` when the plan has no active zoom/pan blur — the sharp zoom path is
+/// emitted unchanged. `blur.cursor` is rasterizer work and never reaches here.
+pub(crate) fn motion_blur_params(canvas: &cursor::RenderCanvas) -> Option<MotionBlurParams> {
+    let blur = canvas.motion_blur.filter(|blur| blur.is_active())?;
+    let shutter = blur.zoom.max(blur.pan).clamp(0.0, 1.0);
+    if shutter <= 0.0 {
+        return None;
+    }
+    Some(MotionBlurParams {
+        half_ms: 1000.0 / canvas.fps.max(1) as f64 * shutter / 2.0,
+        zoom_weight: blur.zoom.clamp(0.0, 1.0),
+        pan_weight: blur.pan.clamp(0.0, 1.0),
+    })
+}
+
+/// Samples a single frame's blur needs (0 = no movement → keep the sharp
+/// path). Mirrors `gpu::motion_blur_strip`: the crops at `t ± half_ms`, the
+/// weighted endpoints, and the two-pixels-per-tap rule — evaluated in the
+/// fitted-plate crop space the compatibility zoom stage samples.
+pub(crate) fn motion_blur_frame_taps(
+    zoom_segments: &[RenderPlanZoomSegment],
+    canvas: &cursor::RenderCanvas,
+    params: &MotionBlurParams,
+    output_ms: f64,
+    screen_w: f64,
+    screen_h: f64,
+) -> u32 {
+    let before = evaluate_zoom_transform(
+        zoom_segments,
+        canvas.width,
+        canvas.height,
+        canvas.padding,
+        (output_ms - params.half_ms).max(0.0),
+    );
+    let after = evaluate_zoom_transform(
+        zoom_segments,
+        canvas.width,
+        canvas.height,
+        canvas.padding,
+        output_ms + params.half_ms,
+    );
+    let canvas_w = canvas.width as f64;
+    let canvas_h = canvas.height as f64;
+    let before_crop = zoompan_integer_crop(
+        (before.crop_x, before.crop_y, before.crop_w, before.crop_h),
+        screen_w.max(1.0),
+        screen_h.max(1.0),
+        canvas_w,
+        canvas_h,
+        1,
+        1,
+    );
+    let after_crop = zoompan_integer_crop(
+        (after.crop_x, after.crop_y, after.crop_w, after.crop_h),
+        screen_w.max(1.0),
+        screen_h.max(1.0),
+        canvas_w,
+        canvas_h,
+        1,
+        1,
+    );
+
+    // The GPU weights the shutter's end crop: the zoom slider gates the width
+    // delta, the pan slider the centre delta. Reproduce that endpoint here so
+    // the tap count measures the same sweep.
+    let width_before = before_crop.2 as f64;
+    let width_after = width_before + (after_crop.2 as f64 - width_before) * params.zoom_weight;
+    let centre_before = (
+        before_crop.0 as f64 + before_crop.2 as f64 / 2.0,
+        before_crop.1 as f64 + before_crop.3 as f64 / 2.0,
+    );
+    let centre_after = (
+        centre_before.0
+            + (after_crop.0 as f64 + after_crop.2 as f64 / 2.0 - centre_before.0)
+                * params.pan_weight,
+        centre_before.1
+            + (after_crop.1 as f64 + after_crop.3 as f64 / 2.0 - centre_before.1)
+                * params.pan_weight,
+    );
+
+    let content_w = screen_w.max(2.0);
+    let content_h = screen_h.max(2.0);
+    let even = |value: f64| ((value.round() as u32) & !1).max(2);
+    let snapped = |width: f64, centre: (f64, f64)| -> (u32, u32, u32, u32) {
+        let w = even(width.min(content_w));
+        let aspect = content_h / content_w;
+        let h = even(w as f64 * aspect).min(even(content_h));
+        let x = (centre.0 - w as f64 / 2.0)
+            .round()
+            .clamp(0.0, (content_w - w as f64).max(0.0));
+        let y = (centre.1 - h as f64 / 2.0)
+            .round()
+            .clamp(0.0, (content_h - h as f64).max(0.0));
+        (x as u32, y as u32, w, h)
+    };
+    let start = snapped(width_before, centre_before);
+    let end = snapped(width_after, centre_after);
+
+    let sweep = (end.2 as f64 - start.2 as f64).abs().max(
+        ((end.0 as f64 + end.2 as f64 / 2.0 - start.0 as f64 - start.2 as f64 / 2.0).powi(2)
+            + (end.1 as f64 + end.3 as f64 / 2.0 - start.1 as f64 - start.3 as f64 / 2.0).powi(2))
+        .sqrt(),
+    );
+    ((sweep / 2.0).ceil() as u32).clamp(1, 16)
+}
+
+/// Worst-case tap count across `[first_frame, +frame_count)`. The caller caps
+/// it (`COMPAT_MAX_BLUR_TAPS`); the GPU reaches 16 because its taps are shader
+/// samples while each compat tap is a full `zoompan` branch.
+pub(crate) fn motion_blur_window_taps(
+    zoom_segments: &[RenderPlanZoomSegment],
+    canvas: &cursor::RenderCanvas,
+    params: &MotionBlurParams,
+    first_frame: u64,
+    frame_count: u64,
+    screen_w: f64,
+    screen_h: f64,
+) -> u32 {
+    let fps = canvas.fps.max(1) as f64;
+    (0..frame_count)
+        .map(|offset| {
+            motion_blur_frame_taps(
+                zoom_segments,
+                canvas,
+                params,
+                (first_frame + offset) as f64 * 1000.0 / fps,
+                screen_w,
+                screen_h,
+            )
+        })
+        .max()
+        .unwrap_or(1)
+}
+
+/// Compat cap on blur taps per branch: every tap is a full `zoompan` + `scale`
+/// chain, so five taps already cost 5× the sharp path on the swept frames.
+pub(crate) const COMPAT_MAX_BLUR_TAPS: u32 = 5;
+
+/// `z`/`x`/`y` for blur tap `k` of `taps`. Offsets sweep the shutter evenly
+/// (`-half … +half`); each weight fades its component toward the unshifted
+/// value, matching the GPU's weighted-endpoint crop. `zoom` inside `x`/`y`
+/// resolves to the tap's own `z`, so the wrap lands the blended centre on the
+/// blended crop.
+pub(crate) fn zoom_blur_tap_exprs(
+    z_expr: &str,
+    cx_expr: &str,
+    cy_expr: &str,
+    tap: u32,
+    taps: u32,
+    params: &MotionBlurParams,
+) -> (String, String, String) {
+    if taps <= 1 {
+        let (x, y) = wrap_zoompan_xy(cx_expr, cy_expr);
+        return (z_expr.to_string(), x, y);
+    }
+    let half_s = params.half_ms / 1000.0;
+    let offset_s = -half_s + 2.0 * half_s * tap as f64 / (taps - 1) as f64;
+    let blend = |base: &str, weight: f64| -> String {
+        if offset_s.abs() < 1e-9 || weight <= 0.0 {
+            return base.to_string();
+        }
+        let shifted = shift_zoompan_time(base, offset_s);
+        if weight >= 1.0 {
+            return shifted;
+        }
+        format!("({base})+(({shifted})-({base}))*{}", compact_num(weight))
+    };
+    let z = blend(z_expr, params.zoom_weight);
+    let cx = blend(cx_expr, params.pan_weight);
+    let cy = blend(cy_expr, params.pan_weight);
+    let (x, y) = wrap_zoompan_xy(&cx, &cy);
+    (z, x, y)
 }
 
 // ---------------------------------------------------------------------------
@@ -2520,5 +2763,127 @@ mod tests {
         let mut disabled = segments;
         disabled[0].enabled = false;
         assert_eq!(zoom_region_frame_edges(&disabled, 30, 300), vec![60, 75]);
+    }
+
+    // ------------------------------------------------------------------
+    // Compat zoom/pan motion blur (M2 #1)
+    // ------------------------------------------------------------------
+
+    fn blur_canvas(blur: Option<cursor::RenderMotionBlur>) -> cursor::RenderCanvas {
+        cursor::RenderCanvas {
+            width: 1_920,
+            height: 1_080,
+            fps: 30,
+            motion_blur: blur,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn motion_blur_params_needs_an_active_zoom_or_pan_shutter() {
+        assert!(motion_blur_params(&blur_canvas(None)).is_none());
+        assert!(
+            motion_blur_params(&blur_canvas(Some(cursor::RenderMotionBlur {
+                enabled: false,
+                zoom: 0.8,
+                ..Default::default()
+            })))
+            .is_none()
+        );
+        // Cursor-only blur is rasterizer work — no zoom/pan taps.
+        assert!(
+            motion_blur_params(&blur_canvas(Some(cursor::RenderMotionBlur {
+                enabled: true,
+                cursor: 0.8,
+                ..Default::default()
+            })))
+            .is_none()
+        );
+        let params = motion_blur_params(&blur_canvas(Some(cursor::RenderMotionBlur {
+            enabled: true,
+            cursor: 0.0,
+            zoom: 0.5,
+            pan: 0.8,
+            ..Default::default()
+        })))
+        .expect("active zoom/pan blur");
+        // shutter = max(zoom, pan) = 0.8 → half = (1000/30)*0.8/2 ms.
+        assert!((params.half_ms - 1000.0 / 30.0 * 0.4).abs() < 1e-9);
+        assert_eq!(params.zoom_weight, 0.5);
+        assert_eq!(params.pan_weight, 0.8);
+    }
+
+    #[test]
+    fn shift_zoompan_time_rewrites_only_bare_it() {
+        let expr = "if(gte(it,1.0)*lt(it,2.5),it*2,bit+it2+x_it+start)";
+        let shifted = shift_zoompan_time(expr, 0.5);
+        assert_eq!(
+            shifted,
+            "if(gte((it+0.5),1.0)*lt((it+0.5),2.5),(it+0.5)*2,bit+it2+x_it+start)"
+        );
+        assert_eq!(shift_zoompan_time(expr, 0.0), expr);
+        let back = shift_zoompan_time("gte(it,1)", -0.25);
+        assert_eq!(back, "gte((it-0.25),1)");
+    }
+
+    #[test]
+    fn zoom_blur_tap_exprs_sweep_the_shutter() {
+        let params = MotionBlurParams {
+            half_ms: 10.0,
+            zoom_weight: 1.0,
+            pan_weight: 0.5,
+        };
+        // One tap is the sharp path verbatim.
+        let (z, _, _) = zoom_blur_tap_exprs("Z", "CX", "CY", 0, 1, &params);
+        assert_eq!(z, "Z");
+        // Five taps: outermost at ±half, the centre tap unshifted.
+        let (z_first, x_first, _) = zoom_blur_tap_exprs("it", "it*2", "it*3", 0, 5, &params);
+        assert_eq!(z_first, "(it-0.01)");
+        assert!(x_first.contains("(it-0.01)*2"));
+        let (z_mid, _, _) = zoom_blur_tap_exprs("it", "it*2", "it*3", 2, 5, &params);
+        assert_eq!(z_mid, "it");
+        let (z_last, _, _) = zoom_blur_tap_exprs("it", "it*2", "it*3", 4, 5, &params);
+        assert_eq!(z_last, "(it+0.01)");
+        // A sub-unity weight blends shifted and unshifted samples.
+        let (_, x_last, _) = zoom_blur_tap_exprs("it", "it*2", "it*3", 4, 5, &params);
+        assert!(x_last.contains("*0.5"), "pan weight blends the centre tap");
+    }
+
+    #[test]
+    fn motion_blur_frame_taps_grow_only_while_the_crop_moves() {
+        let canvas = blur_canvas(Some(cursor::RenderMotionBlur {
+            enabled: true,
+            zoom: 1.0,
+            pan: 1.0,
+            ..Default::default()
+        }));
+        let params = motion_blur_params(&canvas).unwrap();
+        let segments = vec![zoom_segment(
+            "zoom",
+            1_000,
+            3_000,
+            RenderCropFloat {
+                x: 480.0,
+                y: 270.0,
+                width: 960.0,
+                height: 540.0,
+            },
+            2.0,
+            "linear",
+            500,
+            0,
+            None,
+        )];
+        // A steady frame outside the segment keeps the sharp path.
+        assert_eq!(
+            motion_blur_frame_taps(&segments, &canvas, &params, 4_000.0, 1_920.0, 1_080.0),
+            1
+        );
+        // Mid zoom-in transition the sweep is wide open.
+        let taps = motion_blur_frame_taps(&segments, &canvas, &params, 1_250.0, 1_920.0, 1_080.0);
+        assert!(taps > 1, "moving crop should request taps, got {taps}");
+        // The window scan agrees — capped by the caller, never below 1.
+        let window = motion_blur_window_taps(&segments, &canvas, &params, 0, 120, 1_920.0, 1_080.0);
+        assert!(window >= taps && window >= 1);
     }
 }

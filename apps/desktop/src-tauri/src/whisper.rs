@@ -354,8 +354,34 @@ pub(crate) async fn download_to_file(
         on_progress(downloaded, total);
     }
     drop(file);
+    reject_lfs_pointer(&part_path)?;
     std::fs::rename(&part_path, dest)
         .map_err(|e| InternalError::Storage(format!("finalize download: {e}")))?;
+    Ok(())
+}
+
+/// `raw.githubusercontent.com` serves the Git LFS *pointer* (~130 B of text
+/// starting with the `git-lfs` spec line) for LFS-tracked files, not the
+/// object. Reject it here so every caller gets a clear error instead of a
+/// sha256 mismatch on a stub file.
+fn reject_lfs_pointer(path: &Path) -> Result<()> {
+    const LFS_MAGIC: &[u8] = b"version https://git-lfs.github.com/spec/v1";
+    let mut head = [0u8; 64];
+    let mut file = std::fs::File::open(path)
+        .map_err(|e| InternalError::Storage(format!("read download: {e}")))?;
+    match std::io::Read::read_exact(&mut file, &mut head[..LFS_MAGIC.len()]) {
+        Ok(()) => {}
+        // A file shorter than the magic cannot be an LFS pointer.
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
+        Err(e) => return Err(InternalError::Storage(format!("read download: {e}")).into()),
+    }
+    if head.starts_with(LFS_MAGIC) {
+        let _ = std::fs::remove_file(path);
+        return Err(InternalError::Storage(
+            "download returned a Git LFS pointer instead of the file".into(),
+        )
+        .into());
+    }
     Ok(())
 }
 
@@ -1077,5 +1103,33 @@ mod tests {
             b"fake dll bytes"
         );
         assert!(!dest.join("bench.exe").exists());
+    }
+
+    /// Regresses the YuNet download failure where `raw.githubusercontent.com`
+    /// returned the opencv_zoo LFS pointer, which then failed the sha256
+    /// integrity check as an opaque mismatch.
+    #[test]
+    fn lfs_pointer_payloads_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let pointer = dir.path().join("model.onnx");
+        std::fs::write(
+            &pointer,
+            b"version https://git-lfs.github.com/spec/v1\noid sha256:8f2383e4\nsize 232589\n",
+        )
+        .unwrap();
+        assert!(reject_lfs_pointer(&pointer).is_err());
+        // The stub is removed so a retry does not mistake it for a model.
+        assert!(!pointer.exists());
+
+        let real = dir.path().join("real.onnx");
+        std::fs::write(&real, b"\x08\x03real onnx bytes").unwrap();
+        assert!(reject_lfs_pointer(&real).is_ok());
+        assert!(real.exists());
+
+        // Files shorter than the magic are never pointers.
+        let tiny = dir.path().join("tiny.bin");
+        std::fs::write(&tiny, b"tiny").unwrap();
+        assert!(reject_lfs_pointer(&tiny).is_ok());
     }
 }

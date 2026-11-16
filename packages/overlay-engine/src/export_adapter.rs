@@ -73,91 +73,18 @@ fn item_transform(
     }
 }
 
+/// `alpha_mul` composes the item/transform opacity on top of the color's own
+/// alpha; unparseable values fall back to black at that opacity — the same
+/// contract the ad-hoc parser had, now with the full CSS color surface.
 pub(crate) fn parse_color(color_str: &str, alpha_mul: f64) -> Color {
-    let trimmed = color_str.trim();
-    let mut r = 0.0f32;
-    let mut g = 0.0f32;
-    let mut b = 0.0f32;
-    let mut a = 1.0f32;
-
-    if let Some(hex) = trimmed.strip_prefix('#') {
-        match hex.len() {
-            3 => {
-                if let (Ok(cr), Ok(cg), Ok(cb)) = (
-                    u8::from_str_radix(&hex[0..1], 16),
-                    u8::from_str_radix(&hex[1..2], 16),
-                    u8::from_str_radix(&hex[2..3], 16),
-                ) {
-                    r = (cr * 17) as f32 / 255.0;
-                    g = (cg * 17) as f32 / 255.0;
-                    b = (cb * 17) as f32 / 255.0;
-                }
-            }
-            4 => {
-                if let (Ok(cr), Ok(cg), Ok(cb), Ok(ca)) = (
-                    u8::from_str_radix(&hex[0..1], 16),
-                    u8::from_str_radix(&hex[1..2], 16),
-                    u8::from_str_radix(&hex[2..3], 16),
-                    u8::from_str_radix(&hex[3..4], 16),
-                ) {
-                    r = (cr * 17) as f32 / 255.0;
-                    g = (cg * 17) as f32 / 255.0;
-                    b = (cb * 17) as f32 / 255.0;
-                    a = (ca * 17) as f32 / 255.0;
-                }
-            }
-            6 => {
-                if let (Ok(cr), Ok(cg), Ok(cb)) = (
-                    u8::from_str_radix(&hex[0..2], 16),
-                    u8::from_str_radix(&hex[2..4], 16),
-                    u8::from_str_radix(&hex[4..6], 16),
-                ) {
-                    r = cr as f32 / 255.0;
-                    g = cg as f32 / 255.0;
-                    b = cb as f32 / 255.0;
-                }
-            }
-            8 => {
-                if let (Ok(cr), Ok(cg), Ok(cb), Ok(ca)) = (
-                    u8::from_str_radix(&hex[0..2], 16),
-                    u8::from_str_radix(&hex[2..4], 16),
-                    u8::from_str_radix(&hex[4..6], 16),
-                    u8::from_str_radix(&hex[6..8], 16),
-                ) {
-                    r = cr as f32 / 255.0;
-                    g = cg as f32 / 255.0;
-                    b = cb as f32 / 255.0;
-                    a = ca as f32 / 255.0;
-                }
-            }
-            _ => {}
-        }
-    } else if trimmed.starts_with("rgb") {
-        let inside = trimmed
-            .trim_start_matches("rgba(")
-            .trim_start_matches("rgb(")
-            .trim_end_matches(')');
-        let parts: Vec<&str> = inside.split(',').map(|s| s.trim()).collect();
-        if parts.len() >= 3 {
-            if let (Ok(pr), Ok(pg), Ok(pb)) = (
-                parts[0].parse::<f32>(),
-                parts[1].parse::<f32>(),
-                parts[2].parse::<f32>(),
-            ) {
-                r = (pr / 255.0).clamp(0.0, 1.0);
-                g = (pg / 255.0).clamp(0.0, 1.0);
-                b = (pb / 255.0).clamp(0.0, 1.0);
-            }
-            if parts.len() >= 4 {
-                if let Ok(pa) = parts[3].parse::<f32>() {
-                    a = pa.clamp(0.0, 1.0);
-                }
-            }
-        }
-    }
-
-    let final_alpha = (a * alpha_mul as f32).clamp(0.0, 1.0);
-    Color::from_rgba(r, g, b, final_alpha).unwrap_or(Color::TRANSPARENT)
+    let parsed = crate::parse_css_color(color_str).unwrap_or(crate::CssColor {
+        r: 0.0,
+        g: 0.0,
+        b: 0.0,
+        a: 1.0,
+    });
+    let final_alpha = (parsed.a * alpha_mul as f32).clamp(0.0, 1.0);
+    Color::from_rgba(parsed.r, parsed.g, parsed.b, final_alpha).unwrap_or(Color::TRANSPARENT)
 }
 
 fn build_rounded_rect_path(x: f32, y: f32, width: f32, height: f32, radius: f32) -> Option<Path> {
@@ -1530,5 +1457,19 @@ mod tests {
         ts.map_point(&mut point);
         assert!((point.x - 250.0).abs() < 0.01, "x = {}", point.x);
         assert!((point.y - 150.0).abs() < 0.01, "y = {}", point.y);
+    }
+
+    #[test]
+    fn parse_color_resolves_the_full_css_surface() {
+        let lime = parse_color("rgb(190, 242, 100)", 1.0);
+        assert!((lime.red() - 190.0 / 255.0).abs() < 0.004);
+        assert!((lime.green() - 242.0 / 255.0).abs() < 0.004);
+        assert!((lime.blue() - 100.0 / 255.0).abs() < 0.004);
+        // Modern space-slash syntax, hsl, and named colors all resolve.
+        assert!((parse_color("hsl(120 100% 25%)", 1.0).green() - 128.0 / 255.0).abs() < 0.01);
+        assert!((parse_color("rebeccapurple", 1.0).red() - 0x66 as f32 / 255.0).abs() < 0.004);
+        // Embedded alpha composes with the caller's alpha multiplier.
+        let translucent = parse_color("rgba(255,255,255,0.85)", 0.5);
+        assert!((translucent.alpha() - 0.425).abs() < 0.01);
     }
 }

@@ -44,8 +44,10 @@ pub const MODELS: &[ModelSpec] = &[
         file: "face_detection_yunet_2023mar.onnx",
         size_bytes: 232_589,
         sha256: "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4",
-        // Pinned to the commit that introduced v2 (2023-06-06).
-        url: "https://raw.githubusercontent.com/opencv/opencv_zoo/f12e12798e8314f7c074a6656816c048dcc95b7a/models/face_detection_yunet/face_detection_yunet_2023mar.onnx",
+        // Pinned to the commit that introduced v2 (2023-06-06). Served via
+        // media.githubusercontent.com because opencv_zoo tracks .onnx in Git
+        // LFS — the plain raw host returns the 131-byte LFS pointer instead.
+        url: "https://media.githubusercontent.com/media/opencv/opencv_zoo/f12e12798e8314f7c074a6656816c048dcc95b7a/models/face_detection_yunet/face_detection_yunet_2023mar.onnx",
     },
 ];
 

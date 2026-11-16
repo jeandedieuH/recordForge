@@ -1532,8 +1532,8 @@ fn build_cursor_svg(
     vb_w: f64,
     vb_h: f64,
 ) -> String {
-    let fill = parse_hex_color(&settings.fill_color, "#3b82f6");
-    let stroke = parse_hex_color(&settings.stroke_color, "#ffffff");
+    let fill = resolve_svg_color(&settings.fill_color, "#3b82f6");
+    let stroke = resolve_svg_color(&settings.stroke_color, "#ffffff");
     let stroke_width = settings.stroke_width;
 
     let mut markup = asset.svg.clone();
@@ -1565,7 +1565,7 @@ fn build_cursor_svg(
     );
 
     if shadow {
-        let shadow_color = parse_hex_color(&settings.shadow_color, "#000000");
+        let shadow_color = resolve_svg_color(&settings.shadow_color, "#000000");
         let std_deviation = (settings.shadow_blur / 2.0).max(0.0);
         // The filter region is expanded in view-box units to avoid clipping the
         // blurred shadow. pad_vb is already sized for the shadow extent.
@@ -1593,17 +1593,12 @@ fn build_cursor_svg(
     }
 }
 
-fn parse_hex_color(value: &str, fallback: &str) -> String {
-    let trimmed = value.trim();
-    if trimmed.starts_with('#') && (trimmed.len() == 7 || trimmed.len() == 9) {
-        return trimmed.into();
-    }
-    // Named colors used by the fixtures/tests.
-    match trimmed.to_ascii_lowercase().as_str() {
-        "black" => "#000000".into(),
-        "white" => "#ffffff".into(),
-        _ => fallback.into(),
-    }
+/// Returns a `#rrggbb` string for SVG substitution; `fallback` is used when the
+/// value isn't a parseable CSS color (e.g. a `var(--...)` token).
+fn resolve_svg_color(value: &str, fallback: &str) -> String {
+    overlay_engine::parse_css_color(value)
+        .map(|color| color.to_hex_string())
+        .unwrap_or_else(|| fallback.into())
 }
 
 fn inv_alpha_lut() -> &'static [f32; 256] {
@@ -1909,29 +1904,17 @@ pub(crate) fn source_time_for_output(segments: &[RenderSegment], output_ms: f64)
 }
 
 fn parse_color(value: &str, fallback: Rgba) -> Rgba {
-    let value = value.trim().trim_start_matches('#');
-    let (value, alpha) = if value.len() == 8 {
-        (
-            &value[..6],
-            u8::from_str_radix(&value[6..], 16).unwrap_or(255) as f32 / 255.0,
-        )
-    } else {
-        (value, 1.0)
-    };
-    if value.len() != 6 {
-        return fallback;
-    }
-    let red = u8::from_str_radix(&value[0..2], 16).ok();
-    let green = u8::from_str_radix(&value[2..4], 16).ok();
-    let blue = u8::from_str_radix(&value[4..6], 16).ok();
-    match (red, green, blue) {
-        (Some(red), Some(green), Some(blue)) => Rgba {
-            red,
-            green,
-            blue,
-            alpha,
-        },
-        _ => fallback,
+    match overlay_engine::parse_css_color(value) {
+        Some(color) => {
+            let [red, green, blue, _] = color.to_rgba8();
+            Rgba {
+                red,
+                green,
+                blue,
+                alpha: color.a.clamp(0.0, 1.0),
+            }
+        }
+        None => fallback,
     }
 }
 
@@ -2284,6 +2267,40 @@ mod tests {
             padding,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn parses_css_colors_for_svg_and_raster_paths() {
+        // Look presets store functional colors (e.g. "Neon Pop"'s
+        // `rgb(190, 242, 100)`); the old hex-only parsers silently fell back
+        // to the blue accent.
+        assert_eq!(
+            resolve_svg_color("rgb(190, 242, 100)", "#3b82f6"),
+            "#bef264"
+        );
+        assert_eq!(resolve_svg_color("#bef264", "#3b82f6"), "#bef264");
+        assert_eq!(resolve_svg_color("white", "#3b82f6"), "#ffffff");
+        assert_eq!(resolve_svg_color("hsl(120 100% 25%)", "#3b82f6"), "#008000");
+        assert_eq!(
+            resolve_svg_color("rgba(255,255,255,0.85)", "#3b82f6"),
+            "#ffffffd9"
+        );
+        assert_eq!(resolve_svg_color("garbage(", "#3b82f6"), "#3b82f6");
+
+        let lime = parse_color("rgb(190, 242, 100)", Rgba::opaque(0, 0, 0));
+        assert_eq!((lime.red, lime.green, lime.blue), (190, 242, 100));
+        assert_eq!(lime.alpha, 1.0);
+        let translucent = parse_color("rgba(255,255,255,0.85)", Rgba::opaque(0, 0, 0));
+        assert_eq!(
+            (translucent.red, translucent.green, translucent.blue),
+            (255, 255, 255)
+        );
+        assert!((translucent.alpha - 0.85).abs() < 0.01);
+        let fallback = parse_color("var(--accent)", Rgba::opaque(96, 165, 250));
+        assert_eq!(
+            (fallback.red, fallback.green, fallback.blue),
+            (96, 165, 250)
+        );
     }
 
     #[test]

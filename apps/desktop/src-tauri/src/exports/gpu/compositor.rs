@@ -1231,7 +1231,9 @@ impl Compositor {
         match screen {
             Frame::Pass(data) => self.pending.push_back(Inflight::Ready(data)),
             Frame::Compose(frame) => {
-                if frame.data.len() != nv12_len(self.width, self.height) {
+                // The decode pass emits the zoom detail plane, which is larger
+                // than the canvas whenever `analyze_zoom_detail` is active.
+                if frame.data.len() != nv12_len(self.plane_width, self.plane_height) {
                     return Err(gpu_error("decoded frame size does not match the canvas"));
                 }
                 let slot = self.ring_next;
@@ -1713,12 +1715,12 @@ impl Compositor {
             &frame.data[luma_len..],
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(self.width),
-                rows_per_image: Some(self.height / 2),
+                bytes_per_row: Some(self.plane_width),
+                rows_per_image: Some(self.plane_height / 2),
             },
             wgpu::Extent3d {
-                width: self.width / 2,
-                height: self.height / 2,
+                width: self.plane_width / 2,
+                height: self.plane_height / 2,
                 depth_or_array_layers: 1,
             },
         );

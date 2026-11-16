@@ -47,10 +47,8 @@ uniform float u_edge_softness;
 uniform float u_edge_shift;
 out vec4 out_color;
 
-vec2 src_uv(vec2 top_left) {
-  return vec2(top_left.x, 1.0 - top_left.y);
-}
-
+// DOM uploads keep the image top row at texture v=0 (UNPACK_FLIP_Y stays 0),
+// so top-left-origin source coordinates address the textures directly.
 vec3 grade(vec3 color) {
   if (!u_has_lut) return color;
   float size = 33.0;
@@ -59,12 +57,12 @@ vec3 grade(vec3 color) {
   return texture(u_lut, color * scale + offset).rgb;
 }
 
-vec3 sample_frame(vec2 top_left) {
-  return texture(u_video, src_uv(top_left)).rgb;
+vec3 sample_frame(vec2 uv) {
+  return texture(u_video, uv).rgb;
 }
 
-float matte_at(vec2 top_left) {
-  return texture(u_matte, src_uv(top_left)).r;
+float matte_at(vec2 uv) {
+  return texture(u_matte, uv).r;
 }
 
 void main() {
@@ -109,7 +107,7 @@ void main() {
     // top_left is [0,1] inside the visible crop, so the image fills the bubble
     // exactly like the renderer's cover-fit plate.
     vec2 image_uv = (top_left - vec2(0.5)) * u_bg_fit.xy + vec2(0.5) + u_bg_fit.zw;
-    background = texture(u_bg_image, src_uv(image_uv)).rgb;
+    background = texture(u_bg_image, image_uv).rgb;
   } else {
     // Image mode without a usable image falls back to a transparent cutout,
     // matching the exporter's missing-asset behaviour.
@@ -140,6 +138,10 @@ interface CameraLutCanvasProps {
   displayWidth?: number
   displayHeight?: number
   className?: string
+  /** Fired on every successfully drawn frame; the caller hides the plain video. */
+  onReady?: () => void
+  /** Fired when the GL pipeline cannot draw persistently; the caller restores the plain video. */
+  onUnavailable?: () => void
 }
 
 export function CameraLutCanvas({
@@ -154,6 +156,8 @@ export function CameraLutCanvas({
   displayWidth = 1,
   displayHeight = 1,
   className,
+  onReady,
+  onUnavailable,
 }: CameraLutCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const glRef = useRef<WebGL2RenderingContext | null>(null)
@@ -167,6 +171,10 @@ export function CameraLutCanvas({
   const bgImageAspectRef = useRef(1)
   const lutReadyRef = useRef(false)
   const cropRef = useRef<[number, number, number, number]>([0, 0, 1, 1])
+  const onReadyRef = useRef(onReady)
+  onReadyRef.current = onReady
+  const onUnavailableRef = useRef(onUnavailable)
+  onUnavailableRef.current = onUnavailable
 
   const activeCrop = crop ?? FULL_FRAME_CROP
   cropRef.current = [activeCrop.x, activeCrop.y, activeCrop.width, activeCrop.height]
@@ -197,7 +205,12 @@ export function CameraLutCanvas({
     // Alpha stays enabled so a cutout can reveal the screen behind it; opaque
     // frames write alpha 1 and composite exactly as before.
     const gl = canvas.getContext("webgl2", { alpha: true, premultipliedAlpha: false })
-    if (!gl) return
+    // Every init failure reports back: the plain <video> stays hidden only
+    // while this canvas can actually draw.
+    if (!gl) {
+      onUnavailableRef.current?.()
+      return
+    }
     glRef.current = gl
 
     const compile = (type: number, source: string) => {
@@ -206,6 +219,7 @@ export function CameraLutCanvas({
       gl.shaderSource(shader, source)
       gl.compileShader(shader)
       if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+        console.warn("Camera preview shader failed to compile:", gl.getShaderInfoLog(shader))
         gl.deleteShader(shader)
         return null
       }
@@ -213,16 +227,35 @@ export function CameraLutCanvas({
     }
     const vertex = compile(gl.VERTEX_SHADER, VERTEX_SOURCE)
     const fragment = compile(gl.FRAGMENT_SHADER, FRAGMENT_SOURCE)
-    if (!vertex || !fragment) return
+    if (!vertex || !fragment) {
+      onUnavailableRef.current?.()
+      return
+    }
     const program = gl.createProgram()
-    if (!program) return
+    if (!program) {
+      onUnavailableRef.current?.()
+      return
+    }
     gl.attachShader(program, vertex)
     gl.attachShader(program, fragment)
     gl.linkProgram(program)
     gl.deleteShader(vertex)
     gl.deleteShader(fragment)
-    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) return
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+      console.warn("Camera preview program failed to link:", gl.getProgramInfoLog(program))
+      gl.deleteProgram(program)
+      onUnavailableRef.current?.()
+      return
+    }
     programRef.current = program
+    // A lost context after init draws nothing without throwing; report it so
+    // the bubble falls back to the plain video instead of going blank. The
+    // pre-listener window is covered by the isContextLost() draw guard.
+    const handleContextLost = (event: Event) => {
+      event.preventDefault()
+      onUnavailableRef.current?.()
+    }
+    canvas.addEventListener("webglcontextlost", handleContextLost)
     for (const name of [
       "u_video",
       "u_matte",
@@ -269,6 +302,7 @@ export function CameraLutCanvas({
     lutTextureRef.current = createTexture(gl.TEXTURE_3D)
 
     return () => {
+      canvas.removeEventListener("webglcontextlost", handleContextLost)
       gl.deleteProgram(program)
       for (const texture of [
         videoTextureRef.current,
@@ -358,76 +392,102 @@ export function CameraLutCanvas({
   // Draw loop: upload the current video/matte frames and composite the effects.
   useEffect(() => {
     let frame = 0
-    const draw = () => {
+    // A thrown frame (e.g. a cross-origin texture upload) counts toward the
+    // fallback instead of killing the loop; this many misses (~0.5 s at
+    // 60 fps) means the pipeline cannot recover, so restore the plain video.
+    const MAX_FRAME_FAILURES = 30
+    let consecutiveFailures = 0
+    let fatal = false
+
+    const drawFrame = (): boolean => {
       const gl = glRef.current
       const program = programRef.current
       const canvas = canvasRef.current
       const video = videoRef.current
-      if (gl && program && canvas && video && video.readyState >= 2) {
-        const width = video.videoWidth
-        const height = video.videoHeight
-        if (width > 0 && height > 0) {
-          if (canvas.width !== width || canvas.height !== height) {
-            canvas.width = width
-            canvas.height = height
-          }
-          const uniforms = uniformsRef.current
-          const settings = settingsRef.current
-          gl.viewport(0, 0, width, height)
-          gl.clearColor(0, 0, 0, 0)
-          gl.clear(gl.COLOR_BUFFER_BIT)
-          gl.useProgram(program)
+      if (!gl || !program || !canvas || !video || video.readyState < 2 || gl.isContextLost()) {
+        return false
+      }
+      const width = video.videoWidth
+      const height = video.videoHeight
+      if (width <= 0 || height <= 0) return false
+      if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width
+        canvas.height = height
+      }
+      const uniforms = uniformsRef.current
+      const settings = settingsRef.current
+      gl.viewport(0, 0, width, height)
+      gl.clearColor(0, 0, 0, 0)
+      gl.clear(gl.COLOR_BUFFER_BIT)
+      gl.useProgram(program)
 
-          gl.activeTexture(gl.TEXTURE0)
-          gl.bindTexture(gl.TEXTURE_2D, videoTextureRef.current)
-          gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 0)
-          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video)
-          gl.uniform1i(uniforms.u_video, 0)
+      gl.activeTexture(gl.TEXTURE0)
+      gl.bindTexture(gl.TEXTURE_2D, videoTextureRef.current)
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 0)
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video)
+      gl.uniform1i(uniforms.u_video, 0)
 
-          gl.activeTexture(gl.TEXTURE1)
-          gl.bindTexture(gl.TEXTURE_3D, lutTextureRef.current)
-          gl.uniform1i(uniforms.u_lut, 1)
+      gl.activeTexture(gl.TEXTURE1)
+      gl.bindTexture(gl.TEXTURE_3D, lutTextureRef.current)
+      gl.uniform1i(uniforms.u_lut, 1)
 
-          const matte = settings.matteEnabled ? matteVideoRef?.current : null
-          const matteReady = Boolean(
-            matte && matte.readyState >= 2 && matte.videoWidth > 0 && matte.videoHeight > 0,
-          )
-          gl.activeTexture(gl.TEXTURE2)
-          gl.bindTexture(gl.TEXTURE_2D, matteTextureRef.current)
-          if (matte && matteReady) {
-            gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 0)
-            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, matte)
-          }
-          gl.uniform1i(uniforms.u_matte, 2)
-          gl.uniform1i(uniforms.u_has_matte, matteReady ? 1 : 0)
-          gl.uniform1i(uniforms.u_has_lut, lutReadyRef.current ? 1 : 0)
+      const matte = settings.matteEnabled ? matteVideoRef?.current : null
+      const matteReady = Boolean(
+        matte && matte.readyState >= 2 && matte.videoWidth > 0 && matte.videoHeight > 0,
+      )
+      gl.activeTexture(gl.TEXTURE2)
+      gl.bindTexture(gl.TEXTURE_2D, matteTextureRef.current)
+      if (matte && matteReady) {
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 0)
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, matte)
+      }
+      gl.uniform1i(uniforms.u_matte, 2)
+      gl.uniform1i(uniforms.u_has_matte, matteReady ? 1 : 0)
+      gl.uniform1i(uniforms.u_has_lut, lutReadyRef.current ? 1 : 0)
 
-          gl.activeTexture(gl.TEXTURE3)
-          gl.bindTexture(gl.TEXTURE_2D, bgTextureRef.current)
-          gl.uniform1i(uniforms.u_bg_image, 3)
-          gl.uniform1i(
-            uniforms.u_has_bg_image,
-            settings.mode === BACKGROUND_MODE.image && bgReadyRef.current ? 1 : 0,
-          )
+      gl.activeTexture(gl.TEXTURE3)
+      gl.bindTexture(gl.TEXTURE_2D, bgTextureRef.current)
+      gl.uniform1i(uniforms.u_bg_image, 3)
+      gl.uniform1i(
+        uniforms.u_has_bg_image,
+        settings.mode === BACKGROUND_MODE.image && bgReadyRef.current ? 1 : 0,
+      )
 
-          const [x, y, w, h] = cropRef.current
-          gl.uniform4f(uniforms.u_crop, x, y, w, h)
-          gl.uniform2f(uniforms.u_blur_uv, settings.blurUv[0], settings.blurUv[1])
-          gl.uniform3f(uniforms.u_bg_color, ...settings.bgColor)
-          gl.uniform1i(uniforms.u_bg_mode, settings.mode)
-          gl.uniform1f(uniforms.u_edge_softness, settings.edgeSoftness)
-          gl.uniform1f(uniforms.u_edge_shift, settings.edgeShift)
-          const frameAspect = w / Math.max(1e-6, h)
-          const [fitX, fitY, offsetX, offsetY] = backgroundCoverUv(
-            bgImageAspectRef.current,
-            frameAspect,
-          )
-          gl.uniform4f(uniforms.u_bg_fit, fitX, fitY, offsetX, offsetY)
+      const [x, y, w, h] = cropRef.current
+      gl.uniform4f(uniforms.u_crop, x, y, w, h)
+      gl.uniform2f(uniforms.u_blur_uv, settings.blurUv[0], settings.blurUv[1])
+      gl.uniform3f(uniforms.u_bg_color, ...settings.bgColor)
+      gl.uniform1i(uniforms.u_bg_mode, settings.mode)
+      gl.uniform1f(uniforms.u_edge_softness, settings.edgeSoftness)
+      gl.uniform1f(uniforms.u_edge_shift, settings.edgeShift)
+      const frameAspect = w / Math.max(1e-6, h)
+      const [fitX, fitY, offsetX, offsetY] = backgroundCoverUv(
+        bgImageAspectRef.current,
+        frameAspect,
+      )
+      gl.uniform4f(uniforms.u_bg_fit, fitX, fitY, offsetX, offsetY)
 
-          gl.drawArrays(gl.TRIANGLES, 0, 3)
+      gl.drawArrays(gl.TRIANGLES, 0, 3)
+      return true
+    }
+
+    const draw = () => {
+      if (fatal) return
+      // Reschedule before drawing so a thrown frame can never kill the loop.
+      frame = requestAnimationFrame(draw)
+      try {
+        if (drawFrame()) {
+          consecutiveFailures = 0
+          onReadyRef.current?.()
+        }
+      } catch {
+        consecutiveFailures += 1
+        if (consecutiveFailures >= MAX_FRAME_FAILURES) {
+          fatal = true
+          console.warn("Camera preview stopped drawing; falling back to the plain video")
+          onUnavailableRef.current?.()
         }
       }
-      frame = requestAnimationFrame(draw)
     }
     frame = requestAnimationFrame(draw)
     return () => cancelAnimationFrame(frame)

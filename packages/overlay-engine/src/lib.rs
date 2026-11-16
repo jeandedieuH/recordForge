@@ -10,6 +10,7 @@ pub mod animation;
 pub mod color;
 #[cfg(any(feature = "native-render", test))]
 mod connectors;
+pub mod css_color;
 mod evaluator;
 #[cfg(feature = "native-render")]
 mod export_adapter;
@@ -24,6 +25,7 @@ pub use animation::{
     animation_at, eased_progress, opacity_at, OverlayAnimation, OverlayAnimationFrame,
     OverlayAnimationOutType, OverlayAnimationType, OverlayEasing,
 };
+pub use css_color::{parse_css_color, CssColor};
 #[cfg(feature = "native-render")]
 pub use fonts::get_shared_font_database;
 pub use fonts::{default_font_bundle, FontCache, FontSpec};

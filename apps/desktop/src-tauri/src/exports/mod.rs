@@ -27,6 +27,7 @@ mod keystrokes;
 mod loupe;
 mod zoom_detail;
 
+#[allow(unused_imports)]
 pub(crate) use camera::build_zoompan_expressions;
 // Re-exported for tests and sibling modules that validate against the shared
 // camera geometry helpers.
@@ -43,6 +44,11 @@ struct TempMaskFile(PathBuf);
 
 impl Drop for TempMaskFile {
     fn drop(&mut self) {
+        // RECORDFORGE_EXPORT_KEEP_TEMP keeps generated plates/scripts around
+        // for filtergraph debugging instead of unlinking them on drop.
+        if std::env::var_os("RECORDFORGE_EXPORT_KEEP_TEMP").is_some() {
+            return;
+        }
         let _ = std::fs::remove_file(&self.0);
     }
 }
@@ -1999,6 +2005,173 @@ fn video_screen_rect(
     }
 }
 
+/// The camera-layout lane (#5): flattened, time-sorted camera keyframes across
+/// every layout window. Mirrors `gpu::camera_layout_pose` — the pose track the
+/// compositor evaluates per frame — so both renderers interpolate identically.
+fn camera_layout_pose(plan: &RenderPlan) -> Vec<RenderLayoutKeyframe> {
+    let mut keyframes: Vec<RenderLayoutKeyframe> = plan
+        .camera_layouts
+        .iter()
+        .flat_map(|layout| layout.camera.iter().cloned())
+        .collect();
+    keyframes.sort_by_key(|keyframe| keyframe.time_ms);
+    keyframes
+}
+
+/// Layout keyframes arrive sampled at 80 ms; a long window can therefore carry
+/// hundreds of points. `eval=frame` expressions are trees — one `if(lt(t,...))`
+/// branch per segment — so dense tracks are decimated to a bounded count while
+/// keeping both endpoints. Dropped points sit on the linear interpolation
+/// between kept neighbours, which is the same curve the compositor renders.
+const LAYOUT_EXPR_MAX_KEYFRAMES: usize = 96;
+
+fn decimate_layout_keyframes(
+    keyframes: &[RenderLayoutKeyframe],
+    max_keyframes: usize,
+) -> Vec<RenderLayoutKeyframe> {
+    if keyframes.len() <= max_keyframes {
+        return keyframes.to_vec();
+    }
+    let keep = max_keyframes.max(2);
+    let step = (keyframes.len() - 1) as f64 / (keep - 1) as f64;
+    (0..keep)
+        .map(|index| keyframes[((index as f64) * step).round() as usize].clone())
+        .collect()
+}
+
+/// Nested `if(lt(t,K),…)` expression evaluating one pose field as a piecewise
+/// linear signal over sorted keyframes — the expression-level equivalent of
+/// the compositor's `pose_at` inner loop. Below the first keyframe the inner
+/// chain yields the first lerp segment; callers gate the span externally.
+/// `time_var` is the filter's timestamp variable: `t` for scale/overlay,
+/// `T` for geq.
+fn layout_lerp_expr(
+    keyframes: &[RenderLayoutKeyframe],
+    field: impl Fn(&RenderLayoutKeyframe) -> f64,
+    time_var: &str,
+) -> String {
+    let last = keyframes.last().expect("lerp chain needs keyframes");
+    let mut expr = format!("{:.4}", field(last));
+    for pair in keyframes.windows(2).rev() {
+        let (from, to) = (&pair[0], &pair[1]);
+        let span_s = (to.time_ms - from.time_ms).max(1) as f64 / 1000.0;
+        let slope = (field(to) - field(from)) / span_s;
+        expr = format!(
+            "if(lt({time_var},{}),{:.4}+({:.6})*({time_var}-{}),{expr})",
+            seconds(to.time_ms),
+            field(from),
+            slope,
+            seconds(from.time_ms),
+        );
+    }
+    expr
+}
+
+/// Camera-pose field expression matching `gpu::pose_at`: inside the flattened
+/// span the keyframes interpolate; outside it the base transform resumes. Note
+/// the whole flattened track interpolates — a gap between two layout windows
+/// eases from the first window's exit pose to the second's entry pose.
+fn camera_pose_expr(
+    pose: &[RenderLayoutKeyframe],
+    field: impl Fn(&RenderLayoutKeyframe) -> f64,
+    base: f64,
+    time_var: &str,
+) -> String {
+    let (first, last) = (
+        pose.first().expect("pose needs keyframes"),
+        pose.last().expect("pose needs keyframes"),
+    );
+    format!(
+        "if(between({time_var},{},{}),{},{:.4})",
+        seconds(first.time_ms),
+        seconds(last.time_ms),
+        layout_lerp_expr(pose, field, time_var),
+        base,
+    )
+}
+
+/// Screen-rect field expression matching `gpu::screen_layout_rect_at`: the
+/// last window containing `t` wins, its screen keyframes interpolate inside
+/// their own span, and every other frame falls back to `default_expr` (the
+/// overlay side-by-side slot or the base rect).
+fn screen_layout_expr(
+    layouts: &[&RenderPlanCameraLayout],
+    field: impl Fn(&RenderLayoutKeyframe) -> f64 + Copy,
+    default_expr: &str,
+    time_var: &str,
+) -> String {
+    // Forward iteration nests each successive window *outside* the previous
+    // ones, so the last overlapping window evaluates first — matching the
+    // `rfind` the compositor uses to pick the active layout.
+    let mut expr = default_expr.to_string();
+    for layout in layouts.iter() {
+        let Some(keyframes) = layout.screen.as_ref().filter(|k| !k.is_empty()) else {
+            continue;
+        };
+        let (first, last) = (keyframes[0].time_ms, keyframes[keyframes.len() - 1].time_ms);
+        let inner = format!(
+            "if(between({time_var},{},{}),{},{})",
+            seconds(first),
+            seconds(last),
+            layout_lerp_expr(keyframes, field, time_var),
+            default_expr,
+        );
+        expr = format!(
+            "if(gte({time_var},{})*lt({time_var},{}),{},{})",
+            seconds(layout.start_ms),
+            seconds(layout.end_ms),
+            inner,
+            expr,
+        );
+    }
+    expr
+}
+
+/// Force an eval=frame width/height expression onto the even grid YUV420
+/// chroma needs, never below 2 px.
+fn even_layout_expr(expr: &str) -> String {
+    format!("max(2,floor(({expr})/2)*2)")
+}
+
+/// The rect the screen rests at inside a layout window — evaluated at the
+/// window midpoint so it always lands in the post-transition hold, which is
+/// where the baked shadow plate needs to sit.
+fn layout_rest_screen_rect(layout: &RenderPlanCameraLayout) -> Option<(f64, f64, f64, f64)> {
+    let keyframes = layout.screen.as_ref()?;
+    let mid = (layout.start_ms + layout.end_ms) / 2;
+    screen_pose_rect_at(keyframes, mid as f64)
+}
+
+/// Interpolate a screen keyframe track at `time_ms`; `None` outside the span
+/// (mirrors `gpu::screen_layout_rect_at`'s miss, which falls back to the base
+/// rect).
+fn screen_pose_rect_at(
+    keyframes: &[RenderLayoutKeyframe],
+    time_ms: f64,
+) -> Option<(f64, f64, f64, f64)> {
+    let first = keyframes.first()?;
+    let last = keyframes.last()?;
+    if time_ms < first.time_ms as f64 || time_ms > last.time_ms as f64 {
+        return None;
+    }
+    let mut previous = first;
+    for keyframe in keyframes {
+        if (keyframe.time_ms as f64) > time_ms {
+            let span = (keyframe.time_ms - previous.time_ms).max(1) as f64;
+            let t = ((time_ms - previous.time_ms as f64) / span).clamp(0.0, 1.0);
+            let mix = |from: f64, to: f64| from + (to - from) * t;
+            return Some((
+                mix(previous.x, keyframe.x),
+                mix(previous.y, keyframe.y),
+                mix(previous.width, keyframe.width),
+                mix(previous.height, keyframe.height),
+            ));
+        }
+        previous = keyframe;
+    }
+    Some((last.x, last.y, last.width, last.height))
+}
+
 /// Compose screen, manual zoom, camera overlays, canvas framing, cursor
 /// telemetry, overlay items, and semantic audio tracks in one FFmpeg graph.
 /// The generated layers are rendered frame by frame in Rust and streamed over
@@ -2064,6 +2237,10 @@ fn render_timeline_composition_shared(
     // failures (device loss, adapter trouble) fall through to the
     // compatibility renderer below.
     let renderer = gpu::resolve_renderer(&settings.renderer, plan, settings, shared, asset_paths);
+    // Why the compatibility renderer runs when the plan asked for GPU: carried
+    // onto the job's render notes so a simplified export names the renderer
+    // change, not just the effects it dropped.
+    let mut compat_reason = renderer.reason.clone();
     match renderer.renderer {
         gpu::ExportRenderer::Gpu => {
             info!(
@@ -2103,13 +2280,19 @@ fn render_timeline_composition_shared(
                         error = %error,
                         "export: GPU render failed; retrying on the compatibility renderer"
                     );
+                    // The raw error stays in the warn log; the note is a
+                    // path-free sentence safe to persist on the job.
+                    compat_reason = Some("a GPU render attempt failed (see diagnostics)".into());
                     let _ = std::fs::remove_file(output_path);
                 }
             }
         }
         gpu::ExportRenderer::Compatibility => {
             if let Some(reason) = renderer.reason.as_deref() {
-                tracing::debug!(project_id, reason, "export: compatibility renderer");
+                info!(
+                    project_id,
+                    reason, "export: compatibility renderer selected"
+                );
             }
         }
     }
@@ -2117,7 +2300,7 @@ fn render_timeline_composition_shared(
     // Everything below renders on the compatibility path (selected up front,
     // gated by `plan_limitations`, or after a runtime GPU failure). Report the
     // effects that path cannot deliver at full quality.
-    let compat_downgrades = gpu::effect_support(plan, settings, gpu::ExportRenderer::Compatibility);
+    let compat_downgrades = compat_render_notes(plan, settings, compat_reason);
     if should_render_chunked(plan, settings) && chunk_temp_space_ok(plan, settings) {
         let outcome = render_timeline_chunked(
             ffmpeg_path,
@@ -2153,6 +2336,29 @@ fn render_timeline_composition_shared(
         output_cap,
     )?;
     Ok(outcome.with_downgrades(compat_downgrades))
+}
+
+/// Downgrade list for a compatibility-rendered export: the per-effect notes,
+/// prefixed with why the GPU compositor did not run when the plan asked for
+/// it. A clean compatibility render (explicit preference, or `auto` on a plan
+/// with nothing to drop) leaves the list untouched — the renderer change only
+/// matters when it cost the export an effect.
+fn compat_render_notes(
+    plan: &RenderPlan,
+    settings: &ExportSettings,
+    renderer_reason: Option<String>,
+) -> Vec<EffectDowngrade> {
+    let mut notes = gpu::effect_support(plan, settings, gpu::ExportRenderer::Compatibility);
+    if let Some(reason) = renderer_reason.filter(|_| !notes.is_empty()) {
+        notes.insert(
+            0,
+            EffectDowngrade {
+                effect: "renderer".into(),
+                reason: format!("Rendered on the FFmpeg compatibility renderer — {reason}"),
+            },
+        );
+    }
+    notes
 }
 
 /// Output-time window one composition pass renders, in absolute timeline
@@ -2312,12 +2518,12 @@ fn render_composition_window(
     );
     let uniform_sbs =
         sbs_windows.len() == 1 && sbs_windows[0].0 == 0 && sbs_windows[0].1 >= plan.duration_ms;
-    let layout_varies = !sbs_windows.is_empty() && !uniform_sbs;
+    let overlay_sbs_varies = !sbs_windows.is_empty() && !uniform_sbs;
     let is_side_by_side = uniform_sbs;
     // Absolute-time expression evaluating to true inside side-by-side windows;
     // every timestamped construct in the graph (scale/overlay eval=frame,
     // gated shadow plate) shares this one gate.
-    let sbs_expr = if layout_varies {
+    let sbs_expr = if overlay_sbs_varies {
         sbs_windows
             .iter()
             .map(|(start, end)| format!("between(t,{},{})", seconds(*start), seconds(*end)))
@@ -2338,11 +2544,49 @@ fn render_composition_window(
     } else {
         full_screen_rect
     };
-    let sbs_screen_rect = if layout_varies {
+    let sbs_screen_rect = if overlay_sbs_varies {
         Some(video_screen_rect(canvas, screen_source, true))
     } else {
         None
     };
+
+    // Camera-layout lane (#5): a window whose screen keyframes leave the base
+    // rect animates the fitted stream every frame, joining the overlay
+    // side-by-side switch in `layout_varies` — the flag that drops the static
+    // canvas border/corner plates and vetoes the direct-pad fast path.
+    // Constant keyframes (e.g. a PiP-only layout whose screen lane emits the
+    // base rect) move nothing, so they keep the border and the fast path.
+    let base_rect = (screen_x, screen_y, screen_w, screen_h);
+    let layout_screen_windows: Vec<&RenderPlanCameraLayout> = plan
+        .camera_layouts
+        .iter()
+        .filter(|layout| {
+            (layout.end_ms as f64) > window.start_ms()
+                && (layout.start_ms as f64) < window.end_ms()
+                && layout.screen.as_ref().is_some_and(|keyframes| {
+                    keyframes.len() > 1
+                        && keyframes.iter().any(|keyframe| {
+                            let first = &keyframes[0];
+                            let differs =
+                                |a: &RenderLayoutKeyframe, x: f64, y: f64, w: f64, h: f64| {
+                                    (a.x - x).abs() > 0.5
+                                        || (a.y - y).abs() > 0.5
+                                        || (a.width - w).abs() > 0.5
+                                        || (a.height - h).abs() > 0.5
+                                };
+                            differs(keyframe, first.x, first.y, first.width, first.height)
+                                || differs(
+                                    keyframe,
+                                    base_rect.0,
+                                    base_rect.1,
+                                    base_rect.2,
+                                    base_rect.3,
+                                )
+                        })
+                })
+        })
+        .collect();
+    let layout_varies = overlay_sbs_varies || !layout_screen_windows.is_empty();
 
     let mut temp_mask_guards = Vec::new();
     let mut temp_dir_guards: Vec<TempExportDir> = Vec::new();
@@ -2627,6 +2871,46 @@ fn render_composition_window(
         }
     }
 
+    // The flattened camera-layout pose (#5): sorted keyframes across every
+    // layout window, matching the compositor's pose track. Only `camera`-role
+    // tracks consume it — b-roll layers keep their own animation keyframes.
+    let camera_pose =
+        decimate_layout_keyframes(&camera_layout_pose(plan), LAYOUT_EXPR_MAX_KEYFRAMES);
+    // Per-track animation state: the decode/geometry plane covers the union
+    // of the base rect and every pose keyframe (like `camera_decode_size`),
+    // and the pose only earns eval=frame filters when it actually moves.
+    let track_anims: Vec<Option<CameraLayoutAnim>> = camera_track_jobs
+        .iter()
+        .map(|job| {
+            let overlay = &plan.overlays[job.pieces[0].overlay_index];
+            if overlay.role.as_deref() != Some("camera") || camera_pose.is_empty() {
+                return None;
+            }
+            let (mut plane_w, mut plane_h) = (overlay.width, overlay.height);
+            for keyframe in &camera_pose {
+                plane_w = plane_w.max(keyframe.width);
+                plane_h = plane_h.max(keyframe.height);
+            }
+            let rect_varies = camera_pose.iter().any(|keyframe| {
+                (keyframe.x - overlay.x).abs() > 0.5
+                    || (keyframe.y - overlay.y).abs() > 0.5
+                    || (keyframe.width - overlay.width).abs() > 0.5
+                    || (keyframe.height - overlay.height).abs() > 0.5
+            });
+            let opacity_varies = camera_pose
+                .iter()
+                .any(|keyframe| (keyframe.opacity - overlay.opacity).abs() > 0.004);
+            (rect_varies || opacity_varies).then(|| CameraLayoutAnim {
+                plane_w: ((plane_w.round() as u32) / 2 * 2).max(2),
+                plane_h: ((plane_h.round() as u32) / 2 * 2).max(2),
+                rect_varies,
+                opacity_varies,
+                pose_first_ms: camera_pose[0].time_ms,
+                pose_last_ms: camera_pose[camera_pose.len() - 1].time_ms,
+            })
+        })
+        .collect();
+
     // Plates are cached across the export's passes: the file is generated
     // once and the same path is reused as an input in every chunk pass.
     let covers_canvas = background_plate_unneeded(
@@ -2660,33 +2944,52 @@ fn render_composition_window(
         })?
     };
     // A baked canvas shadow tracks the video rect; when the rect moves with
-    // the layout a second plate — composited only inside side-by-side
-    // windows — keeps the shadow pinned to the smaller slot.
-    let bg_sbs_image_path = if layout_varies && canvas.shadow {
-        match sbs_screen_rect {
-            Some(rect) => {
-                let key = format!(
-                    "bg_sbs:{}:{}:{}:{}",
-                    rect.0.round() as i64,
-                    rect.1.round() as i64,
-                    rect.2.round() as i64,
-                    rect.3.round() as i64
-                );
-                shared.plates.get_or_create(&key, || {
-                    Ok(
-                        prepare_canvas_background_plate(canvas, rect, asset_paths, resource_dir)
-                            .map(|path| {
-                                let owned = is_owned_bg_plate(&path);
-                                (path, owned)
-                            }),
-                    )
-                })?
-            }
-            None => None,
+    // the layout extra plates — composited only inside their windows — keep
+    // the shadow pinned to the active slot. Overlay side-by-side windows get
+    // the sbs rect; a camera-layout window animates the rect continuously, so
+    // its plate sits at the window's rest pose — exact for the hold and
+    // waiting at the destination during the brief transitions.
+    let mut bg_anim_plates: Vec<((f64, f64, f64, f64), String)> = Vec::new();
+    if layout_varies && canvas.shadow {
+        if let Some(rect) = sbs_screen_rect {
+            bg_anim_plates.push((rect, sbs_expr.clone()));
         }
-    } else {
-        None
-    };
+        for layout in &layout_screen_windows {
+            if let Some(rect) = layout_rest_screen_rect(layout) {
+                let keyframes = layout.screen.as_ref().expect("screen keyframes");
+                bg_anim_plates.push((
+                    rect,
+                    format!(
+                        "between(t,{},{})",
+                        seconds(keyframes[0].time_ms),
+                        seconds(keyframes[keyframes.len() - 1].time_ms)
+                    ),
+                ));
+            }
+        }
+    }
+    let bg_anim_plate_paths: Vec<Option<PathBuf>> = bg_anim_plates
+        .iter()
+        .map(|(rect, _)| {
+            let key = format!(
+                "bg_anim:{}:{}:{}:{}",
+                rect.0.round() as i64,
+                rect.1.round() as i64,
+                rect.2.round() as i64,
+                rect.3.round() as i64
+            );
+            shared.plates.get_or_create(&key, || {
+                Ok(
+                    prepare_canvas_background_plate(canvas, *rect, asset_paths, resource_dir).map(
+                        |path| {
+                            let owned = is_owned_bg_plate(&path);
+                            (path, owned)
+                        },
+                    ),
+                )
+            })
+        })
+        .collect::<Result<_>>()?;
     let push_generated = |input_specs: &mut Vec<InputSpec>, key: &str, path: &Path| -> usize {
         input_specs.push(InputSpec {
             key: key.to_string(),
@@ -2700,9 +3003,18 @@ fn render_composition_window(
     let bg_input_index = bg_image_path
         .as_ref()
         .map(|path| push_generated(&mut input_specs, "canvas:background", path));
-    let bg_sbs_input_index = bg_sbs_image_path
-        .as_ref()
-        .map(|path| push_generated(&mut input_specs, "canvas:background_sbs", path));
+    let bg_anim_input_indices: Vec<(usize, String)> = bg_anim_plate_paths
+        .iter()
+        .zip(bg_anim_plates.iter())
+        .filter_map(|(path, (_, enable))| {
+            path.as_ref().map(|path| {
+                (
+                    push_generated(&mut input_specs, "canvas:background_anim", path),
+                    enable.clone(),
+                )
+            })
+        })
+        .collect();
     let chapters_input_index = if (settings.chapter_mode == "embed"
         || settings.chapter_mode == "both")
         && !plan.chapters.is_empty()
@@ -2913,15 +3225,48 @@ fn render_composition_window(
 
         if overlay.shape == "circle" || overlay.shape == "rounded" {
             let shape = overlay.shape.as_str();
-            let key = format!("cam_mask:{index}:{shape}:{overlay_w}:{overlay_h}");
+            // Animated layouts scale the camera stream between pose rects, so
+            // the alpha mask is baked at the decode-plane size — the shader
+            // equivalent stretches its SDF across the posed quad the same way.
+            let (mask_w, mask_h) = track_anims[index]
+                .as_ref()
+                .filter(|anim| anim.rect_varies)
+                .map(|anim| (anim.plane_w, anim.plane_h))
+                .unwrap_or((overlay_w, overlay_h));
+            let key = format!("cam_mask:{index}:{shape}:{mask_w}:{mask_h}");
             let mask_path = shared.plates.get_or_create(&key, || {
                 let mask_bytes = if overlay.shape == "circle" {
-                    cursor::generate_circle_mask_png(overlay_w, overlay_h).map_err(|err| {
+                    cursor::generate_circle_mask_png(mask_w, mask_h).map_err(|err| {
                         InternalError::Media(format!("generate circle mask: {err}"))
                     })?
                 } else {
-                    let radius = (overlay.width.min(overlay.height) * 0.12).max(4.0) as f32;
-                    cursor::generate_rounded_rect_mask_png(overlay_w, overlay_h, radius).map_err(
+                    // Pose keyframes carry their own radius; derive the ratio
+                    // from the largest pose so a fullscreen beat keeps its
+                    // corner geometry proportional after the stretch.
+                    let ratio = camera_pose
+                        .iter()
+                        .max_by(|a, b| {
+                            (a.width * a.height)
+                                .partial_cmp(&(b.width * b.height))
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                        .filter(|_| {
+                            track_anims[index]
+                                .as_ref()
+                                .is_some_and(|anim| anim.rect_varies)
+                        })
+                        .map(|keyframe| {
+                            let shortest = keyframe.width.min(keyframe.height);
+                            if shortest > 1.0 {
+                                keyframe.radius / shortest
+                            } else {
+                                0.0
+                            }
+                        })
+                        .filter(|value| *value > 0.0)
+                        .unwrap_or(0.12);
+                    let radius = (mask_w.min(mask_h) as f64 * ratio).max(4.0) as f32;
+                    cursor::generate_rounded_rect_mask_png(mask_w, mask_h, radius).map_err(
                         |err| InternalError::Media(format!("generate rounded mask: {err}")),
                     )?
                 };
@@ -2929,8 +3274,8 @@ fn render_composition_window(
                     "rf-mask-cam-{shape}-{}-{}-{}-{}-{}.png",
                     project_id,
                     index,
-                    overlay_w,
-                    overlay_h,
+                    mask_w,
+                    mask_h,
                     uuid::Uuid::new_v4()
                 ));
                 std::fs::write(&mask_path, &mask_bytes)
@@ -3010,6 +3355,14 @@ fn render_composition_window(
         window.first_frame,
         window.frame_count,
     );
+    // Glass Loupe (M2 #2) on the compatibility renderer: any loupe segment
+    // covering this pass triggers the lens composite below — the frame zoom
+    // ignores loupe segments entirely (`window_needs_zoom` filters them).
+    let loupe_in_window = loupe::loupe_segments(&plan.zoom_segments)
+        .iter()
+        .any(|segment| {
+            (segment.end_ms as f64) > win_start_ms && (segment.start_ms as f64) < win_end_ms
+        });
     let can_pad_canvas = bg_input_index.is_none()
         && canvas.border_radius == 0
         && !canvas.shadow
@@ -3181,6 +3534,17 @@ fn render_composition_window(
         format!("[{label}]")
     };
 
+    // The Glass Loupe samples the *fitted* screen plate — the same stream the
+    // zoom stage consumes — so a lens can magnify source pixels no matter
+    // which canvas/zoom branch the pass took. Splitting the concat output is
+    // cheaper than touching every downstream branch.
+    let video_input = if loupe_in_window {
+        filters.push(format!("{video_input}split=2[vfit][loupe_src]"));
+        "[vfit]".to_string()
+    } else {
+        video_input
+    };
+
     // Pin the video to the plan duration: recordings can end their video
     // stream slightly before the audio (encoder tail lag), which trims would
     // otherwise silently shorten. tpad clones the last frame across any
@@ -3298,17 +3662,18 @@ fn render_composition_window(
             solid_filter.push_str("[bg_plate]");
             filters.push(solid_filter);
         }
-        let mut bg_label = "bg_plate";
-        if let Some(bg_sbs_idx) = bg_sbs_input_index {
-            // The plate carrying the side-by-side-positioned canvas shadow is
-            // composited only inside side-by-side windows, so the baked shadow
-            // follows the video slot as the layout changes.
+        let mut bg_label = "bg_plate".to_string();
+        for (plate_index, (input_index, enable)) in bg_anim_input_indices.iter().enumerate() {
+            // Each rect-state plate carries the canvas shadow for one layout
+            // slot and is composited only inside its window, so the baked
+            // shadow follows the video slot as the layout changes.
+            let next = format!("bg_shaded{plate_index}");
             filters.push(format!(
-                "[{bg_sbs_idx}:v]format=yuv420p,setsar=1,loop=loop=-1:size=1:start=0,fps={},trim=duration={plan_duration},setpts=PTS-STARTPTS{abs_pts}[bg_sbs_plate];\
-                 [bg_plate][bg_sbs_plate]overlay=x=0:y=0:eof_action=repeat:enable='{sbs_expr}':format=auto[bg_shaded]",
+                "[{input_index}:v]format=yuv420p,setsar=1,loop=loop=-1:size=1:start=0,fps={},trim=duration={plan_duration},setpts=PTS-STARTPTS{abs_pts}[bg_anim_plate{plate_index}];\
+                 [{bg_label}][bg_anim_plate{plate_index}]overlay=x=0:y=0:eof_action=repeat:enable='{enable}':format=auto[{next}]",
                 canvas.fps
             ));
-            bg_label = "bg_shaded";
+            bg_label = next;
         }
 
         // 2. Format the fitted video layer [screen_fitted]
@@ -3370,17 +3735,33 @@ fn render_composition_window(
         // side-by-side windows an eval=frame scale resizes it to the smaller
         // rect and the overlay position exprs re-anchor it - the same
         // per-frame layout switch the preview performs on the playhead.
-        let overlay_args = if let Some((sbs_x, sbs_y, sbs_w, sbs_h)) = sbs_screen_rect {
+        // Camera-layout windows (#5) take precedence: their screen keyframes
+        // interpolate per frame, matching `gpu::screen_layout_rect_at`.
+        let field_expr = |pick: &dyn Fn(&RenderLayoutKeyframe) -> f64,
+                          sbs_value: f64,
+                          base_value: f64|
+         -> String {
+            let default = if !sbs_expr.is_empty() {
+                format!("if({sbs_expr},{sbs_value:.2},{base_value:.2})")
+            } else {
+                format!("{base_value:.2}")
+            };
+            screen_layout_expr(&layout_screen_windows, pick, &default, "t")
+        };
+        let (sbs_x, sbs_y, sbs_w, sbs_h) = sbs_screen_rect.unwrap_or(base_rect);
+        let overlay_args = if layout_varies {
+            let w_expr = even_layout_expr(&field_expr(&|k| k.width, sbs_w, screen_w));
+            let h_expr = even_layout_expr(&field_expr(&|k| k.height, sbs_h, screen_h));
+            let x_expr = field_expr(&|k| k.x, sbs_x, screen_x);
+            let y_expr = field_expr(&|k| k.y, sbs_y, screen_y);
             filters.push(format!(
-                "[{fitted_label}]scale=w='if({sbs_expr},{sbs_w:.0},{screen_w:.0})':h='if({sbs_expr},{sbs_h:.0},{screen_h:.0})':eval=frame,setsar=1[screen_fitted_dyn]"
+                "[{fitted_label}]scale=w='{w_expr}':h='{h_expr}':eval=frame,setsar=1[screen_fitted_dyn]"
             ));
-            format!(
-                "x='if({sbs_expr},{sbs_x:.0},{screen_x:.0})':y='if({sbs_expr},{sbs_y:.0},{screen_y:.0})':eval=frame"
-            )
+            format!("x='{x_expr}':y='{y_expr}':eval=frame")
         } else {
             format!("x={screen_x:.0}:y={screen_y:.0}")
         };
-        let fitted_label = if sbs_screen_rect.is_some() {
+        let fitted_label = if layout_varies {
             "screen_fitted_dyn".to_string()
         } else {
             fitted_label
@@ -3468,24 +3849,51 @@ fn render_composition_window(
     // below camera bubbles and privacy masks, overlay items above both, and
     // burned-in captions on top.
     // Layout windows the cursor maps through: the full rect outside
-    // side-by-side windows, the smaller slot inside them. The tile sweep
-    // evaluates the active window per frame, so only the drawn cursor is
-    // streamed.
-    let cursor_screen_windows = if let Some(sbs_rect) = sbs_screen_rect {
+    // side-by-side windows, the smaller slot inside them. Camera-layout
+    // windows map through their rest pose so the pointer lands on the slot
+    // the screen holds for most of the window. The tile sweep evaluates the
+    // active window per frame, so only the drawn cursor is streamed.
+    type ScreenState = (u64, u64, (f64, f64, f64, f64));
+    let mut screen_states: Vec<ScreenState> = Vec::new();
+    if let Some(sbs_rect) = sbs_screen_rect {
+        for &(start, end) in &sbs_windows {
+            screen_states.push((start, end, sbs_rect));
+        }
+    }
+    for layout in &layout_screen_windows {
+        if let (Some(keyframes), Some(rect)) =
+            (layout.screen.as_ref(), layout_rest_screen_rect(layout))
+        {
+            screen_states.push((
+                keyframes[0].time_ms,
+                keyframes[keyframes.len() - 1].time_ms,
+                rect,
+            ));
+        }
+    }
+    let cursor_screen_windows = if screen_states.is_empty() {
+        None
+    } else {
+        screen_states.sort_by_key(|(start, _, _)| *start);
+        let base = (screen_x, screen_y, screen_w, screen_h);
         let mut windows: Vec<cursor::ScreenRectWindow> = Vec::new();
         let mut cursor = 0u64;
-        for &(start, end) in &sbs_windows {
+        for (start, end, rect) in screen_states {
+            if end <= cursor {
+                continue;
+            }
+            let start = start.max(cursor);
             if start > cursor {
                 windows.push(cursor::ScreenRectWindow {
                     start_ms: cursor,
                     end_ms: start,
-                    rect: (screen_x, screen_y, screen_w, screen_h),
+                    rect: base,
                 });
             }
             windows.push(cursor::ScreenRectWindow {
                 start_ms: start,
                 end_ms: end,
-                rect: sbs_rect,
+                rect,
             });
             cursor = end;
         }
@@ -3493,12 +3901,10 @@ fn render_composition_window(
             windows.push(cursor::ScreenRectWindow {
                 start_ms: cursor,
                 end_ms: plan.duration_ms,
-                rect: (screen_x, screen_y, screen_w, screen_h),
+                rect: base,
             });
         }
         Some(windows)
-    } else {
-        None
     };
     let mut cursor_renderers = build_cursor_renderers(
         plan,
@@ -3561,6 +3967,28 @@ fn render_composition_window(
         .as_ref()
         .is_some_and(|overlay| overlay.enabled)
         && !plan.keystrokes.is_empty();
+    // The lens plate samples the fitted screen stream (`loupe_src`) — plate
+    // dims follow the layout branch: a direct-pad pass ships the whole canvas,
+    // the other branches ship the screen rect the stream was fitted to.
+    let (loupe_plate, loupe_origin) = if can_direct_pad {
+        ((canvas.width, canvas.height), (0.0, 0.0))
+    } else {
+        ((target_seg_w, target_seg_h), (screen_x, screen_y))
+    };
+    let loupe_prepared = if loupe_in_window {
+        loupe::prepare_compat_loupe(
+            plan,
+            canvas,
+            &cursor_renderers,
+            (screen_x, screen_y, screen_w, screen_h),
+            loupe_origin,
+            loupe_plate,
+            window.first_frame,
+            window.frame_count,
+        )
+    } else {
+        None
+    };
     if !cursor_renderers.is_empty() || has_overlay_items || has_keystrokes {
         let plate_input_index = input_specs.len();
         let plate_source = format!("[{plate_input_index}:v]");
@@ -3590,10 +4018,20 @@ fn render_composition_window(
         // Gate each plate overlay to the time windows where its content can be
         // visible; outside them the blend is skipped and the base passes
         // through untouched, which keeps the CPU cost of an idle plate near
-        // zero (the plate input itself is still consumed at CFR rate).
-        let cursor_enable = plate_enable_expr(cursor_windows, plan.duration_ms)
-            .map(|expr| format!(":enable='{expr}'"))
-            .unwrap_or_default();
+        // zero (the plate input itself is still consumed at CFR rate). While a
+        // Glass Loupe lens is visible the cursor plane hides under the glass —
+        // the GPU compositor drops it the same way.
+        let cursor_enable = match (
+            plate_enable_expr(cursor_windows, plan.duration_ms),
+            loupe_prepared.as_ref(),
+        ) {
+            (Some(expr), Some(loupe)) => {
+                format!(":enable='({expr})*({})'", loupe.cursor_suppression)
+            }
+            (Some(expr), None) => format!(":enable='{expr}'"),
+            (None, Some(loupe)) => format!(":enable='{}'", loupe.cursor_suppression),
+            (None, None) => String::new(),
+        };
         if prepared.planes.len() > 1 {
             // Crop each packed slice out of the stream into its own plate
             // label, then composite each at its stack position. Slices pack
@@ -3708,6 +4146,42 @@ fn render_composition_window(
         cursor_plan = Some(prepared);
     }
 
+    // Glass Loupe (M2 #2): composite the lens above the cursor plate — items
+    // and keys still layer over it afterwards, matching the GPU order. The
+    // lens content itself samples `loupe_src`, the pre-zoom fitted screen.
+    if let Some(prepared) = loupe_prepared.as_ref() {
+        let sendcmd_path = if prepared.sendcmd.is_empty() {
+            None
+        } else {
+            let path = std::env::temp_dir().join(format!(
+                "rf-loupe-{}-{}.txt",
+                plan.project_id,
+                uuid::Uuid::new_v4()
+            ));
+            std::fs::write(&path, prepared.sendcmd.as_bytes()).map_err(|error| {
+                InternalError::Storage(format!("write loupe sendcmd script: {error}"))
+            })?;
+            temp_mask_guards.push(TempMaskFile(path.clone()));
+            Some(path)
+        };
+        current_label = loupe::push_compat_loupe(
+            &mut filters,
+            "[loupe_src]",
+            &current_label,
+            prepared,
+            sendcmd_path.as_deref(),
+            canvas.fps,
+            &seconds((win_end_ms - win_start_ms).max(0.0) as u64),
+            &abs_pts,
+        );
+    } else if loupe_in_window {
+        // A loupe segment covers this window but never reaches a visible pose
+        // (e.g. the pass clips its first sub-millisecond of presence): the
+        // `[loupe_src]` split pad still has to be drained or the graph fails
+        // with an unconnected output.
+        filters.push("[loupe_src]nullsink".to_string());
+    }
+
     for (index, job) in camera_track_jobs.iter().enumerate() {
         let track = &camera_tracks[job.track_index];
         let overlay = &plan.overlays[track.pieces[0]];
@@ -3727,13 +4201,40 @@ fn render_composition_window(
             seconds(track.end_ms)
         );
 
+        let mut geometry_ops = String::new();
+        let mut matte_geometry_ops = String::new();
+        let overlay_w = ((overlay.width.round() as u32) / 2 * 2).max(2);
+        let overlay_h = ((overlay.height.round() as u32) / 2 * 2).max(2);
+        let overlay_x = (overlay.x.round() as i32) / 2 * 2;
+        let overlay_y = (overlay.y.round() as i32) / 2 * 2;
+        // Camera layouts (#5): when the pose rect actually moves, the decode
+        // fits the union plane and an eval=frame scale/overlay interpolates
+        // per frame — the compositor stretches the same fixed plane into the
+        // posed quad. Baked border/shadow plates stay at the base rect, so
+        // they are gated off across the pose span like `posed` does on GPU.
+        let anim = track_anims.get(index).and_then(|anim| anim.as_ref());
+        let rect_animated = anim.is_some_and(|anim| anim.rect_varies);
+        let (fit_w, fit_h) = match anim.filter(|anim| anim.rect_varies) {
+            Some(anim) => (anim.plane_w, anim.plane_h),
+            None => (overlay_w, overlay_h),
+        };
+        let pose_gate = anim
+            .map(|anim| {
+                format!(
+                    "*not(between(t,{},{}))",
+                    seconds(anim.pose_first_ms),
+                    seconds(anim.pose_last_ms)
+                )
+            })
+            .unwrap_or_default();
+
         // 1. Composite shadow underlay if present
         if let Some(&(shadow_idx, shadow_x, shadow_y)) = camera_shadow_indices.get(&index) {
             let after_shadow_label = format!("cam_with_shadow{index}");
             let shadow_loop_label = format!("cam_shadow_loop{index}");
             filters.push(format!(
                 "[{shadow_idx}:v]format=rgba,setsar=1,loop=loop=-1:size=1:start=0[{shadow_loop_label}];\
-                 [{current_label}][{shadow_loop_label}]overlay=x={shadow_x}:y={shadow_y}:eof_action=repeat:enable='{enable}':format=auto[{after_shadow_label}]"
+                 [{current_label}][{shadow_loop_label}]overlay=x={shadow_x}:y={shadow_y}:eof_action=repeat:enable='{enable}{pose_gate}':format=auto[{after_shadow_label}]"
             ));
             current_label = after_shadow_label;
         }
@@ -3741,12 +4242,6 @@ fn render_composition_window(
         // 2. Decode every piece in this window, frame-snap each to its output
         // length, then concatenate. One chain per track replaces one chain per
         // Smart Cut piece.
-        let mut geometry_ops = String::new();
-        let mut matte_geometry_ops = String::new();
-        let overlay_w = ((overlay.width.round() as u32) / 2 * 2).max(2);
-        let overlay_h = ((overlay.height.round() as u32) / 2 * 2).max(2);
-        let overlay_x = (overlay.x.round() as i32) / 2 * 2;
-        let overlay_y = (overlay.y.round() as i32) / 2 * 2;
         let chain_start_ms = plan.overlays[job.pieces[0].overlay_index].output_start_ms as f64
             + job.pieces[0].clamp.cut_out_s * 1000.0;
         let face_tracked = overlay.crop_keyframes.len() > 1;
@@ -3781,18 +4276,18 @@ fn render_composition_window(
                 ));
             }
             geometry_ops.push_str(&format!(
-                ",scale={overlay_w}:{overlay_h}:force_original_aspect_ratio=decrease:force_divisible_by=2:threads=auto,pad={overlay_w}:{overlay_h}:(ow-iw)/2:(oh-ih)/2:color=black@0"
+                ",scale={fit_w}:{fit_h}:force_original_aspect_ratio=decrease:force_divisible_by=2:threads=auto,pad={fit_w}:{fit_h}:(ow-iw)/2:(oh-ih)/2:color=black@0"
             ));
         } else if let Some(crop) = &overlay.crop {
             let crop_ops = format!(",crop={}:{}:{}:{}", crop.width, crop.height, crop.x, crop.y);
             geometry_ops.push_str(&crop_ops);
             matte_geometry_ops.push_str(&crop_ops);
             geometry_ops.push_str(&format!(
-                ",scale={overlay_w}:{overlay_h}:force_original_aspect_ratio=decrease:force_divisible_by=2:threads=auto,pad={overlay_w}:{overlay_h}:(ow-iw)/2:(oh-ih)/2:color=black@0"
+                ",scale={fit_w}:{fit_h}:force_original_aspect_ratio=decrease:force_divisible_by=2:threads=auto,pad={fit_w}:{fit_h}:(ow-iw)/2:(oh-ih)/2:color=black@0"
             ));
         } else {
             geometry_ops.push_str(&format!(
-                ",scale={overlay_w}:{overlay_h}:force_original_aspect_ratio=increase:force_divisible_by=2:threads=auto,crop={overlay_w}:{overlay_h}:(iw-ow)/2:(ih-oh)/2"
+                ",scale={fit_w}:{fit_h}:force_original_aspect_ratio=increase:force_divisible_by=2:threads=auto,crop={fit_w}:{fit_h}:(iw-ow)/2:(ih-oh)/2"
             ));
         }
 
@@ -3879,7 +4374,7 @@ fn render_composition_window(
             let mut matte_filter =
                 format!("{joined}{}", matte_geometry_ops.trim_start_matches(','));
             matte_filter.push_str(&format!(
-                ",scale={overlay_w}:{overlay_h}:force_original_aspect_ratio=increase:force_divisible_by=2:threads=auto,crop={overlay_w}:{overlay_h},format=gray"
+                ",scale={fit_w}:{fit_h}:force_original_aspect_ratio=increase:force_divisible_by=2:threads=auto,crop={fit_w}:{fit_h},format=gray"
             ));
             let cutout = overlay.cutout.as_ref();
             let softness = cutout.map(|c| c.edge_softness).unwrap_or(0.0);
@@ -3960,7 +4455,7 @@ fn render_composition_window(
                         .map(|c| safe_filter_color(&c.color))
                         .unwrap_or_else(|| "0x0f172a".to_string());
                     filters.push(format!(
-                        "color=c={color}:s={overlay_w}x{overlay_h}:r={fps}[{out_label}_bg]"
+                        "color=c={color}:s={fit_w}x{fit_h}:r={fps}[{out_label}_bg]"
                     ));
                     filters.push(format!(
                         "[{out_label}_bg][{foreground}]overlay=0:0:format=auto[{out_label}]"
@@ -3970,7 +4465,7 @@ fn render_composition_window(
                     if let Some(bg_index) = job.bg_image_input_index {
                         let bg = format!("camera{index}_bg_image");
                         filters.push(format!(
-                            "[{bg_index}:v]scale={overlay_w}:{overlay_h}:force_original_aspect_ratio=increase,crop={overlay_w}:{overlay_h},format=rgba[{bg}]"
+                            "[{bg_index}:v]scale={fit_w}:{fit_h}:force_original_aspect_ratio=increase,crop={fit_w}:{fit_h},format=rgba[{bg}]"
                         ));
                         filters.push(format!(
                             "[{bg}][{foreground}]overlay=0:0:format=auto[{out_label}]"
@@ -3988,7 +4483,10 @@ fn render_composition_window(
             out_label
         } else {
             let label = format!("camera_stream{index}");
-            if overlay.opacity < 1.0 {
+            // Animated pose opacity is applied per frame by the geq stage
+            // below; a static mixer would bake the wrong alpha mid-window.
+            let opacity_animated = anim.is_some_and(|anim| anim.opacity_varies);
+            if overlay.opacity < 1.0 && !opacity_animated {
                 camera_filter.push_str(&format!(",colorchannelmixer=aa={:.4}", overlay.opacity));
             }
             camera_filter.push_str(&format!(",format=rgba[{label}]"));
@@ -4002,7 +4500,7 @@ fn render_composition_window(
             let mask_label = format!("cam_mask_loop{index}");
             let masked_label = format!("camera_masked{index}");
             filters.push(format!(
-                "[{cam_mask_idx}:v]format=gray,scale={overlay_w}:{overlay_h},setsar=1,loop=loop=-1:size=1:start=0,fps={},trim=duration={chain_duration},setpts=PTS-STARTPTS[{mask_label}];\
+                "[{cam_mask_idx}:v]format=gray,scale={fit_w}:{fit_h},setsar=1,loop=loop=-1:size=1:start=0,fps={},trim=duration={chain_duration},setpts=PTS-STARTPTS[{mask_label}];\
                  [{camera_stream_label}][{mask_label}]alphamerge[{masked_label}]",
                 canvas.fps
             ));
@@ -4028,9 +4526,58 @@ fn render_composition_window(
             masked_camera_label
         };
 
+        // Camera layouts (#5): after the setpts shift the stream's `t` equals
+        // output time, so eval=frame expressions here interpolate the pose
+        // exactly when the preview does. The geq alpha multiply must run on
+        // the fixed-size plane *before* the dynamic scale: geq bakes its
+        // working dimensions at init and silently clips to them when fed
+        // frames whose size changes per frame. Scaling a straight-alpha rgba
+        // frame afterwards interpolates the alpha edge correctly, so
+        // `hidden` windows still fade out while the rect animates.
+        let mut camera_out_label = timed_camera_label;
+        if anim.is_some_and(|anim| anim.opacity_varies) {
+            let opacity_expr = camera_pose_expr(
+                &camera_pose,
+                |keyframe| keyframe.opacity,
+                overlay.opacity,
+                "T",
+            );
+            let alpha_label = format!("camera_layout_alpha{index}");
+            filters.push(format!(
+                "[{camera_out_label}]format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='clip(alpha(X,Y)*({opacity_expr}),0,255)'[{alpha_label}]"
+            ));
+            camera_out_label = alpha_label;
+        }
+        if rect_animated {
+            let w_expr = even_layout_expr(&camera_pose_expr(
+                &camera_pose,
+                |keyframe| keyframe.width,
+                overlay.width,
+                "t",
+            ));
+            let h_expr = even_layout_expr(&camera_pose_expr(
+                &camera_pose,
+                |keyframe| keyframe.height,
+                overlay.height,
+                "t",
+            ));
+            let dyn_label = format!("camera_layout_dyn{index}");
+            filters.push(format!(
+                "[{camera_out_label}]scale=w='{w_expr}':h='{h_expr}':eval=frame,setsar=1[{dyn_label}]"
+            ));
+            camera_out_label = dyn_label;
+        }
+        let overlay_xy = if rect_animated {
+            let x_expr = camera_pose_expr(&camera_pose, |keyframe| keyframe.x, overlay.x, "t");
+            let y_expr = camera_pose_expr(&camera_pose, |keyframe| keyframe.y, overlay.y, "t");
+            format!("x='{x_expr}':y='{y_expr}':eval=frame")
+        } else {
+            format!("x={overlay_x}:y={overlay_y}")
+        };
+
         let after_camera_label = format!("cam_composite{index}");
         filters.push(format!(
-            "[{current_label}][{timed_camera_label}]overlay=x={overlay_x}:y={overlay_y}:eof_action=pass:enable='{enable}':format=auto[{after_camera_label}]"
+            "[{current_label}][{camera_out_label}]overlay={overlay_xy}:eof_action=pass:enable='{enable}':format=auto[{after_camera_label}]"
         ));
         current_label = after_camera_label;
 
@@ -4040,7 +4587,7 @@ fn render_composition_window(
             let after_border_label = format!("cam_with_border{index}");
             filters.push(format!(
                 "[{border_idx}:v]format=rgba,scale={overlay_w}:{overlay_h},setsar=1,loop=loop=-1:size=1:start=0[{border_loop_label}];\
-                 [{current_label}][{border_loop_label}]overlay=x={overlay_x}:y={overlay_y}:eof_action=repeat:enable='{enable}':format=auto[{after_border_label}]"
+                 [{current_label}][{border_loop_label}]overlay=x={overlay_x}:y={overlay_y}:eof_action=repeat:enable='{enable}{pose_gate}':format=auto[{after_border_label}]"
             ));
             current_label = after_border_label;
         }
@@ -5329,6 +5876,19 @@ struct CameraPieceJob {
     clamp: CameraClamp,
 }
 
+/// Per-track camera-layout animation state (#5): the decode/geometry plane
+/// sized to the union of the base rect and every pose keyframe (like the
+/// compositor's `camera_decode_size`), plus which pose fields actually move so
+/// a layout that only fades doesn't pay for an eval=frame rescale.
+struct CameraLayoutAnim {
+    plane_w: u32,
+    plane_h: u32,
+    rect_varies: bool,
+    opacity_varies: bool,
+    pose_first_ms: u64,
+    pose_last_ms: u64,
+}
+
 /// Add the cutout matte and optional background image as graph inputs for one
 /// camera track. Seeked layouts share the camera input's window; the legacy
 /// whole-asset layout reads them unseeked.
@@ -6526,7 +7086,14 @@ fn push_zoom_stage(
     screen_h: f64,
     abs_pts: &str,
 ) {
-    let (z_expr, x_expr, y_expr) = build_zoompan_expressions(plan, canvas, screen_w, screen_h);
+    // Zoom/pan motion blur (M2 #1) rides the same crop expressions: each tap
+    // is a `zoompan` branch sampling the shutter at a shifted `it`, then `mix`
+    // averages them. `zoom`/`cx`/`cy` stay unwrapped so a tap can blend the
+    // trajectory before the top-left clamp.
+    let blur = camera::motion_blur_params(canvas);
+    let (z_expr, cx_expr, cy_expr) =
+        camera::build_zoompan_crop_expressions(plan, canvas, screen_w, screen_h);
+    let (x_expr, y_expr) = camera::wrap_zoompan_xy(&cx_expr, &cy_expr);
     let zoompan = format!(
         "zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d=1:s={screen_w:.0}x{screen_h:.0}:fps={},setsar=1",
         canvas.fps
@@ -6552,7 +7119,37 @@ fn push_zoom_stage(
         None
     };
     let Some(pieces) = pieces else {
-        filters.push(format!("{input_label}{zoompan}{reabs}[{output_label}]"));
+        let taps = blur
+            .map(|params| {
+                camera::motion_blur_window_taps(
+                    &plan.zoom_segments,
+                    canvas,
+                    &params,
+                    first_frame,
+                    frame_count,
+                    screen_w,
+                    screen_h,
+                )
+                .min(camera::COMPAT_MAX_BLUR_TAPS)
+            })
+            .unwrap_or(1);
+        if let Some(params) = blur.filter(|_| taps > 1) {
+            push_blur_tap_chain(
+                filters,
+                "zw",
+                input_label,
+                (&z_expr, &cx_expr, &cy_expr),
+                taps,
+                &params,
+                screen_w,
+                screen_h,
+                canvas.fps,
+                &reabs,
+                output_label,
+            );
+        } else {
+            filters.push(format!("{input_label}{zoompan}{reabs}[{output_label}]"));
+        }
         return;
     };
     // Whole-window steady zoom: skip the split/concat bookkeeping entirely.
@@ -6576,6 +7173,39 @@ fn push_zoom_stage(
         let start = piece.start_frame.saturating_sub(first_frame);
         let end = piece.end_frame.saturating_sub(first_frame);
         let label = format!("zo{index}");
+        let transition_blur = match (&piece.kind, blur) {
+            (camera::ZoomPieceKind::Transition, Some(params)) => {
+                let taps = camera::motion_blur_window_taps(
+                    &plan.zoom_segments,
+                    canvas,
+                    &params,
+                    piece.start_frame,
+                    piece.end_frame - piece.start_frame,
+                    screen_w,
+                    screen_h,
+                )
+                .min(camera::COMPAT_MAX_BLUR_TAPS);
+                (taps > 1).then_some((params, taps))
+            }
+            _ => None,
+        };
+        if let Some((params, transition_taps)) = transition_blur {
+            push_blur_tap_chain(
+                filters,
+                &format!("zb{index}"),
+                &format!("[zs{index}]trim=start_frame={start}:end_frame={end},"),
+                (&z_expr, &cx_expr, &cy_expr),
+                transition_taps,
+                &params,
+                screen_w,
+                screen_h,
+                canvas.fps,
+                "",
+                &label,
+            );
+            branch_labels.push_str(&format!("[{label}]"));
+            continue;
+        }
         let body = match piece.kind {
             camera::ZoomPieceKind::Identity => format!(
                 "trim=start_frame={start}:end_frame={end},setpts=PTS-STARTPTS,setsar=1"
@@ -6602,6 +7232,56 @@ fn push_zoom_stage(
     ));
     filters.push(format!(
         "[zoom_joined]settb=1/{fps},setpts=N{abs_pts}[{output_label}]"
+    ));
+}
+
+/// Compat zoom/pan motion blur (M2 #1): fan `input_chain` into `taps`
+/// `zoompan` branches, each sampling the crop trajectory at a shutter offset
+/// inside `±half_ms`, then average them with `mix`. `input_chain` already
+/// includes any `trim` needed; `tail` carries the re-anchoring `setpts` when
+/// the caller has one. Mirrors `gpu::motion_blur_strip`'s sweep math — the
+/// shader reaches 16 taps while each compat tap is a full scale chain, so the
+/// caller caps at `COMPAT_MAX_BLUR_TAPS`.
+#[allow(clippy::too_many_arguments)]
+fn push_blur_tap_chain(
+    filters: &mut Vec<String>,
+    tag: &str,
+    input_chain: &str,
+    crop_exprs: (&str, &str, &str),
+    taps: u32,
+    params: &camera::MotionBlurParams,
+    screen_w: f64,
+    screen_h: f64,
+    fps: u32,
+    tail: &str,
+    output_label: &str,
+) {
+    let mut split = format!("{input_chain}split={taps}");
+    for tap in 0..taps {
+        split.push_str(&format!("[{tag}_s{tap}]"));
+    }
+    filters.push(split);
+    for tap in 0..taps {
+        let (z, x, y) = camera::zoom_blur_tap_exprs(
+            crop_exprs.0,
+            crop_exprs.1,
+            crop_exprs.2,
+            tap,
+            taps,
+            params,
+        );
+        filters.push(format!(
+            "[{tag}_s{tap}]zoompan=z='{z}':x='{x}':y='{y}':d=1:s={screen_w:.0}x{screen_h:.0}:fps={fps},setsar=1[{tag}_t{tap}]"
+        ));
+    }
+    let mut mix_inputs = String::new();
+    for tap in 0..taps {
+        mix_inputs.push_str(&format!("[{tag}_t{tap}]"));
+    }
+    // Uniform weights — the GPU strip uses a flat box filter too.
+    let weights = vec!["1"; taps as usize].join(" ");
+    filters.push(format!(
+        "{mix_inputs}mix=inputs={taps}:weights='{weights}':duration=first{tail}[{output_label}]"
     ));
 }
 
@@ -8851,13 +9531,18 @@ fn validate_canvas(canvas: &cursor::RenderCanvas) -> Result<()> {
 
 fn safe_filter_color(value: &str) -> String {
     let trimmed = value.trim();
-    let is_hex = (trimmed.len() == 7 || trimmed.len() == 9)
-        && trimmed.starts_with('#')
-        && trimmed[1..]
-            .chars()
-            .all(|character| character.is_ascii_hexdigit());
-    if is_hex {
-        return trimmed.to_string();
+    // App-palette names resolve to the Tailwind accents the editor shows for
+    // them — these deliberately shadow the CSS named colors below.
+    match trimmed.to_ascii_lowercase().as_str() {
+        "red" => return "#ef4444".into(),
+        "blue" => return "#3b82f6".into(),
+        "green" => return "#10b981".into(),
+        "yellow" => return "#f59e0b".into(),
+        "gray" | "grey" => return "#6b7280".into(),
+        _ => {}
+    }
+    if let Some(color) = overlay_engine::parse_css_color(trimmed) {
+        return color.to_hex_string();
     }
     // If the value contains a hex color (e.g. from linear-gradient(#1e1b4b, ...)), extract the first 6-digit hex
     if let Some(pos) = trimmed.find('#') {
@@ -8866,43 +9551,20 @@ fn safe_filter_color(value: &str) -> String {
             return candidate[..7].to_string();
         }
     }
-    match trimmed.to_ascii_lowercase().as_str() {
-        "black" => "#000000".into(),
-        "white" => "#ffffff".into(),
-        "red" => "#ef4444".into(),
-        "blue" => "#3b82f6".into(),
-        "green" => "#10b981".into(),
-        "yellow" => "#f59e0b".into(),
-        "gray" | "grey" => "#6b7280".into(),
-        "transparent" => "#00000000".into(),
-        _ => "#000000".into(),
-    }
+    "#000000".into()
 }
-fn parse_color_hex(hex: &str, default_alpha: f32) -> Color {
-    let raw = hex.trim().trim_start_matches('#');
-    if raw.len() == 6 {
-        let r = u8::from_str_radix(&raw[0..2], 16).unwrap_or(0);
-        let g = u8::from_str_radix(&raw[2..4], 16).unwrap_or(0);
-        let b = u8::from_str_radix(&raw[4..6], 16).unwrap_or(0);
-        Color::from_rgba8(r, g, b, (default_alpha * 255.0).round() as u8)
-    } else if raw.len() == 8 {
-        let r = u8::from_str_radix(&raw[0..2], 16).unwrap_or(0);
-        let g = u8::from_str_radix(&raw[2..4], 16).unwrap_or(0);
-        let b = u8::from_str_radix(&raw[4..6], 16).unwrap_or(0);
-        let a = u8::from_str_radix(&raw[6..8], 16).unwrap_or(255);
-        Color::from_rgba8(
-            r,
-            g,
-            b,
-            ((a as f32 / 255.0) * default_alpha * 255.0).round() as u8,
-        )
-    } else if raw.len() == 3 {
-        let r = u8::from_str_radix(&format!("{}{}", &raw[0..1], &raw[0..1]), 16).unwrap_or(0);
-        let g = u8::from_str_radix(&format!("{}{}", &raw[1..2], &raw[1..2]), 16).unwrap_or(0);
-        let b = u8::from_str_radix(&format!("{}{}", &raw[2..3], &raw[2..3]), 16).unwrap_or(0);
-        Color::from_rgba8(r, g, b, (default_alpha * 255.0).round() as u8)
-    } else {
-        Color::from_rgba8(0, 0, 0, (default_alpha * 255.0).round() as u8)
+fn parse_color_hex(color: &str, default_alpha: f32) -> Color {
+    let default_alpha = default_alpha.clamp(0.0, 1.0);
+    // Bare `rrggbb`/`rrggbbaa` without the leading `#` — engine defaults like
+    // loupe ring colors occasionally arrive that way.
+    let parsed = overlay_engine::parse_css_color(color)
+        .or_else(|| overlay_engine::parse_css_color(&format!("#{}", color.trim())));
+    match parsed {
+        Some(parsed) => {
+            let alpha = (parsed.a * default_alpha).clamp(0.0, 1.0);
+            Color::from_rgba(parsed.r, parsed.g, parsed.b, alpha).unwrap_or(Color::TRANSPARENT)
+        }
+        None => Color::from_rgba8(0, 0, 0, (default_alpha * 255.0).round() as u8),
     }
 }
 
@@ -9923,33 +10585,13 @@ fn parse_gradient_stops(stop_parts: &[String]) -> String {
             (stop_trimmed, format!("{pct:.1}%"))
         };
 
-        let (hex_color, opacity) = if color == "transparent" {
-            ("#000000".to_string(), 0.0)
-        } else if color.starts_with("rgba(") && color.ends_with(')') {
-            let inner = &color[5..color.len() - 1];
-            let nums: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
-            if nums.len() == 4 {
-                let r: u8 = nums[0].parse().unwrap_or(0);
-                let g: u8 = nums[1].parse().unwrap_or(0);
-                let b: u8 = nums[2].parse().unwrap_or(0);
-                let a: f64 = nums[3].parse().unwrap_or(1.0);
-                (format!("#{r:02x}{g:02x}{b:02x}"), a)
-            } else {
-                (color.to_string(), 1.0)
+        let (hex_color, opacity) = match overlay_engine::parse_css_color(color) {
+            Some(parsed) => {
+                let [r, g, b, a] = parsed.to_rgba8();
+                (format!("#{r:02x}{g:02x}{b:02x}"), a as f64 / 255.0)
             }
-        } else if color.starts_with("rgb(") && color.ends_with(')') {
-            let inner = &color[4..color.len() - 1];
-            let nums: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
-            if nums.len() == 3 {
-                let r: u8 = nums[0].parse().unwrap_or(0);
-                let g: u8 = nums[1].parse().unwrap_or(0);
-                let b: u8 = nums[2].parse().unwrap_or(0);
-                (format!("#{r:02x}{g:02x}{b:02x}"), 1.0)
-            } else {
-                (color.to_string(), 1.0)
-            }
-        } else {
-            (color.to_string(), 1.0)
+            // Unparseable stops pass through so usvg can still try them.
+            None => (color.to_string(), 1.0),
         };
 
         stops_xml.push_str(&format!(
@@ -10423,12 +11065,7 @@ pub(crate) fn prepare_canvas_background_plate(
     let height = canvas.height;
     let trimmed = canvas.background.trim();
 
-    let is_solid_color = trimmed.is_empty()
-        || trimmed.starts_with('#')
-        || trimmed.starts_with("rgb(")
-        || trimmed.starts_with("rgba(")
-        || trimmed.starts_with("hsl(")
-        || trimmed.starts_with("hsla(");
+    let is_solid_color = trimmed.is_empty() || overlay_engine::parse_css_color(trimmed).is_some();
 
     // If it's a solid color and there is no shadow, no border radius, and no dim/blur:
     // return None so direct padding can be used in FFmpeg without any plate files or overlays.
@@ -11923,6 +12560,84 @@ mod tests {
             keystrokes: Vec::new(),
             keystroke_platform: "unknown".into(),
         }
+    }
+
+    /// A loupe zoom segment — the shape `toZoomSegments` emits for a Glass
+    /// Loupe, and the simplest plan that always drops an effect on the
+    /// compatibility renderer.
+    fn loupe_zoom_segment() -> RenderPlanZoomSegment {
+        RenderPlanZoomSegment {
+            style: Some("loupe".into()),
+            loupe: None,
+            id: "loupe".into(),
+            start_ms: 500,
+            end_ms: 1_500,
+            target: RenderCropFloat {
+                x: 480.0,
+                y: 270.0,
+                width: 960.0,
+                height: 540.0,
+            },
+            scale: 2.0,
+            easing: "linear".into(),
+            transition_in_ms: 0,
+            transition_out_ms: 0,
+            enabled: true,
+            mode: "manual".into(),
+            source: "manual".into(),
+            preset: "product-demo".into(),
+            follow_deadzone_percent: None,
+            follow_smoothing_alpha: None,
+            label: None,
+            from_target: None,
+            from_scale: None,
+            keyframes: None,
+            motion_plan: None,
+        }
+    }
+
+    #[test]
+    fn compat_render_notes_explain_a_degraded_renderer_choice() {
+        let mut plan = valid_plan();
+        // A frame zoom still degrades on compat (`zoom-detail`: it samples the
+        // canvas-resolution stream); loupe and zoom/pan blur are drawn now.
+        plan.zoom_segments = vec![RenderPlanZoomSegment {
+            style: None,
+            ..loupe_zoom_segment()
+        }];
+        let settings = default_export_settings();
+
+        // An explicit `compatibility` preference carries no reason: the notes
+        // list only the dropped effects, as before.
+        let notes = compat_render_notes(&plan, &settings, None);
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].effect, "zoom-detail");
+
+        // An `auto`/`gpu` decision that landed on the compatibility renderer
+        // names itself first so the user sees *why* the effect degraded.
+        let notes = compat_render_notes(
+            &plan,
+            &settings,
+            Some("plan needs features the GPU compositor does not support yet: x".into()),
+        );
+        assert_eq!(notes.len(), 2);
+        assert_eq!(notes[0].effect, "renderer");
+        assert!(notes[0].reason.contains("compatibility renderer"));
+        assert_eq!(notes[1].effect, "zoom-detail");
+    }
+
+    #[test]
+    fn compat_render_notes_skips_renderer_reason_when_nothing_dropped() {
+        let plan = valid_plan();
+        let settings = default_export_settings();
+        // A passthrough plan loses nothing on the compatibility path, so the
+        // renderer reason alone must not manufacture a "simplification".
+        let notes = compat_render_notes(
+            &plan,
+            &settings,
+            Some("auto keeps passthrough-only exports on the in-process FFmpeg pipeline".into()),
+        );
+        assert!(notes.is_empty());
     }
 
     #[test]
@@ -17077,6 +17792,59 @@ mod tests {
     }
 
     #[test]
+    fn test_safe_filter_color_css_syntaxes() {
+        // Functional colors the preview accepts must not collapse to black.
+        assert_eq!(safe_filter_color("rgb(190, 242, 100)"), "#bef264");
+        assert_eq!(safe_filter_color("rgba(255,255,255,0.85)"), "#ffffffd9");
+        assert_eq!(safe_filter_color("rgb(0 0 0 / 0.45)"), "#00000073");
+        assert_eq!(safe_filter_color("hsl(120 100% 25%)"), "#008000");
+        assert_eq!(safe_filter_color("rgb(52, 211, 153)"), "#34d399");
+        assert_eq!(safe_filter_color("#bef"), "#bbeeff");
+        // Gradient strings still contribute their first hex stop.
+        assert_eq!(
+            safe_filter_color("linear-gradient(135deg, #10b981 0%, #6366f1 100%)"),
+            "#10b981"
+        );
+    }
+
+    #[test]
+    fn test_parse_color_hex_css_syntaxes() {
+        let lime = parse_color_hex("rgb(190, 242, 100)", 1.0);
+        assert_eq!(
+            [lime.red(), lime.green(), lime.blue()],
+            [190.0 / 255.0, 242.0 / 255.0, 100.0 / 255.0]
+        );
+        // Embedded alpha composes with the caller's default alpha.
+        let translucent = parse_color_hex("rgba(255,255,255,0.85)", 1.0);
+        assert!((translucent.alpha() - 0.85).abs() < 0.01);
+        let halved = parse_color_hex("rgba(255,255,255,0.85)", 0.5);
+        assert!((halved.alpha() - 0.425).abs() < 0.01);
+        let named = parse_color_hex("lime", 1.0);
+        assert_eq!(named.green(), 1.0);
+    }
+
+    #[test]
+    fn test_camera_border_png_preserves_functional_border_color() {
+        let png = generate_camera_border_png(
+            64,
+            64,
+            "rect",
+            6.0,
+            Some("rgb(190, 242, 100)"),
+            Some(1.0),
+            Some("solid"),
+            None,
+        )
+        .expect("border png");
+        let pixmap = Pixmap::decode_png(&png).expect("decode border png");
+        let pixel = pixmap.pixel(3, 32).expect("border band pixel");
+        assert_eq!(pixel.alpha(), 255);
+        assert!(pixel.red().abs_diff(190) <= 4, "red: {}", pixel.red());
+        assert!(pixel.green().abs_diff(242) <= 4, "green: {}", pixel.green());
+        assert!(pixel.blue().abs_diff(100) <= 4, "blue: {}", pixel.blue());
+    }
+
+    #[test]
     fn test_privacy_mask_export_end_to_end() {
         let ffmpeg = match crate::media::resolve_executable("ffmpeg") {
             Ok(p) => p,
@@ -18033,5 +18801,178 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    fn layout_keyframe(time_ms: u64, x: f64, y: f64, w: f64, h: f64) -> RenderLayoutKeyframe {
+        RenderLayoutKeyframe {
+            time_ms,
+            x,
+            y,
+            width: w,
+            height: h,
+            radius: 0.0,
+            opacity: 1.0,
+        }
+    }
+
+    #[test]
+    fn camera_layout_pose_flattens_and_sorts_windows() {
+        let plan = RenderPlan {
+            project_id: "pose".into(),
+            duration_ms: 10_000,
+            segments: Vec::new(),
+            gaps: Vec::new(),
+            overlays: Vec::new(),
+            captions: Vec::new(),
+            caption_mode: "none".into(),
+            chapters: Vec::new(),
+            chapter_mode: "none".into(),
+            masks: Vec::new(),
+            zoom_segments: Vec::new(),
+            camera_layouts: vec![
+                RenderPlanCameraLayout {
+                    id: "later".into(),
+                    start_ms: 5_000,
+                    end_ms: 7_000,
+                    camera: vec![layout_keyframe(6_000, 0.0, 0.0, 100.0, 100.0)],
+                    screen: None,
+                    source: None,
+                },
+                RenderPlanCameraLayout {
+                    id: "earlier".into(),
+                    start_ms: 1_000,
+                    end_ms: 3_000,
+                    camera: vec![
+                        layout_keyframe(2_000, 10.0, 10.0, 50.0, 50.0),
+                        layout_keyframe(1_000, 0.0, 0.0, 100.0, 100.0),
+                    ],
+                    screen: None,
+                    source: None,
+                },
+            ],
+            layer_order: Vec::new(),
+            cursor_effects: Vec::new(),
+            overlay_render_plan: None,
+            canvas: None,
+            audio: None,
+            audio_tracks: None,
+            annotations: Vec::new(),
+            texts: Vec::new(),
+            images: Vec::new(),
+            keystrokes: Vec::new(),
+            keystroke_platform: "windows".into(),
+        };
+        let pose = camera_layout_pose(&plan);
+        assert_eq!(
+            pose.iter()
+                .map(|keyframe| keyframe.time_ms)
+                .collect::<Vec<_>>(),
+            vec![1_000, 2_000, 6_000]
+        );
+    }
+
+    #[test]
+    fn decimate_layout_keyframes_bounds_and_keeps_endpoints() {
+        let keyframes: Vec<RenderLayoutKeyframe> = (0..500)
+            .map(|index| layout_keyframe(index * 80, 0.0, 0.0, 10.0, 10.0))
+            .collect();
+        let decimated = decimate_layout_keyframes(&keyframes, 96);
+        assert!(decimated.len() <= 96);
+        assert_eq!(decimated.first().unwrap().time_ms, 0);
+        assert_eq!(decimated.last().unwrap().time_ms, 499 * 80);
+        // A short track is returned untouched.
+        let short = &keyframes[..40];
+        assert_eq!(decimate_layout_keyframes(short, 96).as_slice(), short);
+    }
+
+    #[test]
+    fn camera_pose_expr_interpolates_inside_span_and_returns_base_outside() {
+        // Two keyframes moving x 0→100 over 1–2 s; outside the flattened span
+        // the expression must fall back to the base transform.
+        let pose = vec![
+            layout_keyframe(1_000, 0.0, 0.0, 10.0, 10.0),
+            layout_keyframe(2_000, 100.0, 0.0, 10.0, 10.0),
+        ];
+        let expr = camera_pose_expr(&pose, |keyframe| keyframe.x, 42.0, "t");
+        assert!(expr.starts_with("if(between(t,1.000,2.000),"));
+        assert!(expr.ends_with(",42.0000)"));
+        // The nested lerp carries both endpoints' times and the slope.
+        assert!(expr.contains("lt(t,2.000)"));
+        assert!(expr.contains("(t-1.000)"));
+    }
+
+    #[test]
+    fn camera_pose_expr_uses_requested_time_variable() {
+        // geq names its timestamp `T`, scale/overlay name it `t` — the same
+        // expression must compile under either variable.
+        let pose = vec![
+            layout_keyframe(0, 0.0, 0.0, 10.0, 10.0),
+            layout_keyframe(1_000, 50.0, 0.0, 10.0, 10.0),
+        ];
+        let expr = camera_pose_expr(&pose, |keyframe| keyframe.opacity, 1.0, "T");
+        assert!(expr.contains("between(T,"));
+        assert!(!expr.contains("(t,"));
+    }
+
+    #[test]
+    fn screen_layout_expr_lets_the_last_window_win() {
+        // `screen_layout_rect_at` resolves the active window with `rfind`, so
+        // the latest overlapping window must sit outermost in the if-chain.
+        let later = RenderPlanCameraLayout {
+            id: "b".into(),
+            start_ms: 2_000,
+            end_ms: 4_000,
+            camera: Vec::new(),
+            screen: Some(vec![
+                layout_keyframe(2_000, 0.0, 0.0, 100.0, 100.0),
+                layout_keyframe(4_000, 0.0, 0.0, 200.0, 200.0),
+            ]),
+            source: None,
+        };
+        let earlier = RenderPlanCameraLayout {
+            id: "a".into(),
+            start_ms: 0,
+            end_ms: 3_000,
+            camera: Vec::new(),
+            screen: Some(vec![
+                layout_keyframe(0, 0.0, 0.0, 500.0, 500.0),
+                layout_keyframe(3_000, 0.0, 0.0, 500.0, 500.0),
+            ]),
+            source: None,
+        };
+        let layouts: Vec<&RenderPlanCameraLayout> = vec![&earlier, &later];
+        let expr = screen_layout_expr(&layouts, |keyframe| keyframe.width, "7.00", "t");
+        // Outermost gate belongs to `later` ([2,4)); inside its keyframe span
+        // it lerps, outside it defers to the earlier window or the default.
+        assert!(expr.starts_with("if(gte(t,2.000)*lt(t,4.000),"));
+        assert!(expr.contains("if(gte(t,0.000)*lt(t,3.000),"));
+        assert!(expr.ends_with(",7.00))"));
+    }
+
+    #[test]
+    fn screen_pose_rect_at_lerps_and_misses_outside_span() {
+        let keyframes = vec![
+            layout_keyframe(1_000, 0.0, 0.0, 100.0, 100.0),
+            layout_keyframe(2_000, 50.0, 10.0, 200.0, 300.0),
+        ];
+        let (x, y, w, h) = screen_pose_rect_at(&keyframes, 1_500.0).unwrap();
+        assert_eq!((x, y, w, h), (25.0, 5.0, 150.0, 200.0));
+        assert_eq!(
+            screen_pose_rect_at(&keyframes, 2_500.0),
+            None,
+            "frames past the last keyframe fall back to the base rect"
+        );
+        assert_eq!(screen_pose_rect_at(&keyframes, 500.0), None);
+        // Exact endpoints return the keyframe rects.
+        assert_eq!(
+            screen_pose_rect_at(&keyframes, 2_000.0),
+            Some((50.0, 10.0, 200.0, 300.0))
+        );
+    }
+
+    #[test]
+    fn even_layout_expr_forces_even_dimensions() {
+        let expr = even_layout_expr("if(t,101,51)");
+        assert_eq!(expr, "max(2,floor((if(t,101,51))/2)*2)");
     }
 }

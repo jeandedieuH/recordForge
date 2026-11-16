@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, type MutableRefObject } from "react"
+import { useCallback, useEffect, useRef, useState, type MutableRefObject } from "react"
 import type { MaskClip, MaskRect } from "@recordforge/contracts"
 import { renderMasksToCanvas } from "../canvas/mask-shader-renderer"
 import { usePlayheadMs } from "./use-playback-state"
@@ -290,10 +290,21 @@ export function MaskPreview({
   const gestureRef = useRef<MaskGesture | null>(null)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const webglBundleRef = useRef<WebGLBundle | null>(null) as MutableRefObject<WebGLBundle | null>
+  // The renderer reports a dead shader path once; the CSS maskFallbackVisual
+  // styles below take over so masks never silently disappear.
+  const [shaderFailed, setShaderFailed] = useState(false)
+  const shaderActive = useShaderOptimization && !shaderFailed
+  useEffect(() => {
+    setShaderFailed(false)
+  }, [useShaderOptimization])
 
   // Render hardware-accelerated WebGL / Canvas2D shaders onto the canvas layer if requested
   useEffect(() => {
-    if (!useShaderOptimization || !canvasRef.current) return
+    if (!shaderActive || !canvasRef.current) {
+      // A stale bundle holds a context from an unmounted canvas.
+      webglBundleRef.current = null
+      return
+    }
 
     const canvas = canvasRef.current
     if (canvas.width !== canvasWidth || canvas.height !== canvasHeight) {
@@ -310,10 +321,11 @@ export function MaskPreview({
         canvasHeight,
         playheadMs,
         preferWebGL: true,
+        onWebGLFailed: () => setShaderFailed(true),
       },
       webglBundleRef,
     )
-  }, [clips, playheadMs, canvasWidth, canvasHeight, videoElement, useShaderOptimization])
+  }, [clips, playheadMs, canvasWidth, canvasHeight, videoElement, shaderActive])
 
   function beginGesture(
     event: React.PointerEvent<HTMLDivElement>,
@@ -382,7 +394,7 @@ export function MaskPreview({
 
   return (
     <>
-      {useShaderOptimization ? (
+      {shaderActive ? (
         <canvas
           ref={canvasRef}
           className="pointer-events-none absolute inset-0 size-full z-28"
@@ -394,7 +406,7 @@ export function MaskPreview({
         const active = isActive(clip, playheadMs)
         const rect = clampRect(clip.rect, canvasWidth, canvasHeight)
         const isSelected = selectedClipId === clip.id
-        const visualStyle = useShaderOptimization
+        const visualStyle = shaderActive
           ? {
               backgroundColor: "transparent",
               backdropFilter: "none",

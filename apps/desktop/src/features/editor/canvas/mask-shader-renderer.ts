@@ -5,6 +5,13 @@ export interface MaskShaderRenderOptions {
   canvasHeight: number
   playheadMs: number
   preferWebGL?: boolean
+  /**
+   * Called once when the WebGL path can no longer draw (lost context or a
+   * thrown frame upload). A canvas only hosts one context type, so the 2D
+   * fallback below cannot help after WebGL has bound it — the caller should
+   * disable the shader layer and revert to its CSS fallback visuals.
+   */
+  onWebGLFailed?: () => void
 }
 
 interface WebGLContextBundle {
@@ -60,8 +67,9 @@ void main() {
   bool insideAny = false;
   vec4 finalColor = vec4(0.0);
 
-  // Inverted Y comparison for screen-space UV
-  vec2 screenUV = vec2(v_texCoord.x, 1.0 - v_texCoord.y);
+  // v_texCoord already runs 0 at the video top to 1 at the bottom, the same
+  // top-left-origin space the mask rects use — no further Y inversion.
+  vec2 screenUV = v_texCoord;
 
   for (int i = 0; i < ${MAX_MASKS}; i++) {
     if (i >= u_maskCount) break;
@@ -82,7 +90,7 @@ void main() {
         vec2 stepUV = pixelSize / u_resolution;
         vec2 localUV = screenUV - rect.xy;
         vec2 quantizedScreenUV = floor(localUV / stepUV) * stepUV + rect.xy + (stepUV * 0.5);
-        vec2 texUV = vec2(quantizedScreenUV.x, 1.0 - quantizedScreenUV.y);
+        vec2 texUV = quantizedScreenUV;
         finalColor = texture2D(u_video, texUV);
       } else {
         // Blur (9-tap separable Gaussian / box blur approximation)
@@ -230,6 +238,23 @@ function clampMaskRect(rect: MaskRect, canvasWidth: number, canvasHeight: number
 // Global cached offscreen Canvas2D helper to avoid allocations on every frame
 let sharedOffscreenCanvas: HTMLCanvasElement | null = null
 
+// Canvases whose WebGL pipeline already failed; they skip the shader path so
+// a persistent failure reports once instead of throwing on every playhead tick.
+const webglDisabledCanvases = new WeakSet<HTMLCanvasElement>()
+
+function disableWebGL(
+  canvas: HTMLCanvasElement,
+  webglBundleRef: { current: WebGLContextBundle | null },
+  options: MaskShaderRenderOptions,
+  reason: string,
+): void {
+  if (webglDisabledCanvases.has(canvas)) return
+  webglDisabledCanvases.add(canvas)
+  webglBundleRef.current = null
+  console.warn(`Mask shader preview disabled: ${reason}`)
+  options.onWebGLFailed?.()
+}
+
 /**
  * Render privacy masks on a hardware-accelerated WebGL or 2D canvas.
  */
@@ -260,78 +285,93 @@ export function renderMasksToCanvas(
   const hasPlayableVideo = video && video.readyState >= 2 && video.videoWidth > 0
 
   // WebGL Path
-  if (preferWebGL && hasPlayableVideo) {
+  if (preferWebGL && hasPlayableVideo && !webglDisabledCanvases.has(canvas)) {
     if (!webglBundleRef.current) {
       webglBundleRef.current = initWebGL(canvas)
+    }
+    if (webglBundleRef.current?.gl.isContextLost()) {
+      disableWebGL(canvas, webglBundleRef, options, "WebGL context lost")
     }
 
     if (webglBundleRef.current) {
       const { gl, program, videoTexture, positionBuffer, texCoordBuffer, locations } =
         webglBundleRef.current
 
-      gl.viewport(0, 0, canvas.width, canvas.height)
-      gl.clearColor(0, 0, 0, 0)
-      gl.clear(gl.COLOR_BUFFER_BIT)
+      try {
+        gl.viewport(0, 0, canvas.width, canvas.height)
+        gl.clearColor(0, 0, 0, 0)
+        gl.clear(gl.COLOR_BUFFER_BIT)
 
-      gl.useProgram(program)
+        gl.useProgram(program)
 
-      // Upload video frame to texture
-      gl.activeTexture(gl.TEXTURE0)
-      gl.bindTexture(gl.TEXTURE_2D, videoTexture)
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video)
-      gl.uniform1i(locations.uVideo, 0)
+        // Upload video frame to texture
+        gl.activeTexture(gl.TEXTURE0)
+        gl.bindTexture(gl.TEXTURE_2D, videoTexture)
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video)
+        gl.uniform1i(locations.uVideo, 0)
 
-      gl.uniform2f(locations.uResolution, canvas.width, canvas.height)
-      gl.uniform1i(locations.uMaskCount, Math.min(MAX_MASKS, activeClips.length))
+        gl.uniform2f(locations.uResolution, canvas.width, canvas.height)
+        gl.uniform1i(locations.uMaskCount, Math.min(MAX_MASKS, activeClips.length))
 
-      const rects = new Float32Array(MAX_MASKS * 4)
-      const modes = new Int32Array(MAX_MASKS)
-      const pixelSizes = new Float32Array(MAX_MASKS)
-      const blurRadii = new Float32Array(MAX_MASKS)
-      const redactColors = new Float32Array(MAX_MASKS * 4)
+        const rects = new Float32Array(MAX_MASKS * 4)
+        const modes = new Int32Array(MAX_MASKS)
+        const pixelSizes = new Float32Array(MAX_MASKS)
+        const blurRadii = new Float32Array(MAX_MASKS)
+        const redactColors = new Float32Array(MAX_MASKS * 4)
 
-      activeClips.slice(0, MAX_MASKS).forEach((clip, i) => {
-        const clamped = clampMaskRect(clip.rect, canvasWidth, canvasHeight)
-        rects[i * 4 + 0] = clamped.x / canvasWidth
-        rects[i * 4 + 1] = clamped.y / canvasHeight
-        rects[i * 4 + 2] = clamped.width / canvasWidth
-        rects[i * 4 + 3] = clamped.height / canvasHeight
+        activeClips.slice(0, MAX_MASKS).forEach((clip, i) => {
+          const clamped = clampMaskRect(clip.rect, canvasWidth, canvasHeight)
+          rects[i * 4 + 0] = clamped.x / canvasWidth
+          rects[i * 4 + 1] = clamped.y / canvasHeight
+          rects[i * 4 + 2] = clamped.width / canvasWidth
+          rects[i * 4 + 3] = clamped.height / canvasHeight
 
-        modes[i] = clip.mode === "redact" ? 0 : clip.mode === "blur" ? 1 : 2
-        pixelSizes[i] = clip.pixelSize ?? 16
-        blurRadii[i] = clip.blurRadius ?? 16
+          modes[i] = clip.mode === "redact" ? 0 : clip.mode === "blur" ? 1 : 2
+          pixelSizes[i] = clip.pixelSize ?? 16
+          blurRadii[i] = clip.blurRadius ?? 16
 
-        const [r, g, b, a] = parseHexColor(clip.redactColor ?? "#141820")
-        redactColors[i * 4 + 0] = r
-        redactColors[i * 4 + 1] = g
-        redactColors[i * 4 + 2] = b
-        redactColors[i * 4 + 3] = a
-      })
+          const [r, g, b, a] = parseHexColor(clip.redactColor ?? "#141820")
+          redactColors[i * 4 + 0] = r
+          redactColors[i * 4 + 1] = g
+          redactColors[i * 4 + 2] = b
+          redactColors[i * 4 + 3] = a
+        })
 
-      gl.uniform4fv(locations.uMaskRects, rects)
-      gl.uniform1iv(locations.uMaskModes, modes)
-      gl.uniform1fv(locations.uPixelSizes, pixelSizes)
-      gl.uniform1fv(locations.uBlurRadii, blurRadii)
-      gl.uniform4fv(locations.uRedactColors, redactColors)
+        gl.uniform4fv(locations.uMaskRects, rects)
+        gl.uniform1iv(locations.uMaskModes, modes)
+        gl.uniform1fv(locations.uPixelSizes, pixelSizes)
+        gl.uniform1fv(locations.uBlurRadii, blurRadii)
+        gl.uniform4fv(locations.uRedactColors, redactColors)
 
-      // Bind positions
-      gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer)
-      gl.enableVertexAttribArray(locations.aPosition)
-      gl.vertexAttribPointer(locations.aPosition, 2, gl.FLOAT, false, 0, 0)
+        // Bind positions
+        gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer)
+        gl.enableVertexAttribArray(locations.aPosition)
+        gl.vertexAttribPointer(locations.aPosition, 2, gl.FLOAT, false, 0, 0)
 
-      // Bind texCoords
-      gl.bindBuffer(gl.ARRAY_BUFFER, texCoordBuffer)
-      gl.enableVertexAttribArray(locations.aTexCoord)
-      gl.vertexAttribPointer(locations.aTexCoord, 2, gl.FLOAT, false, 0, 0)
+        // Bind texCoords
+        gl.bindBuffer(gl.ARRAY_BUFFER, texCoordBuffer)
+        gl.enableVertexAttribArray(locations.aTexCoord)
+        gl.vertexAttribPointer(locations.aTexCoord, 2, gl.FLOAT, false, 0, 0)
 
-      gl.drawArrays(gl.TRIANGLES, 0, 6)
+        gl.drawArrays(gl.TRIANGLES, 0, 6)
+      } catch {
+        // A thrown frame upload (e.g. a tainted video) is deterministic for
+        // this canvas: disable the shader path so the caller can fall back
+        // to its CSS mask visuals instead of throwing on every tick.
+        disableWebGL(canvas, webglBundleRef, options, "frame upload failed")
+      }
       return
     }
   }
 
   // Fallback: Canvas2D Fast Blit
   const ctx = canvas.getContext("2d")
-  if (!ctx) return
+  // A null 2d context means the canvas is bound to WebGL without a usable
+  // bundle (e.g. shader compile failure) — nothing below can draw, so report.
+  if (!ctx) {
+    disableWebGL(canvas, webglBundleRef, options, "canvas is bound to WebGL")
+    return
+  }
   ctx.clearRect(0, 0, canvas.width, canvas.height)
 
   const scaleX = canvas.width / Math.max(1, canvasWidth)
