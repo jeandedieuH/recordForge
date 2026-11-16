@@ -7,7 +7,7 @@ import {
 } from "@recordforge/editor-core"
 import type { TimelineState } from "@recordforge/contracts"
 import { Button, Input, Skeleton, Switch, cn, useToast } from "@recordforge/ui"
-import { Save, Sparkles } from "lucide-react"
+import { MousePointer2, Save, Sparkles, User } from "lucide-react"
 import { useTimelineStore } from "../../../../stores/timeline-store"
 import { useLicenseStore } from "../../../../stores/license-store"
 import { ProBadge } from "../../../licensing/pro-badge"
@@ -207,18 +207,19 @@ export function LooksCard() {
               onFocus={() => previewLook(preset.definition)}
               onBlur={endLookPreview}
               className={cn(
-                "flex flex-col items-start gap-1 rounded-lg border border-border/60 bg-surface p-2 text-left transition-colors",
-                "hover:border-primary/50 hover:bg-surface-hover",
+                "group flex flex-col gap-1.5 rounded-xl p-1 text-left outline-none transition-all",
+                "hover:bg-surface-hover focus-visible:ring-2 focus-visible:ring-primary/60",
+                "active:scale-[0.98]",
               )}
               title={preset.description}
             >
-              <span className="flex w-full items-center justify-between gap-1">
+              <LookSwatch values={preset.definition} includeAspectRatio={includeAspectRatio} />
+              <span className="flex w-full items-center justify-between gap-1 px-1 pb-0.5">
                 <span className="truncate text-[11px] font-medium text-foreground">
                   {preset.name}
                 </span>
                 {custom && !isPro ? <ProBadge /> : null}
               </span>
-              <LookSwatch values={preset.definition} />
             </button>
           )
         })}
@@ -250,35 +251,126 @@ export function LooksCard() {
   )
 }
 
-// Tiny canvas-ratio swatch previewing background + camera shape.
-function LookSwatch({ values }: { values: LookValues }) {
-  const canvas = values.canvas
-  const camera = values.camera
+/**
+ * Miniature composition of a look: backdrop, a mock app window (padding,
+ * radius, border, shadow), a camera bubble and the cursor. The window content
+ * is the same for every look so differences in styling are what the eye
+ * compares. Values map to the preview by ratio, not 1:1 pixels.
+ */
+function LookSwatch({
+  values,
+  includeAspectRatio,
+}: {
+  values: LookValues
+  includeAspectRatio: boolean
+}) {
+  const { canvas, camera, cursor } = values
+  const isVertical = includeAspectRatio && values.aspectRatio === "9:16"
+  const padding = canvas.padding ?? 40
+  const inset = padding === 0 ? 0 : 3 + padding / 12
+  const radius =
+    (canvas.borderRadius ?? 8) === 0 ? 0 : Math.min(10, 1.5 + (canvas.borderRadius ?? 8) / 4)
+  const borderWidth =
+    (canvas.borderWidth ?? 0) > 0 ? Math.min(2, Math.max(1, (canvas.borderWidth ?? 0) / 2)) : 0
+  const borderColor = canvas.borderColor ?? FALLBACK_BORDER
+  const borderMix = Math.round((canvas.borderOpacity ?? 1) * 100)
+  const cameraRadius =
+    camera.shape === "circle" ? "50%" : camera.shape === "rounded" ? "28%" : "2px"
+  const dim = canvas.backgroundDim ?? 0
+
   return (
     <span
       aria-hidden
-      className="flex h-8 w-full items-center justify-center rounded border border-border/40"
-      style={{
-        background: canvas.background ?? "rgb(13, 16, 22)",
-        padding: `${Math.min(8, (canvas.padding ?? 40) / 16)}px`,
-      }}
+      className="relative flex aspect-video w-full items-center justify-center overflow-hidden rounded-lg ring-1 ring-inset ring-border/60 transition-shadow group-hover:ring-primary/60"
+      style={{ background: canvas.background ?? FALLBACK_BACKDROP }}
     >
+      {dim > 0 ? (
+        <span className="absolute inset-0" style={{ background: `rgba(0,0,0,${dim * 0.6})` }} />
+      ) : null}
+      {/* Canvas: full-height 9:16 column when the look reframes the output */}
       <span
-        className="h-full w-full bg-surface"
-        style={{
-          borderRadius:
-            camera.shape === "circle"
-              ? "50%"
-              : camera.shape === "rounded"
-                ? "20%"
-                : `${Math.min(4, (canvas.borderRadius ?? 8) / 8)}px`,
-          border:
-            (canvas.borderWidth ?? 0) > 0
-              ? `1px solid ${canvas.borderColor ?? "rgba(255,255,255,0.3)"}`
+        className={cn("relative block", isVertical ? "h-full aspect-[9/16]" : "h-full w-full")}
+        style={{ padding: `${inset}%` }}
+      >
+        <span
+          className="relative flex h-full w-full flex-col overflow-hidden"
+          style={{
+            background: MOCK_WINDOW_BG,
+            borderRadius: radius,
+            border: borderWidth
+              ? `${borderWidth}px solid color-mix(in srgb, ${borderColor} ${borderMix}%, transparent)`
               : undefined,
-          boxShadow: canvas.shadow ? "0 2px 6px rgba(0,0,0,0.5)" : undefined,
-        }}
-      />
+            boxShadow: canvas.shadow
+              ? `0 4px 12px ${canvas.shadowColor ?? FALLBACK_SHADOW}, 0 1px 3px ${FALLBACK_SHADOW}`
+              : undefined,
+          }}
+        >
+          {/* Mock title bar + content lines */}
+          <span
+            className="flex h-[14%] min-h-1.5 shrink-0 items-center gap-[2px] px-[5%]"
+            style={{ background: MOCK_BAR_BG }}
+          >
+            {[0, 1, 2].map((dot) => (
+              <span
+                key={dot}
+                className="size-[3px] rounded-full"
+                style={{ background: MOCK_DOT_BG }}
+              />
+            ))}
+          </span>
+          <span className="flex flex-1 flex-col gap-[3px] p-[7%]">
+            <span className="h-[3px] w-2/5 rounded-full" style={{ background: MOCK_LINE_STRONG }} />
+            <span className="h-[3px] w-4/5 rounded-full" style={{ background: MOCK_LINE_SOFT }} />
+            <span className="h-[3px] w-3/5 rounded-full" style={{ background: MOCK_LINE_SOFT }} />
+          </span>
+          {cursor.spotlightMode ? (
+            <span
+              className="absolute inset-0"
+              style={{
+                background: `radial-gradient(circle at 42% 58%, transparent 0 16%, rgba(0,0,0,${cursor.spotlightDimOpacity ?? 0.5}) 42%)`,
+              }}
+            />
+          ) : null}
+        </span>
+        {/* Cursor, tinted with the look's cursor colours */}
+        <MousePointer2
+          className="absolute size-2.5"
+          style={{
+            left: "42%",
+            top: "56%",
+            fill: cursor.fillColor ?? FALLBACK_CURSOR_FILL,
+            stroke: cursor.strokeColor ?? FALLBACK_CURSOR_STROKE,
+          }}
+          strokeWidth={1.5}
+        />
+        {/* Camera bubble */}
+        <span
+          className="absolute bottom-[8%] right-[8%] flex size-[28%] items-center justify-center overflow-hidden"
+          style={{
+            aspectRatio: "1",
+            borderRadius: cameraRadius,
+            background: MOCK_CAMERA_BG,
+            border: `${Math.min(2, Math.max(1, (camera.borderWidth ?? 2) / 2))}px solid ${camera.borderColor ?? FALLBACK_BORDER}`,
+            boxShadow: `0 2px 6px ${FALLBACK_SHADOW}`,
+          }}
+        >
+          <User className="size-2/3 translate-y-[12%] text-white/70" strokeWidth={2.5} />
+        </span>
+      </span>
     </span>
   )
 }
+
+// The mock screen content depicts recorded footage, so it stays constant
+// across app themes and is not a UI token.
+const MOCK_WINDOW_BG = "linear-gradient(180deg, #f8fafc 0%, #e2e8f0 100%)"
+const MOCK_BAR_BG = "rgba(15, 23, 42, 0.08)"
+const MOCK_DOT_BG = "rgba(15, 23, 42, 0.3)"
+const MOCK_LINE_STRONG = "rgba(15, 23, 42, 0.45)"
+const MOCK_LINE_SOFT = "rgba(15, 23, 42, 0.18)"
+const MOCK_CAMERA_BG = "linear-gradient(160deg, #64748b 0%, #334155 100%)"
+const FALLBACK_BACKDROP = "rgb(13, 16, 22)"
+const FALLBACK_BORDER = "rgba(255, 255, 255, 0.3)"
+const FALLBACK_SHADOW = "rgba(0, 0, 0, 0.45)"
+const FALLBACK_CURSOR_FILL = "#ffffff"
+const FALLBACK_CURSOR_STROKE = "#111111"
