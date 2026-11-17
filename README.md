@@ -162,8 +162,8 @@ RecordForge strictly complies with local-first security boundaries:
 
 RecordForge ships two tiers:
 
-- **Free** — the full recorder and editor: capture up to 4K, the complete timeline, captions, cursor effects, GIF/WebP, hardware encoders, exports up to 1080p, and cloud uploads through your own storage. No watermark, no time limit, no account.
-- **Pro Lifetime** — a one-time purchase that unlocks 1440p/4K export presets, non-16:9 canvases, chapters & YouTube timestamps, all title presets beyond Clean Text, and annotations — on up to 3 personal devices, with lifetime updates.
+- **Free** — the full recorder and editor for personal, non-commercial use: capture up to 4K, the complete timeline, captions, cursor effects, GIF/WebP, hardware encoders, exports up to 1080p, and cloud uploads through your own storage. No watermark, no time limit, no account.
+- **Pro Lifetime** — a one-time $50 purchase that unlocks commercial use, 1440p/4K export presets, non-16:9 canvases, chapters & YouTube timestamps, all title presets beyond Clean Text, and annotations — on one device at a time, with lifetime updates.
 
 Pro features stay usable in the Free editor; at export you can upgrade or export without them. See the pricing page for the current offer.
 

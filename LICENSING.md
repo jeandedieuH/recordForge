@@ -48,9 +48,16 @@ to and including v1.6.4 stays GPL with all features unlocked, forever.
 4. `deviceHash = sha256(machine-uid + app salt)` — no raw hardware identifiers
    are stored or transmitted.
 
-Free exports stay fully functional: no watermark, no time limit, commercial
-use allowed under the GPL. Output is capped at 1920×1080 and the five Pro
-feature groups are gated (see `docs/adr/016-license-entitlements.md`).
+Free exports stay fully functional: no watermark, no time limit. Output is
+capped at 1920×1080 and the five Pro feature groups are gated (see
+`docs/adr/016-license-entitlements.md`).
+
+**Usage scope (official builds):** the Free tier is licensed for personal,
+non-commercial use. Using RecordForge for commercial work requires a Pro
+key ($50 one-time, one movable device seat). This scope is a term of the
+official-build distribution — it is not, and cannot be, a restriction on
+the GPL-licensed source code, which remains free to build, modify, and use
+for any purpose (see "Honest limits" below).
 
 ## Honest limits
 

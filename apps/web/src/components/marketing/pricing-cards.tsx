@@ -1,6 +1,6 @@
 import { Check, Minus } from "lucide-react"
 import { buttonVariants, cn } from "@recordforge/ui"
-import { CHECKOUT_URL, PRO_DEVICES, PRO_FOUNDER_PRICE, PRO_PRICE } from "../../lib/pricing"
+import { CHECKOUT_URL, PRO_DEVICES, PRO_PRICE } from "../../lib/pricing"
 import { Reveal } from "./reveal"
 
 const FREE_POINTS = [
@@ -9,6 +9,7 @@ const FREE_POINTS = [
   "16:9 exports up to 1080p",
   "Clean Text title preset",
   "MP4 / GIF / WebP hardware export",
+  "Personal (non-commercial) use",
   "GPL-3.0 open source, forever",
 ]
 
@@ -18,7 +19,8 @@ const PRO_POINTS = [
   "Chapters & YouTube timestamps",
   "Every title preset beyond Clean Text",
   "Annotations — shapes, arrows, callouts",
-  `Lifetime updates · ${PRO_DEVICES}`,
+  "Commercial use allowed",
+  `Lifetime updates · ${PRO_DEVICES} — movable`,
   "Coming free: instant web delivery",
 ]
 
@@ -74,13 +76,12 @@ export function PricingCards() {
           </p>
           <div className="mt-6 flex items-baseline gap-2">
             <span className="text-4xl font-semibold tracking-tight text-foreground">
-              {PRO_FOUNDER_PRICE}
+              {PRO_PRICE}
             </span>
-            <span className="text-lg text-muted-foreground line-through">{PRO_PRICE}</span>
             <span className="text-sm text-muted-foreground">once · {PRO_DEVICES}</span>
           </div>
           <p className="mt-1.5 text-[11px] font-medium text-warning">
-            Founder launch price — first 30 days, then {PRO_PRICE}
+            One device at a time — deactivate in the app to move it.
           </p>
           <ul className="mt-8 flex flex-col gap-3 text-sm">
             {PRO_POINTS.map((point) => (
@@ -103,7 +104,7 @@ export function PricingCards() {
               rel="noreferrer"
               className={cn(buttonVariants(), "w-full justify-center rounded-full")}
             >
-              Get RecordForge Pro — {PRO_FOUNDER_PRICE}
+              Get RecordForge Pro — {PRO_PRICE}
             </a>
             <p className="mt-3 text-center text-[11px] leading-relaxed text-muted-foreground">
               14-day money-back guarantee · activation is a one-time online check, then Pro works

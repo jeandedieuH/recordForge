@@ -39,7 +39,7 @@ export function CtaSection() {
                 to="/pricing"
                 className="font-medium text-foreground underline-offset-4 transition-colors duration-fast ease-forge hover:text-accent hover:underline"
               >
-                Pro from $29 — one-time
+                Pro $50 — one-time
               </Link>
             </p>
             <div className="flex items-center gap-4 text-subtle-foreground">

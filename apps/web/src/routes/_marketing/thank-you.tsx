@@ -46,7 +46,7 @@ const STEPS = [
   {
     icon: BadgeCheck,
     title: "Pro stays offline",
-    body: "After that single activation, Pro works fully offline on up to 3 of your devices — matching the local-first promise.",
+    body: "After that single activation, Pro works fully offline on one device at a time — deactivate in the app to move the seat to another machine.",
   },
 ]
 

@@ -5,7 +5,7 @@
 > RecordForge source code, and they cannot add restrictions to the GPL
 > software itself.
 
-Last updated: 2026-10-05
+Last updated: 2026-11-17
 
 ## 1. What you are buying
 
@@ -17,11 +17,15 @@ is GPL-3.0.
 
 ## 2. License scope
 
-- **Pro Lifetime**: the current price displayed at checkout; founder pricing
-  may apply for a limited launch window.
-- **Devices**: up to **3 personal devices** (any mix of Windows, macOS,
-  Linux) activated at once. You may deactivate a device in the app
-  (Settings → License → Deactivate) and re-use the slot on another device.
+- **Pro Lifetime**: the current price displayed at checkout ($50 USD at
+  launch); it is a one-time purchase, not a subscription.
+- **Devices**: **one device** activated at a time (any of Windows, macOS,
+  Linux). You may deactivate in the app (Settings → License → Deactivate)
+  and re-use the seat on another device — the seat is movable, it is not a
+  permanent lock to the first machine.
+- **Commercial use**: a Pro key is required to use RecordForge for
+  commercial purposes. The Free tier of official builds is licensed for
+  personal, non-commercial use only.
 - **Updates**: all desktop Pro features, current and future, are included
   for the lifetime of the product — there is no per-version upgrade fee.
 - **Users**: one license covers one person. Shared/team use requires a

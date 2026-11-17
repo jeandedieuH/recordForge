@@ -11,6 +11,12 @@ local-first values: no mandatory accounts, no hosted-media requirement, and
 a genuinely useful free tier. The chosen product shape is a generous Free
 tier plus a low-cost Pro Lifetime license (launch: $39, $29 founder price).
 
+> **Revision (2026-11-17):** Pro Lifetime is now a flat **$50** on **one
+> movable device seat** — founder pricing is dropped. The Free tier of
+> official builds is additionally scoped to personal, non-commercial use;
+> commercial use requires a Pro key. See `PRO-LICENSE-TERMS.md` and
+> `LICENSING.md` for the current terms.
+
 That decision forces a licensing question: the desktop app is GPL-3.0, the
 features being gated are already shipped in the GPL codebase, and a pure-GPL
 project has no standard way to sell "unlocks" inside itself.
@@ -32,7 +38,7 @@ Adopt **open core**:
 4. **Trademark policy** (`TRADEMARKS.md`): the RecordForge name/logo and the
    official updater channel are reserved; forks must rebrand.
 5. **Pro License Terms** (`PRO-LICENSE-TERMS.md`) govern the *key purchase*
-   only — 3 personal devices, lifetime updates, 14-day refunds — without
+   only — 1 movable device, lifetime updates, 14-day refunds — without
    adding restrictions to the GPL software.
 
 ## Alternatives considered

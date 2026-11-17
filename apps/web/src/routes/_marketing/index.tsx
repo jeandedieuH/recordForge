@@ -5,6 +5,7 @@ import { HeroSection } from "../../components/marketing/hero-section"
 import { LocalFirstSection } from "../../components/marketing/local-first-section"
 import { StatsStrip } from "../../components/marketing/stats-strip"
 import { StepsStrip } from "../../components/marketing/steps-strip"
+import { TestimonialsSection } from "../../components/marketing/testimonials-section"
 import { getLatestRelease } from "../../lib/releases"
 
 export const Route = createFileRoute("/_marketing/")({
@@ -42,6 +43,7 @@ function LandingPage() {
       <FeatureGrid />
       <StepsStrip />
       <LocalFirstSection />
+      <TestimonialsSection />
       <CtaSection />
     </>
   )

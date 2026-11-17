@@ -9,6 +9,7 @@
  */
 
 import type * as downloads from "../downloads.js";
+import type * as reviews from "../reviews.js";
 
 import type {
   ApiFromModules,
@@ -18,6 +19,7 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   downloads: typeof downloads;
+  reviews: typeof reviews;
 }>;
 
 /**

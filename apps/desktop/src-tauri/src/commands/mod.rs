@@ -7,6 +7,7 @@ pub mod media;
 pub mod projects;
 pub mod publish;
 pub mod recording;
+pub mod review;
 pub mod settings;
 pub mod share;
 pub mod storage;

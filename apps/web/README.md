@@ -32,6 +32,21 @@ bun run build
 - `src/lib/releases.ts` — server-side fetch of the `latest.json` updater
   manifest from GitHub Releases, resolved into per-platform asset URLs.
 
+## Reviews & testimonials
+
+- `convex/schema.ts` — `reviews` (rating 1–5, optional text/name, tier, source,
+  `approved` moderation flag).
+- `convex/reviews.ts` — `submit` mutation (public; honeypot field drops bots,
+  inserts with `approved: false`), `list` and `stats` queries (approved rows
+  only, powering the testimonials section on the landing page).
+- `src/routes/api/reviews.ts` — `POST /api/reviews`, the single ingest endpoint
+  shared by the website form and the desktop app (which cannot reach Convex
+  directly). Validates against `reviewSubmissionSchema` in
+  `@recordforge/contracts` and forwards to `reviews:submit`.
+- **Moderation** — submissions stay invisible until approved. Flip
+  `approved: true` on a row in the Convex dashboard (Data → reviews) to
+  publish it as a testimonial; delete spam outright.
+
 ## Project structure
 
 - `src/routes/` — file-based TanStack Start routes (`_marketing` layout group)

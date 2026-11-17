@@ -23,6 +23,7 @@ const ALLOWED_KEYS: &[&str] = &[
     "onboardingCompleted",
     "notifyOnExportComplete",
     "soundOnExportComplete",
+    "reviewSubmitted",
 ];
 
 pub fn validate_key(key: &str) -> Result<()> {

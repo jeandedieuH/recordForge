@@ -9,11 +9,9 @@
 export const CHECKOUT_URL =
   "https://buy.polar.sh/polar_cl_ZrbOX8Isev0738LkzZkssAri6FHjoMGZu1Xau0hyFbF"
 
-/** Pro Lifetime is $39; the FOUNDER discount code pre-applies $10 off for the
- * first 30 days after launch. */
-export const PRO_PRICE = "$39"
-export const PRO_FOUNDER_PRICE = "$29"
-export const PRO_DEVICES = "3 devices"
+/** Pro Lifetime is a flat $50 — no launch discounts. */
+export const PRO_PRICE = "$50"
+export const PRO_DEVICES = "1 device"
 
 export interface PlanFeature {
   label: string
@@ -31,7 +29,8 @@ export const FEATURE_COMPARISON: PlanFeature[] = [
   { label: "Chapters & markers", free: false, pro: "MP4 chapters + YouTube timestamps" },
   { label: "Title presets", free: "Clean Text", pro: "Every title design" },
   { label: "Annotations", free: false, pro: "Shapes, arrows, callouts" },
-  { label: "Devices", free: true, pro: "3 personal devices" },
+  { label: "Usage", free: "Personal use only", pro: "Personal & commercial use" },
+  { label: "Devices", free: true, pro: "1 device — movable" },
   { label: "Account required", free: "Never", pro: "One-time activation only" },
   { label: "Offline use", free: true, pro: true },
 ]
@@ -45,12 +44,12 @@ export const PRO_FAQ: { question: string; answer: string }[] = [
   {
     question: "What does 'lifetime' mean?",
     answer:
-      "One payment, every future update included — no subscription, no recurring charge. The license covers up to 3 of your personal devices and can be moved between them. There's a 14-day no-questions refund.",
+      "One payment, every future update included — no subscription, no recurring charge. The license covers one device at a time and can be moved between your machines — deactivate in the app to free the seat. There's a 14-day no-questions refund.",
   },
   {
-    question: "What's the founder price?",
+    question: "Can I use the Free tier for commercial work?",
     answer:
-      "Launch buyers pay $29 instead of $39 — a $10 founder discount for the first 30 days after launch, applied automatically at checkout. It locks in the same lifetime license.",
+      "No — in official builds the Free tier is licensed for personal, non-commercial use only. If RecordForge is part of your work or business, that's what Pro is for: one $50 purchase covers commercial use, 4K exports, and every Pro feature.",
   },
   {
     question: "Do I need to stay online for Pro?",

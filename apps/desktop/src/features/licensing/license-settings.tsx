@@ -56,7 +56,7 @@ export function LicenseSettings() {
           <p className="mt-0.5 text-xs text-subtle-foreground">
             {isPro
               ? "Pro is active on this device."
-              : "Free tier — upgrade once for lifetime Pro on 3 devices."}
+              : "Free tier (personal use) — upgrade once for lifetime Pro on 1 device."}
           </p>
         </div>
         {isPro ? <ProBadge /> : <Badge variant="outline">Free</Badge>}

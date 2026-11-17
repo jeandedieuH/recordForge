@@ -34,6 +34,7 @@ import { useRecorderStore } from "../../hooks/use-recorder"
 import { useLicenseStore } from "../../stores/license-store"
 import { PRO_CHECKOUT_URL } from "../../lib/license"
 import { ProBadge } from "../licensing"
+import { RateCard } from "../review"
 import { UpdateCard } from "../updater"
 
 export interface AboutViewProps {
@@ -284,7 +285,8 @@ export function AboutView({
                   <li className="flex items-start gap-2">
                     <CheckCircle2 className="size-4 text-emerald-400 shrink-0 mt-0.5" />
                     <span>
-                      Free for personal, commercial, educational, and developer workflows.
+                      Free for personal, non-commercial use in official builds — commercial use
+                      requires Pro.
                     </span>
                   </li>
                   <li className="flex items-start gap-2">
@@ -374,7 +376,7 @@ export function AboutView({
               </div>
 
               <p className="text-[11px] leading-relaxed text-muted-foreground">
-                One-time purchase, lifetime updates, 3 personal devices. Activation is a single
+                One-time purchase, lifetime updates, 1 device — movable. Activation is a single
                 online check — Pro then works fully offline. Coming next: instant web delivery and
                 share links.
               </p>
@@ -404,8 +406,8 @@ export function AboutView({
         </Card>
       </div>
 
-      {/* Grid: Developers & Creators */}
-      <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
+      {/* Grid: Developers & Creators (+ review CTA for every tier) */}
+      <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
         {/* Developed by Prestige Tech */}
         <Card className="rounded-2xl border border-border bg-surface shadow-e1 flex flex-col justify-between">
           <div>
@@ -518,6 +520,8 @@ export function AboutView({
             </Button>
           </div>
         </Card>
+
+        <RateCard />
       </div>
 
       {/* Technical Architecture & Stack Card */}

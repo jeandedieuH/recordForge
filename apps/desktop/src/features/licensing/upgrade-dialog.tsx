@@ -20,7 +20,8 @@ const PRO_BENEFITS: string[] = [
   "Chapters, chapter sidecars, and YouTube timestamps",
   "Every title preset beyond Clean Text",
   "Annotations — shapes, arrows, and callouts",
-  "Lifetime updates · 3 personal devices",
+  "Commercial use — Free is for personal projects only",
+  "Lifetime updates · 1 device — movable",
 ]
 
 interface UpgradeDialogProps {
@@ -53,7 +54,7 @@ export function UpgradeDialog({ open, onOpenChange, features = [] }: UpgradeDial
             <ProBadge />
           </div>
           <DialogDescription>
-            One-time purchase — lifetime license for 3 personal devices.
+            One-time purchase — lifetime license for 1 device, movable between machines.
           </DialogDescription>
         </DialogHeader>
 

@@ -13,7 +13,7 @@ export const Route = createFileRoute("/_marketing/pricing")({
       {
         name: "description",
         content:
-          "RecordForge is free and open source forever. Pro is a one-time $29 lifetime purchase — 4K exports, custom aspect ratios, chapters, every title preset, and annotations. No subscription, no account.",
+          "RecordForge is free and open source forever. Pro is a one-time $50 lifetime purchase — 4K exports, custom aspect ratios, chapters, every title preset, annotations, and commercial use. No subscription, no account.",
       },
       { property: "og:title", content: "RecordForge Pricing — Free & Pro" },
       {

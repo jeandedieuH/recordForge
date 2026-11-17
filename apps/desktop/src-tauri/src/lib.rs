@@ -268,6 +268,7 @@ pub fn run() {
             commands::license::activate_license,
             commands::license::deactivate_license,
             commands::license::refresh_license,
+            commands::review::submit_review,
             commands::share::share_export,
             commands::share::share_to_profile,
             commands::share::cancel_share,
