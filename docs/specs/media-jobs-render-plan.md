@@ -92,7 +92,7 @@ Before creating a job, check if an equivalent job already exists:
 
 All jobs write to `.partial` files, validate, then rename to final path:
 
-```
+```text
 proxy.mp4.partial → (FFprobe validate) → proxy.mp4
 ```
 
