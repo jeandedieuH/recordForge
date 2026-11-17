@@ -2804,7 +2804,6 @@ mod tests {
             cursor: 0.0,
             zoom: 0.5,
             pan: 0.8,
-            ..Default::default()
         })))
         .expect("active zoom/pan blur");
         // shutter = max(zoom, pan) = 0.8 → half = (1000/30)*0.8/2 ms.

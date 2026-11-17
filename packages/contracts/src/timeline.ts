@@ -102,9 +102,12 @@ export const loupeSettingsSchema = z.object({
   glass: z.boolean().default(true),
   shadowBlur: z.number().min(0).max(200).default(36),
   shadowOpacity: z.number().min(0).max(1).default(0.35),
-  /** Ride the cursor instead of staying on the segment target. */
+  /** Reserved: the lens always rides the cursor while a cursor point exists;
+      a parked-lens toggle would gate on this. Currently ignored. */
   followCursor: z.boolean().default(false),
-  /** Lens centre in canvas pixels; defaults to the segment target centre. */
+  /** Lens centre in canvas pixels; defaults to the segment target centre.
+      The magnified region still centres on the segment target — moving the
+      parked lens does not move what it magnifies. */
   center: z.object({ x: z.number(), y: z.number() }).optional(),
   /** Nudge from the resolved centre (target centre or `center`). */
   offset: z.object({ x: z.number().default(0), y: z.number().default(0) }).optional(),

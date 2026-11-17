@@ -535,11 +535,14 @@ min(m_max, r)` and the composite pass maps uvs through a `plane_size` row, so
   on both renderers: `CursorEngine::evaluate_motion_samples` walks the same
   spline at sub-frame times and `CursorRenderer` accumulates up to six equally
   weighted ghost poses, chosen from the mapped sweep distance, widening the
-  cursor tile to the swept path. Zoom/pan blur is GPU-only: the compose loop
-  evaluates the crop at `t ± shutter/2` with the zoom and pan sliders weighting
-  the size and centre deltas, then the composite shader averages up to 16 taps
-  along that strip. Hold and identity frames resolve to one tap, so blur costs
-  nothing when nothing moves; compatibility renders report `motion-blur`.
+  cursor tile to the swept path. Zoom/pan blur: the compose loop evaluates the
+  crop at `t ± shutter/2` with the zoom and pan sliders weighting the size and
+  centre deltas, then the composite shader averages up to 16 taps along that
+  strip. The compatibility renderer reproduces the same sweep with up to
+  `COMPAT_MAX_BLUR_TAPS` (5) shifted `zoompan` branches averaged by `mix`, and
+  reports `motion-blur` only when a frame's sweep would exceed the cap. Hold
+  and identity frames resolve to one tap, so blur costs nothing when nothing
+  moves.
 - **Glass Loupe (`zoomSegments[].style: "loupe"`, Pro).** Loupe segments never
   move the frame (`resolveCameraShots` and `evaluate_zoom_transform` skip them).
   `resolveLoupes`/`resolveLoupeAt` (editor-core) and `exports/loupe.rs` resolve
@@ -548,11 +551,21 @@ min(m_max, r)` and the composite pass maps uvs through a `plane_size` row, so
   plate workers feed the GPU compose loop the same `map_source_point` canvas
   position the rasterizer draws at), with `loupe.offset` as a drag nudge and
   `loupe.center`/the target centre as the no-cursor fallback. While a lens is
-  visible the cursor itself is suppressed — GPU export drops the cursor plane
-  and preview hides the cursor overlay. The GPU composite pass draws the lens
+  visible the cursor itself is suppressed — GPU export drops the cursor plane,
+  the compatibility renderer gates the cursor `overlay` on the lens windows,
+  and preview hides the cursor overlay. With no cursor point the lens parks on
+  `loupe.center`/the target centre and still magnifies the segment target —
+  moving the parked lens does not move what it magnifies. The GPU composite
+  pass draws the lens
   analytically between the screen and the cursor (SDF mask, rim refraction,
-  inner highlight, SDF shadow). The compatibility renderer omits the lens and
-  reports `loupe-glass`. Export gating is `glass-loupe`/`motion-blur` in
+  inner highlight, SDF shadow). The compatibility renderer rebuilds the lens
+  from filters: a `crop@loupe` samples `loupe_sample_square` on the fitted
+  screen plate and a second `overlay@loupe` positions it, both driven per frame
+  by the same `sendcmd` script mechanism the cursor tile uses; a `geq` alpha
+  disc masks the lens and a `geq` RGBA plate carries the ring, drop shadow and
+  an approximation of the glass rim. `loupe-glass` is reported only when a
+  lens enables the glass rim, since that shading is the approximated part.
+  Export gating is `glass-loupe`/`motion-blur` in
   `licensing/entitlements.rs`, mirrored by `analyzeProFeatureUsage`;
   `stripProTimelineFeatures` turns loupe segments into frame zooms and disables
   motion blur for a Free export.

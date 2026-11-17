@@ -325,6 +325,53 @@ pub(crate) fn effect_support(
                     .into(),
             });
         }
+
+        // Motion blur (M2 #1): each compat tap is a full `zoompan` + `scale`
+        // branch, so the graph caps at `COMPAT_MAX_BLUR_TAPS` while the
+        // compositor shader reaches 16. Report only when some frame's sweep
+        // would exceed the cap — a still or slow-moving plan renders
+        // identically. Tap counts evaluate on the content rect, the same
+        // space the zoom stage's fitted plate samples.
+        if let Some(canvas) = plan.canvas.as_ref() {
+            if let Some(params) = super::camera::motion_blur_params(canvas) {
+                let content_w = (canvas.width as f64 - 2.0 * canvas.padding as f64).max(2.0);
+                let content_h = (canvas.height as f64 - 2.0 * canvas.padding as f64).max(2.0);
+                let total_frames = ((plan.duration_ms as f64 * canvas.fps.max(1) as f64) / 1000.0)
+                    .ceil()
+                    .max(1.0) as u64;
+                let taps = super::camera::motion_blur_window_taps(
+                    &plan.zoom_segments,
+                    canvas,
+                    &params,
+                    0,
+                    total_frames,
+                    content_w,
+                    content_h,
+                );
+                if taps > super::camera::COMPAT_MAX_BLUR_TAPS {
+                    downgrades.push(EffectDowngrade {
+                        effect: "motion-blur".into(),
+                        reason: format!(
+                            "Fast motion blurred with up to {} taps instead of the compositor's 16",
+                            super::camera::COMPAT_MAX_BLUR_TAPS
+                        ),
+                    });
+                }
+            }
+        }
+
+        // Glass Loupe (M2 #2): the lens draws on this renderer, but the glass
+        // rim (edge refraction and inner highlight) is a `geq` approximation,
+        // not the compositor's analytic SDF shading.
+        if super::loupe::loupe_segments(&plan.zoom_segments)
+            .iter()
+            .any(|segment| segment.loupe.clone().unwrap_or_default().glass)
+        {
+            downgrades.push(EffectDowngrade {
+                effect: "loupe-glass".into(),
+                reason: "The loupe's glass rim is approximated on this renderer".into(),
+            });
+        }
     }
     downgrades
 }
@@ -2660,6 +2707,89 @@ mod tests {
         assert_eq!(downgrades.len(), 1);
         assert_eq!(downgrades[0].effect, "canvas-border");
         assert!(effect_support(&plan, &settings(), ExportRenderer::Gpu).is_empty());
+    }
+
+    fn zoom_segment(overrides: serde_json::Value) -> crate::exports::RenderPlanZoomSegment {
+        let mut base = serde_json::json!({
+            "id": "zoom-1",
+            "startMs": 1_000,
+            "endMs": 3_000,
+            "target": { "x": 100.0, "y": 100.0, "width": 960.0, "height": 540.0 },
+            "scale": 4.0,
+            "easing": "linear",
+            "transitionInMs": 60,
+            "transitionOutMs": 60
+        });
+        base.as_object_mut()
+            .unwrap()
+            .extend(overrides.as_object().cloned().unwrap_or_default());
+        serde_json::from_value(base).expect("zoom segment")
+    }
+
+    #[test]
+    fn compat_reports_motion_blur_only_when_the_cap_binds() {
+        // A plan whose blur shutters are off or whose crop never moves renders
+        // identically on both renderers — no note.
+        let mut plan = plan_with_canvas(gated_canvas());
+        plan.canvas.as_mut().expect("canvas").motion_blur =
+            Some(crate::exports::cursor::RenderMotionBlur {
+                enabled: true,
+                cursor: 0.0,
+                zoom: 1.0,
+                pan: 1.0,
+            });
+        assert!(
+            effect_support(&plan, &settings(), ExportRenderer::Compatibility)
+                .iter()
+                .all(|downgrade| downgrade.effect != "motion-blur")
+        );
+
+        // A 4x zoom slamming in over 60 ms at 30 fps sweeps far more per frame
+        // than 5 taps × 2 px cover — the compat cap binds and the note lands.
+        plan.zoom_segments.push(zoom_segment(serde_json::json!({})));
+        let downgrades = effect_support(&plan, &settings(), ExportRenderer::Compatibility);
+        assert!(
+            downgrades
+                .iter()
+                .any(|downgrade| downgrade.effect == "motion-blur"),
+            "fast sweep should report a motion-blur downgrade: {downgrades:?}"
+        );
+        // The GPU path reaches 16 taps, so it never reports this downgrade.
+        assert!(effect_support(&plan, &settings(), ExportRenderer::Gpu)
+            .iter()
+            .all(|downgrade| downgrade.effect != "motion-blur"));
+    }
+
+    #[test]
+    fn compat_reports_the_approximated_loupe_glass() {
+        let mut plan = plan_with_canvas(gated_canvas());
+        plan.zoom_segments.push(zoom_segment(serde_json::json!({
+            "style": "loupe",
+            "loupe": { "shape": "circle", "glass": true }
+        })));
+        let downgrades = effect_support(&plan, &settings(), ExportRenderer::Compatibility);
+        assert!(
+            downgrades
+                .iter()
+                .any(|downgrade| downgrade.effect == "loupe-glass"),
+            "glass loupe should report a loupe-glass downgrade: {downgrades:?}"
+        );
+
+        // A flat lens (glass off) renders the same ring on both renderers.
+        let mut flat = plan_with_canvas(gated_canvas());
+        flat.zoom_segments.push(zoom_segment(serde_json::json!({
+            "style": "loupe",
+            "loupe": { "shape": "circle", "glass": false }
+        })));
+        assert!(
+            effect_support(&flat, &settings(), ExportRenderer::Compatibility)
+                .iter()
+                .all(|downgrade| downgrade.effect != "loupe-glass")
+        );
+        // The compositor's analytic lens needs no note either.
+        assert!(effect_support(&plan, &settings(), ExportRenderer::Gpu)
+            .iter()
+            .all(|downgrade| downgrade.effect != "loupe-glass"));
     }
 
     #[test]

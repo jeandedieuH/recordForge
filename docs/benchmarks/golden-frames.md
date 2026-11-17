@@ -16,9 +16,15 @@ overlay raster paths that have regressed before. `--long-tail` additionally
 emits a 20 s chunked export whose tail spans several default chunks; the
 `long-tail/` goldens prove the held frame survives chunk boundaries. `--gpu`
 emits the same plan for the wgpu compositor, which exercises the GPU decode
-pass's last-frame hold. The `items` ablation from `export-synth-spec.ts` remains
-available for a broader fixture; prefer small, deterministic ones so goldens
-stay reviewable.
+pass's last-frame hold. `--effects` emits a second spec for the M2 pro
+effects: `canvas.motionBlur` zoom/pan shutters at full strength while a frame
+zoom transitions (so the multi-tap/`zoompan`+`mix` smear is pinned mid-move),
+plus a parked Glass Loupe whose ring, glass and magnified sample pin the
+analytic-vs-`geq` lens paths. Its goldens live in `golden/effects` (compat)
+and `golden/effects-gpu`; the two differ by design — the compat lens is an
+approximation — so each renderer gets its own set. The `items` ablation from
+`export-synth-spec.ts` remains available for a broader fixture; prefer small,
+deterministic ones so goldens stay reviewable.
 
 ## Create or refresh goldens
 
@@ -28,18 +34,24 @@ connector. Run this only after reviewing the render (the compatibility renderer
 with a single pass, so encoder rate control cannot couple frames):
 
 ```bash
-bun run --cwd tooling/benchmarks benchmark:golden:spec -- --long-tail --gpu
+bun run --cwd tooling/benchmarks benchmark:golden:spec -- --long-tail --gpu --effects
 cd apps/desktop/src-tauri
 cargo build --features export-harness --bin export_harness
 ./target/debug/export_harness.exe ../../../tooling/benchmarks/out/golden/spec_golden.json
 ./target/debug/export_harness.exe ../../../tooling/benchmarks/out/golden/spec_longtail.json
 ./target/debug/export_harness.exe ../../../tooling/benchmarks/out/golden/spec_gpu_golden.json
 ./target/debug/export_harness.exe ../../../tooling/benchmarks/out/golden/spec_longtail_gpu.json
+./target/debug/export_harness.exe ../../../tooling/benchmarks/out/golden/spec_effects.json
+./target/debug/export_harness.exe ../../../tooling/benchmarks/out/golden/spec_effects_gpu.json
 cd ../../..
 bun run --cwd tooling/benchmarks benchmark:golden \
   out/golden/render_golden.mp4 golden/items --update
 bun run --cwd tooling/benchmarks benchmark:golden \
   out/golden/render_longtail.mp4 golden/long-tail --times 10000,18000 --update
+bun run --cwd tooling/benchmarks benchmark:golden \
+  out/golden/render_effects.mp4 golden/effects --times 300,800,1600,2300,2900 --update
+bun run --cwd tooling/benchmarks benchmark:golden \
+  out/golden/render_effects_gpu.mp4 golden/effects-gpu --times 300,800,1600,2300,2900 --update
 ```
 
 (`--release` works too; a debug harness keeps the fixture run inexpensive. On
@@ -66,6 +78,13 @@ bun run --cwd tooling/benchmarks benchmark:golden \
 bun run --cwd tooling/benchmarks benchmark:golden \
   out/golden/render_longtail_gpu.mp4 golden/long-tail --times 10000,18000 \
   --min-psnr 28 --min-ssim 0.9
+# M2 effects: each renderer has its own goldens — the compat lens is an
+# intentional `geq` approximation, so do NOT compare GPU against `effects`.
+bun run --cwd tooling/benchmarks benchmark:golden \
+  out/golden/render_effects.mp4 golden/effects --times 300,800,1600,2300,2900
+bun run --cwd tooling/benchmarks benchmark:golden \
+  out/golden/render_effects_gpu.mp4 golden/effects-gpu --times 300,800,1600,2300,2900 \
+  --min-psnr 28 --min-ssim 0.9
 ```
 
 The command exits non-zero when a golden is missing or a frame falls below
@@ -81,6 +100,12 @@ the software single-pass path; the same thresholds work for the GPU renderer's
 > uniform across the frame, including the testsrc bars), not a raster
 > divergence. The `items` GPU floor is therefore `--min-ssim 0.89`; investigate
 > any step-down below that.
+>
+> Note (effects fixture): the GPU render measures ~20–35 dB PSNR against the
+> compat goldens — far below the `items` budget — because the loupe's glass
+> rim is deliberately approximated on the compatibility path (its
+> `loupe-glass` render note covers this). That is why `effects-gpu` is a
+> separate golden set rather than a budget on the shared one.
 
 ## Why not compare against the browser preview?
 

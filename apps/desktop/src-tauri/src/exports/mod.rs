@@ -885,6 +885,8 @@ pub struct RenderLoupe {
     pub glass: bool,
     pub shadow_blur: f64,
     pub shadow_opacity: f64,
+    /// Reserved: the lens rides the cursor whenever a cursor point resolves on
+    /// both renderers; a parked-lens toggle would gate on this. Ignored today.
     pub follow_cursor: bool,
     pub center: Option<RenderPoint>,
     pub offset: Option<RenderPoint>,
@@ -6790,11 +6792,13 @@ fn build_cursor_renderers(
     shared: &CompositionShared,
 ) -> Result<Vec<(u64, u64, cursor::CursorRenderer)>> {
     let mut renderers = Vec::new();
+    let mut requested = 0usize;
     for effect in plan
         .cursor_effects
         .iter()
         .filter(|effect| effect.enabled && effect.end_ms > effect.start_ms)
     {
+        requested += 1;
         // The engine map lives in CompositionShared so chunk passes reuse the
         // same parsed telemetry and smoothing pipeline; a previously
         // diagnosed asset stays skipped (`None`).
@@ -6826,7 +6830,7 @@ fn build_cursor_renderers(
         .map_err(|error| InternalError::Media(format!("prepare cursor overlay: {error}")))?;
         renderers.push((effect.start_ms, effect.end_ms, renderer));
     }
-    if renderers.is_empty() {
+    if renderers.is_empty() && requested > 0 {
         tracing::warn!(%project_id, "cursor telemetry is unavailable; exporting without a cursor overlay");
     }
     Ok(renderers)

@@ -10,8 +10,11 @@
  *
  * `--long-tail` also emits a 20 s chunked spec that verifies the held frame
  * survives across chunk boundaries. `--gpu` emits the same plan for the wgpu
- * compositor, including the GPU decode pass's last-frame hold. Then render with
- * `export_harness` and drive `golden-frames.ts` (see
+ * compositor, including the GPU decode pass's last-frame hold. `--effects`
+ * emits a second spec that pins the M2 pro effects: zoom/pan motion blur while
+ * a frame zoom is mid-transition plus a parked Glass Loupe (`golden/effects`,
+ * and `golden/effects-gpu` for the analytic lens when combined with `--gpu`).
+ * Then render with `export_harness` and drive `golden-frames.ts` (see
  * docs/benchmarks/golden-frames.md).
  */
 import { mkdirSync, writeFileSync } from "node:fs"
@@ -23,6 +26,7 @@ const scriptDir = dirname(fileURLToPath(import.meta.url))
 const args = process.argv.slice(2)
 const longTail = args.includes("--long-tail")
 const gpuCandidate = args.includes("--gpu")
+const effects = args.includes("--effects")
 const outDirArg = args.find((arg) => !arg.startsWith("--"))
 const outDir = resolve(outDirArg ?? join(scriptDir, "out", "golden"))
 mkdirSync(outDir, { recursive: true })
@@ -215,6 +219,83 @@ if (gpuCandidate) {
   const gpuPath = join(outDir, "spec_gpu_golden.json")
   writeFileSync(gpuPath, JSON.stringify(gpuSpec, null, 2))
   console.log(`gpu spec:       ${gpuPath}`)
+}
+
+if (effects) {
+  // M2 pro-effects fixture (golden/effects): a frame zoom whose transitions
+  // keep the crop moving inside golden windows so the zoom/pan shutter taps
+  // actually fire, plus a parked Glass Loupe (no cursor telemetry → the lens
+  // sits on its target, fully deterministic). A plan that drops either
+  // effect — the loupe-segment regression this fixture guards — visibly
+  // differs at 800/1600/2300 ms.
+  const effectsPlan = JSON.parse(JSON.stringify(plan)) as {
+    canvas: Record<string, unknown>
+    zoomSegments: Record<string, unknown>[]
+    texts: unknown[]
+    annotations: unknown[]
+  } & Record<string, unknown>
+  effectsPlan.canvas = {
+    ...effectsPlan.canvas,
+    // Zoom/pan shutter fully open for a readable smear; cursor blur stays
+    // off because this fixture ships no telemetry.
+    motionBlur: { enabled: true, cursor: 0, zoom: 1, pan: 1 },
+  }
+  effectsPlan.texts = []
+  effectsPlan.annotations = []
+  effectsPlan.zoomSegments = [
+    {
+      id: "zoom-fx",
+      startMs: 400,
+      endMs: 2_000,
+      target: { x: 40, y: 40, width: 240, height: 135 },
+      scale: 2,
+      easing: "linear",
+      transitionInMs: 700,
+      transitionOutMs: 700,
+      enabled: true,
+      mode: "manual",
+    },
+    {
+      id: "loupe-fx",
+      startMs: 500,
+      endMs: 2_500,
+      target: { x: 200, y: 80, width: 160, height: 90 },
+      scale: 2,
+      easing: "linear",
+      transitionInMs: 400,
+      transitionOutMs: 400,
+      enabled: true,
+      mode: "manual",
+      style: "loupe",
+      loupe: {
+        shape: "rounded-rect",
+        size: 0.4,
+        cornerRadius: 0.24,
+        ringWidth: 6,
+        ringColor: "#ffffff",
+        ringOpacity: 0.9,
+        glass: true,
+        shadowBlur: 24,
+        shadowOpacity: 0.35,
+        followCursor: false,
+      },
+    },
+  ]
+  const effectsSpec = JSON.parse(JSON.stringify(spec)) as typeof spec
+  effectsSpec.plan = effectsPlan as typeof spec.plan
+  effectsSpec.outputPath = join(outDir, "render_effects.mp4")
+  const effectsPath = join(outDir, "spec_effects.json")
+  writeFileSync(effectsPath, JSON.stringify(effectsSpec, null, 2))
+  console.log(`effects spec:   ${effectsPath}`)
+
+  if (gpuCandidate) {
+    const gpuEffects = JSON.parse(JSON.stringify(effectsSpec)) as typeof spec
+    gpuEffects.settings.renderer = "gpu"
+    gpuEffects.outputPath = join(outDir, "render_effects_gpu.mp4")
+    const gpuEffectsPath = join(outDir, "spec_effects_gpu.json")
+    writeFileSync(gpuEffectsPath, JSON.stringify(gpuEffects, null, 2))
+    console.log(`gpu effects:    ${gpuEffectsPath}`)
+  }
 }
 
 if (longTail) {

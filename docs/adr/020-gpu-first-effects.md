@@ -60,8 +60,8 @@ renders an honest, documented approximation.
 | Zoom detail plane (source-resolution crop) | Exact: the screen chain decodes at the plan's detail resolution (`D = content × min(m, r)`, never above the source) and the composite pass samples the real source pixels | Holds exact; animated transitions sample the post-scale stream | `zoom-detail` when a transition is post-scale |
 | Zoom sharpening (RCAS-style) | Exact | Mild luma `unsharp` | `zoom-sharpening` |
 | Motion blur — cursor | Exact (shared Rust rasterizer) | Exact (same rasterizer) | never |
-| Motion blur — zoom/pan | Exact | Omitted | `motion-blur` |
-| Glass Loupe | Exact (analytic SDF lens, glass rim, SDF shadow) | Not rendered: the frame keeps its zoom and the lens is omitted | `loupe-glass` |
+| Motion blur — zoom/pan | Exact (up to 16 shader taps) | Averaged `zoompan`+`mix` taps, capped at 5 | `motion-blur` only when the sweep exceeds the tap cap |
+| Glass Loupe | Exact (analytic SDF lens, glass rim, SDF shadow) | Lens rebuilt from `crop`/`geq`/`sendcmd`/`overlay`; the glass rim is approximated | `loupe-glass` only when the glass rim is on |
 | Camera colour / LUT | Exact (camera decode chain) | Exact (same FFmpeg chain) | never |
 | Camera cutout matte + background modes | Exact (camera decode chain) | Exact (same FFmpeg chain) | never |
 | Camera cutout silhouette shadow | Exact | Omitted | `cutout-shadow` |
@@ -87,12 +87,17 @@ not ship.
   ghost poses inside the shared rasterizer, chosen from the mapped sweep
   distance (sub-pixel movement falls back to one pose). Zoom/pan blur is a
   multi-tap average along the crop strip in the composite shader (up to 16
-  taps). A plan with blur off writes one tap and takes the existing single-sample
-  path, so the cost is zero.
+  taps); the compatibility graph rebuilds the same sweep as shifted `zoompan`
+  branches averaged by `mix`, capped at five because each tap is a full crop
+  chain. A plan with blur off writes one tap and takes the existing single-sample
+  path on both renderers, so the cost is zero.
 - **Glass Loupe compat.** The compatibility graph has no cheap "magnify a region
-  inside a masked lens" equivalent that also follows the cursor, so the lens is
-  omitted there and reported. The GPU path draws it analytically in the
-  composite pass between the screen and the cursor.
+  inside a masked lens" equivalent that also follows the cursor, so it
+  synthesizes the lens from filters: `crop@loupe` samples the fitted screen
+  plate, a `geq` disc masks it, a `geq` plate draws ring/shadow/glass
+  approximation, and `sendcmd` positions both overlays per frame — the same
+  mechanism the cursor tile uses. The GPU path draws the lens analytically in
+  the composite pass between the screen and the cursor.
 
 ## Consequences
 

@@ -2313,3 +2313,79 @@ describe("sideBySideScreenSlot", () => {
     expect(sideBySideScreenSlot(canvas)).toEqual(expected)
   })
 })
+
+describe("M2 pro effects reach the render plan", () => {
+  // Regression: motion blur lives on `state.canvas`, the Glass Loupe on a zoom
+  // segment — both cross `exportTimelineOptionsSchema.parse` before Rust ever
+  // sees them, so a schema drift here silently removes the effect from exports.
+  it("keeps motionBlur and the loupe segment through build + schema round-trip", () => {
+    const state = makeTimeline()
+    state.canvas = {
+      ...state.canvas,
+      motionBlur: { enabled: true, cursor: 0.5, zoom: 0.6, pan: 0.4 },
+    }
+    state.zoomSegments = [
+      {
+        id: "zoom-frame",
+        startMs: 1_000,
+        durationMs: 3_000,
+        target: { x: 100, y: 100, width: 1_000, height: 560 },
+        scale: 1.5,
+        easing: "smooth",
+        enabled: true,
+        locked: false,
+        mode: "manual",
+        source: "manual",
+      },
+      {
+        id: "zoom-loupe",
+        startMs: 5_000,
+        durationMs: 4_000,
+        target: { x: 480, y: 270, width: 960, height: 540 },
+        scale: 2,
+        easing: "smooth",
+        enabled: true,
+        locked: false,
+        mode: "manual",
+        source: "manual",
+        style: "loupe",
+        loupe: {
+          shape: "rounded-rect",
+          size: 0.4,
+          cornerRadius: 0.24,
+          ringWidth: 8,
+          ringColor: "#ffffff",
+          ringOpacity: 0.9,
+          glass: true,
+          shadowBlur: 36,
+          shadowOpacity: 0.35,
+          followCursor: false,
+        },
+      },
+    ]
+
+    const plan = buildRenderPlan({ state, projectId: "project-1" })
+    expect(plan.ok).toBe(true)
+    if (!plan.ok) return
+
+    // What the export command actually transmits: a JSON round-trip through
+    // the wire schema is the only thing Rust deserializes.
+    const wire = renderPlanSchema.parse(JSON.parse(JSON.stringify(plan.value)))
+    expect(wire.canvas.motionBlur).toEqual({
+      enabled: true,
+      cursor: 0.5,
+      zoom: 0.6,
+      pan: 0.4,
+    })
+    const loupe = wire.zoomSegments.find((segment) => segment.id === "zoom-loupe")
+    expect(loupe?.style).toBe("loupe")
+    expect(loupe?.loupe).toMatchObject({
+      shape: "rounded-rect",
+      size: 0.4,
+      glass: true,
+      ringWidth: 8,
+    })
+    const frame = wire.zoomSegments.find((segment) => segment.id === "zoom-frame")
+    expect(frame?.style).not.toBe("loupe")
+  })
+})

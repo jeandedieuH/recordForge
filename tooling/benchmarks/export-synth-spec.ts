@@ -660,9 +660,9 @@ const clarityZoomPlan = {
 }
 
 // Motion blur (#1, M2). Cursor blur comes from the shared rasterizer (exact on
-// both renderers); zoom/pan blur is the GPU multi-tap pass and is omitted by the
-// compatibility renderer. Transitions are placed inside the window so the taps
-// actually move.
+// both renderers); zoom/pan blur is the GPU multi-tap pass and a capped
+// zoompan+mix chain on the compatibility renderer. Transitions are placed
+// inside the window so the taps actually move.
 const motionBlurPlan = {
   ...plainPlan({ motionBlur: { enabled: true, cursor: 0.5, zoom: 0.6, pan: 0.6 } }),
   durationMs: 10_000,
@@ -701,8 +701,9 @@ const motionBlurPlan = {
 }
 
 // Glass Loupe (#2, M2): the frame stays put and a lens magnifies the target.
-// The GPU draws it in the composite pass; the compatibility renderer omits the
-// lens and reports `loupe-glass`.
+// The GPU draws it in the composite pass; the compatibility renderer rebuilds
+// it from crop/geq/sendcmd filters and reports `loupe-glass` when the rim is
+// on (that shading is the approximated part).
 const loupePlan = {
   ...plainPlan(),
   durationMs: 10_000,

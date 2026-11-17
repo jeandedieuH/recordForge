@@ -41,6 +41,8 @@ import {
   resolveCameraLayoutWindows,
   resolveCameraShots,
   resolveCaptionLayout,
+  resolveLoupes,
+  type CameraShot,
   resolveClipDesign,
   resolveFaceCropKeyframes,
   sampleCameraLayoutKeyframes,
@@ -1089,7 +1091,13 @@ function toZoomSegments(
   const sourceTimelineOffsetMs = range ? Math.round(range.startMs) : 0
   // Export windows ride on the same effective shots as the preview so gaps
   // bridged on screen are bridged in the rendered file as well.
-  return resolveCameraShots(state, engine)
+  //
+  // Loupe segments (#2) are not camera shots — `resolveCameraShots` skips them
+  // because they never move the frame — but they still cross the plan boundary
+  // as `style: "loupe"` zoom segments so both export renderers can draw the lens.
+  // `CameraShot`'s extra fields are optional, so `ManualZoomSegment` widens to it.
+  const segments: CameraShot[] = [...resolveCameraShots(state, engine), ...resolveLoupes(state)]
+  return segments
     .flatMap((shot) => {
       const window = windowTimeRange(shot.startMs, shot.startMs + shot.durationMs, range)
       if (!window) return []

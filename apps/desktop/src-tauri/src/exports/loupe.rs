@@ -705,6 +705,73 @@ mod tests {
         segment
     }
 
+    /// The JSON literal mirrors what `buildRenderPlan` emits for the loupe
+    /// plan test in `packages/media-core/src/render-plan.test.ts` — a field
+    /// rename or a new required key on either side fails one of the two.
+    #[test]
+    fn the_editor_plan_json_deserializes_with_blur_and_loupe() {
+        let plan: RenderPlan = serde_json::from_str(
+            r#"{
+                "projectId": "project-1",
+                "durationMs": 10000,
+                "canvas": {
+                    "width": 1920,
+                    "height": 1080,
+                    "fps": 30,
+                    "motionBlur": {
+                        "enabled": true,
+                        "cursor": 0.5,
+                        "zoom": 0.6,
+                        "pan": 0.4
+                    },
+                    "cursorSettings": {}
+                },
+                "segments": [
+                    {
+                        "assetId": "rec-1",
+                        "speed": 1,
+                        "sourceInMs": 0,
+                        "sourceOutMs": 10000,
+                        "outputStartMs": 0,
+                        "outputEndMs": 10000
+                    }
+                ],
+                "zoomSegments": [
+                    {
+                        "id": "zoom-loupe",
+                        "startMs": 5000,
+                        "endMs": 9000,
+                        "target": { "x": 480.0, "y": 270.0, "width": 960.0, "height": 540.0 },
+                        "scale": 2,
+                        "style": "loupe",
+                        "loupe": {
+                            "shape": "rounded-rect",
+                            "size": 0.4,
+                            "glass": true,
+                            "ringWidth": 8
+                        }
+                    }
+                ]
+            }"#,
+        )
+        .expect("editor render plan");
+
+        let blur = plan
+            .canvas
+            .as_ref()
+            .and_then(|canvas| canvas.motion_blur)
+            .expect("motion blur settings");
+        assert!(blur.is_active());
+        assert_eq!(blur.zoom, 0.6);
+
+        let segments = loupe_segments(&plan.zoom_segments);
+        assert_eq!(segments.len(), 1);
+        let settings = segments[0].loupe.clone().unwrap_or_default();
+        assert!(!settings.is_circle());
+        assert!(settings.glass);
+        assert_eq!(settings.ring_width, 8.0);
+    }
+
     #[test]
     fn a_loupe_covers_its_range_and_grows_in() {
         let segments = vec![loupe(|_| {})];
@@ -904,10 +971,10 @@ mod tests {
             90,
         )
         .expect("a covered window prepares the lens");
-        assert!(prepared.plate % 2 == 0 && prepared.plate > 0);
+        assert!(prepared.plate.is_multiple_of(2) && prepared.plate > 0);
         // Parked pose (no cursor) seeds the declared crop/overlay options.
         let (side, crop_x, crop_y, overlay_x, overlay_y) = prepared.seed;
-        assert_eq!(side % 2, 0);
+        assert!(side.is_multiple_of(2));
         assert!(crop_x >= 0 && crop_y >= 0);
         assert!(overlay_x >= 0 && overlay_y >= 0);
         // The enable window covers the segment; cursor suppression negates it.
