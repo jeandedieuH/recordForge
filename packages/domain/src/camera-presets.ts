@@ -22,6 +22,12 @@ export interface CameraPresetInput {
 // the nominal 1080-base canvas each ratio produces and scaled linearly for
 // larger canvases (e.g. 2160-base from 4K sources). These place a prominent
 // circular webcam overlapping the lower edge of the centered screen video.
+//
+// ADR 023 (camera frame model): this legacy pixel table stays only for
+// `createTimelineFromRecording` (domain cannot import editor-core) and as the
+// migration reference. The authoritative spec going forward is editor-core's
+// `autoCameraFrame` / `CIRCLE_PIP_FRAME_LAYOUTS` — keep them in sync if either
+// ever changes.
 interface CirclePipRatioSpec {
   canvasWidth: number
   canvasHeight: number

@@ -630,6 +630,13 @@ pub struct RenderPlanOverlay {
     /// their own border radius; the camera bubble keeps its proportional one).
     #[serde(default)]
     pub radius: Option<f64>,
+    /// Camera placement mode from the frame resolver (ADR 023). `split`
+    /// overlays carry a static `screen` slot.
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// Screen slot for `mode: "split"` camera layers, in canvas px.
+    #[serde(default)]
+    pub screen: Option<RenderPlanScreenSlot>,
     /// How the source fills the layer rect: `contain`, `cover` (camera default)
     /// or `fill`.
     #[serde(default)]
@@ -790,6 +797,18 @@ pub struct RenderCrop {
     pub y: i32,
     pub width: i32,
     pub height: i32,
+}
+
+/// Static screen slot a `mode: "split"` camera overlay reserves (ADR 023), in
+/// canvas px. Emitted by the TS resolver; absent on older plans, where the
+/// legacy 76% slot arithmetic still applies.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RenderPlanScreenSlot {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1913,22 +1932,14 @@ fn common_screen_source(
     common
 }
 
-/// True when a camera overlay uses the side-by-side layout — either the
-/// explicit preset or legacy coordinates that land on the generated slot.
+/// True when a camera overlay uses the side-by-side layout. ADR 023 plans mark
+/// it explicitly via `mode: "split"`; the preset check keeps older plans —
+/// which carry `preset: "side-by-side"` but no mode — working unchanged.
 /// `visible` overlays only: a hidden clip never drives the layout.
-fn overlay_is_side_by_side(overlay: &RenderPlanOverlay, canvas: &cursor::RenderCanvas) -> bool {
-    if !overlay.visible {
-        return false;
-    }
-    if overlay.preset.as_deref() == Some("side-by-side") {
-        return true;
-    }
-    let usable_w = (canvas.width as f64 - (canvas.padding as f64) * 2.0).max(1.0);
-    let target_camera_x =
-        (canvas.padding as f64) + (usable_w * 0.76).round() + (usable_w * 0.02).round();
-    let legacy_camera_x =
-        (canvas.padding as f64) + (usable_w * 0.68).round() + (usable_w * 0.02).round();
-    (overlay.x - target_camera_x).abs() <= 3.0 || (overlay.x - legacy_camera_x).abs() <= 3.0
+fn overlay_is_side_by_side(overlay: &RenderPlanOverlay) -> bool {
+    overlay.visible
+        && (overlay.mode.as_deref() == Some("split")
+            || overlay.preset.as_deref() == Some("side-by-side"))
 }
 
 /// Merge `[start_ms, end_ms)` windows, sorted by start. Unlike
@@ -1950,10 +1961,96 @@ fn merge_ms_windows(windows: Vec<(u64, u64)>) -> Vec<(u64, u64)> {
     merged
 }
 
+/// Corner radius as a fraction of the frame's shorter side (ADR 023). Plans
+/// carry px radii resolved by the TS frame resolver; this constant remains
+/// only as the fallback for older plans whose overlays lack `radius`.
+pub(crate) const CAMERA_CORNER_RADIUS_FRACTION: f64 = 0.12;
+
+/// Resolved camera corner radius for a `rounded` shape (ADR 023): the plan's
+/// px radius is authoritative — clamped to the frame half-extent, no floor.
+/// Plans without `radius` keep the legacy fraction with its 4px floor.
+pub(crate) fn camera_corner_radius(radius: Option<f64>, width: f64, height: f64) -> f32 {
+    let short = width.min(height);
+    radius
+        .map(|value| value.clamp(0.0, short / 2.0) as f32)
+        .unwrap_or_else(|| (short * CAMERA_CORNER_RADIUS_FRACTION).max(4.0) as f32)
+}
+
+/// Corner radius for a `rounded` alpha mask, in mask px. Animated layouts
+/// derive the ratio from the largest pose so a fullscreen beat keeps its
+/// corner geometry proportional after the stretch; otherwise the plan's
+/// `overlay.radius` supplies the ratio — plan radii are authoritative, so no
+/// 4px floor. The fraction constant is the old-plan last resort.
+fn camera_mask_radius(
+    pose: &[RenderLayoutKeyframe],
+    rect_varies: bool,
+    overlay: &RenderPlanOverlay,
+    mask_w: u32,
+    mask_h: u32,
+) -> f32 {
+    let plan_ratio = pose
+        .iter()
+        .max_by(|a, b| {
+            (a.width * a.height)
+                .partial_cmp(&(b.width * b.height))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .filter(|_| rect_varies)
+        .map(|keyframe| {
+            let shortest = keyframe.width.min(keyframe.height);
+            if shortest > 1.0 {
+                keyframe.radius / shortest
+            } else {
+                0.0
+            }
+        })
+        .filter(|value| *value > 0.0)
+        .or_else(|| {
+            overlay
+                .radius
+                .map(|radius| radius / overlay.width.min(overlay.height).max(1.0))
+        });
+    let mask_short = mask_w.min(mask_h) as f64;
+    match plan_ratio {
+        Some(ratio) => (mask_short * ratio).clamp(0.0, mask_short / 2.0) as f32,
+        None => (mask_short * CAMERA_CORNER_RADIUS_FRACTION).max(4.0) as f32,
+    }
+}
+
+/// Screen share of the legacy side-by-side slot, used only when a plan
+/// carries no explicit `overlay.screen` (pre-ADR-023 plans).
+const SIDE_BY_SIDE_SCREEN_RATIO: f64 = 0.76;
+
+/// The screen slot today's side-by-side arithmetic produces, in canvas px.
+/// Kept verbatim — including the unrounded slot origin — so plans without
+/// `overlay.screen` render bit-identically to before.
+fn legacy_side_by_side_slot(canvas: &cursor::RenderCanvas) -> (f64, f64, f64, f64) {
+    let padding = canvas.padding as f64;
+    let content_width = (canvas.width as f64 - padding * 2.0).max(1.0);
+    let content_height = (canvas.height as f64 - padding * 2.0).max(1.0);
+    // Video dimensions and coordinates must be even integers for YUV420 chroma
+    // alignment and hardware encoder macroblock requirements.
+    let target_w =
+        ((content_width * SIDE_BY_SIDE_SCREEN_RATIO).round() as u32 / 2 * 2).max(2) as f64;
+    let target_h = (((target_w / canvas.width as f64) * canvas.height as f64).round() as u32 / 2
+        * 2)
+    .max(2) as f64;
+    (
+        padding,
+        padding + (content_height - target_h) / 2.0,
+        target_w,
+        target_h,
+    )
+}
+
+/// Fit the screen stream into `sbs_slot` (`Some((x, y, w, h))` in canvas px)
+/// or across the whole content area when `None`. The slot is the plan's
+/// explicit `overlay.screen` or the legacy 76% target box — the fit itself is
+/// shared: letterbox the source inside the slot, even-rounded for YUV420.
 fn video_screen_rect(
     canvas: &cursor::RenderCanvas,
     source: Option<(u32, u32)>,
-    is_side_by_side: bool,
+    sbs_slot: Option<(f64, f64, f64, f64)>,
 ) -> (f64, f64, f64, f64) {
     let padding = canvas.padding as f64;
     let content_width = (canvas.width as f64 - padding * 2.0).max(1.0);
@@ -1963,28 +2060,20 @@ fn video_screen_rect(
     } else {
         canvas.video_position_y.unwrap_or(0.5).clamp(0.0, 1.0)
     };
-    if is_side_by_side {
-        let target_w = ((content_width * 0.76).round() as u32 / 2 * 2).max(2) as f64;
-        let target_h =
-            (((target_w / canvas.width as f64) * canvas.height as f64).round() as u32 / 2 * 2)
-                .max(2) as f64;
+    if let Some((slot_x, slot_y, slot_w, slot_h)) = sbs_slot {
         let (source_w, source_h) = match source {
             Some((w, h)) => (w as f64, h as f64),
-            None => (target_w, target_h),
+            None => (slot_w, slot_h),
         };
-        let fit_scale = (target_w / source_w).min(target_h / source_h);
+        let fit_scale = (slot_w / source_w).min(slot_h / source_h);
         // Video dimensions and coordinates must be even integers for YUV420 chroma alignment
         // and hardware encoder macroblock requirements.
         let fit_width = ((source_w * fit_scale).round() as u32 / 2 * 2).max(2) as f64;
         let fit_height = ((source_h * fit_scale).round() as u32 / 2 * 2).max(2) as f64;
-        let x = (((padding + (target_w - fit_width) / 2.0).round() as u32 / 2 * 2) as f64)
+        let x = (((slot_x + (slot_w - fit_width) / 2.0).round() as u32 / 2 * 2) as f64)
             .min(canvas.width as f64);
-        let y =
-            (((padding + (content_height - target_h) / 2.0 + (target_h - fit_height) * position_y)
-                .round() as u32
-                / 2
-                * 2) as f64)
-                .min(canvas.height as f64);
+        let y = (((slot_y + (slot_h - fit_height) * position_y).round() as u32 / 2 * 2) as f64)
+            .min(canvas.height as f64);
         (x, y, fit_width, fit_height)
     } else {
         let (source_w, source_h) = match source {
@@ -2512,7 +2601,7 @@ fn render_composition_window(
     let sbs_windows = merge_ms_windows(
         plan.overlays
             .iter()
-            .filter(|overlay| overlay_is_side_by_side(overlay, canvas))
+            .filter(|overlay| overlay_is_side_by_side(overlay))
             .map(|overlay| (overlay.output_start_ms, overlay.output_end_ms))
             .collect(),
     );
@@ -2534,18 +2623,27 @@ fn render_composition_window(
     };
 
     let screen_source = common_screen_source(&plan.segments, asset_paths, &shared.probe);
-    let full_screen_rect = video_screen_rect(canvas, screen_source, false);
+    let full_screen_rect = video_screen_rect(canvas, screen_source, None);
+    // The plan's explicit screen slot wins (ADR 023); plans without one keep
+    // the legacy 76% target box so their output is unchanged.
+    let sbs_slot = plan
+        .overlays
+        .iter()
+        .find(|overlay| overlay_is_side_by_side(overlay))
+        .and_then(|overlay| overlay.screen)
+        .map(|slot| (slot.x, slot.y, slot.width, slot.height))
+        .unwrap_or_else(|| legacy_side_by_side_slot(canvas));
     // `screen_*` is the fitted stream's base geometry: the side-by-side rect
     // when the layout is uniformly so, otherwise the full rect — for a
     // varying layout the stream is rendered at the larger full geometry and
     // eval-scaled down inside side-by-side windows.
     let (screen_x, screen_y, screen_w, screen_h) = if uniform_sbs {
-        video_screen_rect(canvas, screen_source, true)
+        video_screen_rect(canvas, screen_source, Some(sbs_slot))
     } else {
         full_screen_rect
     };
     let sbs_screen_rect = if overlay_sbs_varies {
-        Some(video_screen_rect(canvas, screen_source, true))
+        Some(video_screen_rect(canvas, screen_source, Some(sbs_slot)))
     } else {
         None
     };
@@ -3193,6 +3291,7 @@ fn render_composition_window(
                     overlay_w as f64,
                     overlay_h as f64,
                     &overlay.shape,
+                    overlay.radius,
                     overlay.shadow_color.as_deref(),
                     overlay.shadow_blur,
                     overlay.shadow_offset_x,
@@ -3240,32 +3339,15 @@ fn render_composition_window(
                         InternalError::Media(format!("generate circle mask: {err}"))
                     })?
                 } else {
-                    // Pose keyframes carry their own radius; derive the ratio
-                    // from the largest pose so a fullscreen beat keeps its
-                    // corner geometry proportional after the stretch.
-                    let ratio = camera_pose
-                        .iter()
-                        .max_by(|a, b| {
-                            (a.width * a.height)
-                                .partial_cmp(&(b.width * b.height))
-                                .unwrap_or(std::cmp::Ordering::Equal)
-                        })
-                        .filter(|_| {
-                            track_anims[index]
-                                .as_ref()
-                                .is_some_and(|anim| anim.rect_varies)
-                        })
-                        .map(|keyframe| {
-                            let shortest = keyframe.width.min(keyframe.height);
-                            if shortest > 1.0 {
-                                keyframe.radius / shortest
-                            } else {
-                                0.0
-                            }
-                        })
-                        .filter(|value| *value > 0.0)
-                        .unwrap_or(0.12);
-                    let radius = (mask_w.min(mask_h) as f64 * ratio).max(4.0) as f32;
+                    let radius = camera_mask_radius(
+                        &camera_pose,
+                        track_anims[index]
+                            .as_ref()
+                            .is_some_and(|anim| anim.rect_varies),
+                        overlay,
+                        mask_w,
+                        mask_h,
+                    );
                     cursor::generate_rounded_rect_mask_png(mask_w, mask_h, radius).map_err(
                         |err| InternalError::Media(format!("generate rounded mask: {err}")),
                     )?
@@ -3312,6 +3394,7 @@ fn render_composition_window(
                     overlay_w,
                     overlay_h,
                     &overlay.shape,
+                    overlay.radius,
                     border_width,
                     overlay.border_color.as_deref(),
                     overlay.border_opacity,
@@ -9990,6 +10073,7 @@ pub(crate) fn generate_camera_border_png(
     width: u32,
     height: u32,
     shape: &str,
+    radius: Option<f64>,
     border_width: f64,
     border_color: Option<&str>,
     border_opacity: Option<f64>,
@@ -10002,7 +10086,7 @@ pub(crate) fn generate_camera_border_png(
     let w = width.max(1) as f32;
     let h = height.max(1) as f32;
     let radius = if shape == "rounded" {
-        (w.min(h) * 0.12).max(4.0)
+        camera_corner_radius(radius, w as f64, h as f64)
     } else {
         0.0
     };
@@ -10090,6 +10174,7 @@ pub(crate) fn generate_camera_shadow_plate_png(
     overlay_w: f64,
     overlay_h: f64,
     shape: &str,
+    radius: Option<f64>,
     shadow_color: Option<&str>,
     shadow_blur: Option<f64>,
     shadow_offset_x: Option<f64>,
@@ -10106,7 +10191,7 @@ pub(crate) fn generate_camera_shadow_plate_png(
     let hex_color = safe_filter_color(shadow_color.unwrap_or("#000000"));
     let color = parse_color_hex(&hex_color, 0.4);
 
-    let path = camera_shadow_path(shape, x, y, w, h)?;
+    let path = camera_shadow_path(shape, x, y, w, h, radius)?;
 
     let mut paint = Paint::default();
     paint.set_color(color);
@@ -10176,7 +10261,14 @@ fn camera_shadow_bounds(
     (x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32)
 }
 
-fn camera_shadow_path(shape: &str, x: f32, y: f32, w: f32, h: f32) -> Option<tiny_skia::Path> {
+fn camera_shadow_path(
+    shape: &str,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    radius: Option<f64>,
+) -> Option<tiny_skia::Path> {
     match shape {
         "circle" => {
             let rx = (w / 2.0).min(h / 2.0);
@@ -10196,7 +10288,7 @@ fn camera_shadow_path(shape: &str, x: f32, y: f32, w: f32, h: f32) -> Option<tin
             pb.finish()
         }
         "rounded" => {
-            let r = (w.min(h) * 0.12).max(4.0);
+            let r = camera_corner_radius(radius, w as f64, h as f64);
             build_rounded_rect_path(x, y, w, h, r)
         }
         _ => {
@@ -13858,7 +13950,7 @@ mod tests {
             video_position_y: Some(0.0), // Ignored for 16:9
             ..Default::default()
         };
-        let rect = video_screen_rect(&canvas_16_9, Some((1920, 1080)), false);
+        let rect = video_screen_rect(&canvas_16_9, Some((1920, 1080)), None);
         assert_eq!(rect, (0.0, 0.0, 1920.0, 1080.0));
 
         // 9:16 vertical canvas (1080x1920) with 16:9 source (1920x1080)
@@ -13872,15 +13964,15 @@ mod tests {
             video_position_y: Some(0.5), // Center
             ..Default::default()
         };
-        let rect_9_16_center = video_screen_rect(&canvas_9_16, Some((1920, 1080)), false);
+        let rect_9_16_center = video_screen_rect(&canvas_9_16, Some((1920, 1080)), None);
         assert_eq!(rect_9_16_center, (0.0, 656.0, 1080.0, 608.0));
 
         canvas_9_16.video_position_y = Some(0.0); // Top
-        let rect_9_16_top = video_screen_rect(&canvas_9_16, Some((1920, 1080)), false);
+        let rect_9_16_top = video_screen_rect(&canvas_9_16, Some((1920, 1080)), None);
         assert_eq!(rect_9_16_top, (0.0, 0.0, 1080.0, 608.0));
 
         canvas_9_16.video_position_y = Some(1.0); // Bottom
-        let rect_9_16_bottom = video_screen_rect(&canvas_9_16, Some((1920, 1080)), false);
+        let rect_9_16_bottom = video_screen_rect(&canvas_9_16, Some((1920, 1080)), None);
         assert_eq!(rect_9_16_bottom, (0.0, 1312.0, 1080.0, 608.0));
 
         // 1:1 square canvas (1080x1080) with 16:9 source (1920x1080) and 40px padding
@@ -13893,15 +13985,15 @@ mod tests {
             video_position_y: Some(0.5),
             ..Default::default()
         };
-        let rect_1_1 = video_screen_rect(&canvas_1_1, Some((1920, 1080)), false);
+        let rect_1_1 = video_screen_rect(&canvas_1_1, Some((1920, 1080)), None);
         assert_eq!(rect_1_1, (40.0, 258.0, 1000.0, 562.0));
 
         canvas_1_1.video_position_y = Some(0.0); // Top
-        let rect_1_1_top = video_screen_rect(&canvas_1_1, Some((1920, 1080)), false);
+        let rect_1_1_top = video_screen_rect(&canvas_1_1, Some((1920, 1080)), None);
         assert_eq!(rect_1_1_top, (40.0, 40.0, 1000.0, 562.0));
 
         canvas_1_1.video_position_y = Some(1.0); // Bottom
-        let rect_1_1_bottom = video_screen_rect(&canvas_1_1, Some((1920, 1080)), false);
+        let rect_1_1_bottom = video_screen_rect(&canvas_1_1, Some((1920, 1080)), None);
         assert_eq!(rect_1_1_bottom, (40.0, 478.0, 1000.0, 562.0));
 
         // 5:4 canvas (1350x1080) with 16:9 source (1920x1080) and 0 padding
@@ -13914,15 +14006,15 @@ mod tests {
             video_position_y: Some(0.5),
             ..Default::default()
         };
-        let rect_5_4_center = video_screen_rect(&canvas_5_4, Some((1920, 1080)), false);
+        let rect_5_4_center = video_screen_rect(&canvas_5_4, Some((1920, 1080)), None);
         assert_eq!(rect_5_4_center, (0.0, 160.0, 1350.0, 758.0));
 
         canvas_5_4.video_position_y = Some(0.0); // Top
-        let rect_5_4_top = video_screen_rect(&canvas_5_4, Some((1920, 1080)), false);
+        let rect_5_4_top = video_screen_rect(&canvas_5_4, Some((1920, 1080)), None);
         assert_eq!(rect_5_4_top, (0.0, 0.0, 1350.0, 758.0));
 
         canvas_5_4.video_position_y = Some(1.0); // Bottom
-        let rect_5_4_bottom = video_screen_rect(&canvas_5_4, Some((1920, 1080)), false);
+        let rect_5_4_bottom = video_screen_rect(&canvas_5_4, Some((1920, 1080)), None);
         assert_eq!(rect_5_4_bottom, (0.0, 322.0, 1350.0, 758.0));
 
         // 4:5 canvas (1080x1350) with 16:9 source (1920x1080) and 0 padding
@@ -13935,23 +14027,221 @@ mod tests {
             video_position_y: Some(0.5),
             ..Default::default()
         };
-        let rect_4_5_center = video_screen_rect(&canvas_4_5, Some((1920, 1080)), false);
+        let rect_4_5_center = video_screen_rect(&canvas_4_5, Some((1920, 1080)), None);
         assert_eq!(rect_4_5_center, (0.0, 370.0, 1080.0, 608.0));
 
         canvas_4_5.video_position_y = Some(0.0); // Top
-        let rect_4_5_top = video_screen_rect(&canvas_4_5, Some((1920, 1080)), false);
+        let rect_4_5_top = video_screen_rect(&canvas_4_5, Some((1920, 1080)), None);
         assert_eq!(rect_4_5_top, (0.0, 0.0, 1080.0, 608.0));
 
         canvas_4_5.video_position_y = Some(1.0); // Bottom
-        let rect_4_5_bottom = video_screen_rect(&canvas_4_5, Some((1920, 1080)), false);
+        let rect_4_5_bottom = video_screen_rect(&canvas_4_5, Some((1920, 1080)), None);
         assert_eq!(rect_4_5_bottom, (0.0, 742.0, 1080.0, 608.0));
 
         // 16:9 canvas (1920x1080) with 16:9 source in side-by-side mode (76% screen width)
-        let rect_sbs = video_screen_rect(&canvas_16_9, Some((1920, 1080)), true);
+        let rect_sbs = video_screen_rect(
+            &canvas_16_9,
+            Some((1920, 1080)),
+            Some(legacy_side_by_side_slot(&canvas_16_9)),
+        );
         assert_eq!(rect_sbs.0, 0.0);
         assert_eq!(rect_sbs.2, 1458.0);
         assert_eq!(rect_sbs.3, 820.0);
         assert_eq!(rect_sbs.1, 130.0);
+    }
+
+    #[test]
+    fn camera_corner_radius_prefers_the_plan_value() {
+        // Plan px radius is authoritative — including a non-0.12 value, an
+        // explicit zero (no floor), and a clamp at the frame half-extent.
+        assert_eq!(camera_corner_radius(Some(10.0), 240.0, 240.0), 10.0);
+        assert_eq!(camera_corner_radius(Some(0.0), 240.0, 240.0), 0.0);
+        assert_eq!(camera_corner_radius(Some(500.0), 240.0, 240.0), 120.0);
+        // Old plans keep the fraction with its 4px floor.
+        assert_eq!(
+            camera_corner_radius(None, 240.0, 240.0),
+            (240.0_f32 * 0.12).max(4.0)
+        );
+        assert_eq!(camera_corner_radius(None, 20.0, 20.0), 4.0);
+
+        // The mask takes the same decision: plan radius (non-0.12) drives the
+        // ratio, a pose radius wins while the rect varies, and only plan-less
+        // overlays see the floored fraction.
+        let mut overlay = RenderPlanOverlay {
+            shape: "rounded".into(),
+            width: 240.0,
+            height: 240.0,
+            radius: Some(24.0),
+            ..Default::default()
+        };
+        assert_eq!(camera_mask_radius(&[], false, &overlay, 240, 240), 24.0);
+        overlay.radius = None;
+        assert_eq!(
+            camera_mask_radius(&[], false, &overlay, 240, 240),
+            (240.0_f32 * 0.12).max(4.0)
+        );
+        overlay.radius = Some(0.0);
+        assert_eq!(camera_mask_radius(&[], false, &overlay, 240, 240), 0.0);
+
+        // The generated border changes when the plan radius changes…
+        let plan_radius = generate_camera_border_png(
+            240,
+            240,
+            "rounded",
+            Some(10.0),
+            4.0,
+            Some("#ffffff"),
+            Some(1.0),
+            Some("solid"),
+            None,
+        )
+        .expect("plan-radius border");
+        let legacy = generate_camera_border_png(
+            240,
+            240,
+            "rounded",
+            None,
+            4.0,
+            Some("#ffffff"),
+            Some(1.0),
+            Some("solid"),
+            None,
+        )
+        .expect("legacy border");
+        assert_ne!(plan_radius, legacy);
+        // …and a plan radius equal to the derived one is byte-identical.
+        let matching = generate_camera_border_png(
+            240,
+            240,
+            "rounded",
+            Some(240.0 * 0.12),
+            4.0,
+            Some("#ffffff"),
+            Some(1.0),
+            Some("solid"),
+            None,
+        )
+        .expect("matching border");
+        assert_eq!(matching, legacy);
+
+        // The shadow plate's rounded path follows the plan radius too.
+        let shadow_plan = generate_camera_shadow_plate_png(
+            1920,
+            1080,
+            100.0,
+            100.0,
+            240.0,
+            240.0,
+            "rounded",
+            Some(10.0),
+            Some("#000000"),
+            Some(16.0),
+            None,
+            None,
+        )
+        .expect("plan-radius shadow");
+        let shadow_legacy = generate_camera_shadow_plate_png(
+            1920,
+            1080,
+            100.0,
+            100.0,
+            240.0,
+            240.0,
+            "rounded",
+            None,
+            Some("#000000"),
+            Some(16.0),
+            None,
+            None,
+        )
+        .expect("legacy shadow");
+        let plan_bytes = std::fs::read(&shadow_plan.0).expect("read plan shadow");
+        let legacy_bytes = std::fs::read(&shadow_legacy.0).expect("read legacy shadow");
+        assert_ne!(plan_bytes, legacy_bytes);
+        let _ = std::fs::remove_file(&shadow_plan.0);
+        let _ = std::fs::remove_file(&shadow_legacy.0);
+    }
+
+    /// ADR 023 fixture parity: `mode == "split"` cases from the TS resolver
+    /// must mark the overlay side-by-side and fit the screen inside the
+    /// emitted slot; every other mode must not.
+    #[test]
+    fn camera_frame_fixture_split_cases_drive_side_by_side() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../tooling/fixtures/camera-fixtures/camera-frame-resolve.json");
+        let text = std::fs::read_to_string(&path).expect("read camera-frame fixture");
+        let fixture: serde_json::Value = serde_json::from_str(&text).expect("parse fixture");
+        let cases = fixture["cases"].as_array().expect("cases array");
+        assert!(cases.len() >= 20);
+        let mut split_cases = 0_usize;
+        for case in cases {
+            let name = case["name"].as_str().unwrap_or("?");
+            let expected = &case["expected"];
+            let mode = expected["mode"].as_str().unwrap_or("overlay");
+            let canvas_json = &case["input"]["canvas"];
+            let canvas = cursor::RenderCanvas {
+                width: canvas_json["width"].as_u64().expect("canvas width") as u32,
+                height: canvas_json["height"].as_u64().expect("canvas height") as u32,
+                fps: 30,
+                padding: canvas_json["padding"].as_f64().unwrap_or(0.0) as u32,
+                aspect_ratio: canvas_json["aspectRatio"].as_str().map(String::from),
+                ..Default::default()
+            };
+            let screen = &expected["screen"];
+            let slot = RenderPlanScreenSlot {
+                x: screen["x"].as_f64().expect("screen x"),
+                y: screen["y"].as_f64().expect("screen y"),
+                width: screen["width"].as_f64().expect("screen w"),
+                height: screen["height"].as_f64().expect("screen h"),
+            };
+            let rect = &expected["rect"];
+            let overlay = RenderPlanOverlay {
+                x: rect["x"].as_f64().unwrap_or(0.0),
+                y: rect["y"].as_f64().unwrap_or(0.0),
+                width: rect["width"].as_f64().unwrap_or(1.0),
+                height: rect["height"].as_f64().unwrap_or(1.0),
+                mode: Some(mode.to_string()),
+                screen: Some(slot),
+                visible: true,
+                ..Default::default()
+            };
+            if mode == "split" {
+                split_cases += 1;
+                assert!(
+                    overlay_is_side_by_side(&overlay),
+                    "split case {name} must flag side-by-side"
+                );
+                let source = case["input"]["source"].as_object().map(|source| {
+                    (
+                        source["width"].as_u64().expect("source w") as u32,
+                        source["height"].as_u64().expect("source h") as u32,
+                    )
+                });
+                let (x, y, w, h) = video_screen_rect(
+                    &canvas,
+                    source,
+                    Some((slot.x, slot.y, slot.width, slot.height)),
+                );
+                // The fitted stream lies inside the emitted slot (±2 px for
+                // the YUV even-rounding on each edge).
+                assert!(
+                    x >= slot.x - 2.0
+                        && y >= slot.y - 2.0
+                        && x + w <= slot.x + slot.width + 2.0
+                        && y + h <= slot.y + slot.height + 2.0,
+                    "split case {name}: fitted rect ({x},{y},{w},{h}) escapes slot {slot:?}"
+                );
+            } else {
+                assert!(
+                    !overlay_is_side_by_side(&overlay),
+                    "non-split case {name} must not flag side-by-side"
+                );
+            }
+        }
+        assert!(
+            split_cases >= 4,
+            "expected several split cases, got {split_cases}"
+        );
     }
 
     #[test]
@@ -16205,6 +16495,7 @@ mod tests {
                 320,
                 240,
                 shape,
+                None,
                 3.0,
                 Some("#38bdf8"),
                 Some(0.9),
@@ -16333,6 +16624,7 @@ mod tests {
                 320.0,
                 240.0,
                 shape,
+                None,
                 Some("#000000"),
                 Some(16.0),
                 Some(4.0),
@@ -17829,6 +18121,7 @@ mod tests {
             64,
             64,
             "rect",
+            None,
             6.0,
             Some("rgb(190, 242, 100)"),
             Some(1.0),

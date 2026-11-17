@@ -40,6 +40,7 @@ import {
   timelineToProject,
   formatYouTubeChapters,
   foldTrackGainIntoTimeline,
+  normalizeCameraFrames,
   type AppError,
   type CommandEngine,
   type ExecuteOptions,
@@ -572,10 +573,16 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       // One gain control per audio source: fold any legacy track fader into the
       // clips so the timeline envelope and Audio panel report the same gain.
       const normalized = foldTrackGainIntoTimeline(projectToTimeline(project))
-      const timeline = normalized.timeline
+      // ADR 023 phase 4: camera clips persist a `frame` next to their mirrored
+      // legacy transform; migrate any project saved before frames existed.
+      const timeline = normalizeCameraFrames(normalized.timeline)
       // Persist the cursor track / audio gain normalization in the next
       // autosave instead of keeping it only as a runtime fallback.
-      if (timeline.tracks.length !== project.tracks.length || normalized.changed) {
+      if (
+        timeline.tracks.length !== project.tracks.length ||
+        normalized.changed ||
+        timeline !== normalized.timeline
+      ) {
         project = timelineToProject(timeline, project)
         didNormalizeTimeline = true
       }

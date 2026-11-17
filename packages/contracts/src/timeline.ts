@@ -421,10 +421,118 @@ export const screenClipSchema = timelineClipBaseSchema.extend({
 
 export type ScreenClip = z.infer<typeof screenClipSchema>
 
+// ---------------------------------------------------------------------------
+// Camera frame model (ADR 023)
+// ---------------------------------------------------------------------------
+
+/**
+ * Corner radius as a fraction of the frame's shorter side. This is the single
+ * canonical value: the editor-core resolver emits px radii derived from it and
+ * every surface (preview, both exporters, mask generation) consumes those px
+ * values instead of re-deriving the fraction.
+ */
+export const CAMERA_CORNER_RADIUS_FRACTION = 0.12
+
+export const cameraFrameModeSchema = z.enum(["overlay", "split", "full"])
+export type CameraFrameMode = z.infer<typeof cameraFrameModeSchema>
+
+export const cameraFrameShapeSchema = z.enum(["rectangle", "rounded", "circle"])
+export type CameraFrameShape = z.infer<typeof cameraFrameShapeSchema>
+
+/**
+ * Frame aspect as width/height. `source` tracks the camera source aspect; a
+ * named ratio or a positive number pins the box. `circle` shapes and `full`
+ * placements ignore it (forced to 1:1 and the canvas aspect respectively).
+ */
+export const cameraFrameAspectSchema = z.union([
+  z.enum(["source", "1:1", "4:3", "3:4", "5:7", "16:9", "9:16"]),
+  z.number().positive(),
+])
+export type CameraFrameAspect = z.infer<typeof cameraFrameAspectSchema>
+
+export const cameraFrameSideSchema = z.enum(["left", "right", "top", "bottom"])
+export type CameraFrameSide = z.infer<typeof cameraFrameSideSchema>
+
+export const cameraFrameAlignSchema = z.object({
+  x: z.number().min(0).max(1).default(1),
+  y: z.number().min(0).max(1).default(1),
+})
+export type CameraFrameAlign = z.infer<typeof cameraFrameAlignSchema>
+
+// Side-by-side split. `ratio` is the screen slot's share of the anchor area,
+// `gap` the spacing between the slots (both fractions of the area), and `fit`
+// chooses a canvas-aspect "frame" slot or a full-height/-width "column" slot.
+export const cameraFrameSplitSchema = z.object({
+  side: cameraFrameSideSchema.default("right"),
+  ratio: z.number().min(0).max(1).default(0.76),
+  gap: z.number().min(0).max(1).default(0.02),
+  fit: z.enum(["frame", "column"]).default("frame"),
+})
+export type CameraFrameSplit = z.infer<typeof cameraFrameSplitSchema>
+
+// Resolution-independent placement. `size` and `margin` are fractions of the
+// canvas SHORT edge; `align` positions the frame inside the margin-inset
+// anchor area ((1,1) = bottom-right). `origin` records whether the placement
+// came from the auto policy ("auto" — rebuilt on ratio changes) or a manual
+// pin ("pinned" — keeps its fractions).
+export const cameraFramePlacementSchema = z.object({
+  mode: cameraFrameModeSchema.default("overlay"),
+  align: cameraFrameAlignSchema.default(() => cameraFrameAlignSchema.parse({})),
+  size: z.number().positive().default(0.311),
+  margin: z.number().min(0).default(0.022),
+  anchorTo: z.enum(["content", "canvas"]).default("canvas"),
+  split: cameraFrameSplitSchema.default(() => cameraFrameSplitSchema.parse({})),
+  origin: z.enum(["auto", "pinned"]).default("auto"),
+})
+export type CameraFramePlacement = z.infer<typeof cameraFramePlacementSchema>
+
+// Frame chrome. Lengths are DESIGN UNITS: px on a 1080-short-edge canvas,
+// multiplied by `shortEdge / 1080` when the frame is resolved.
+export const cameraFrameStyleSchema = z.object({
+  opacity: z.number().min(0).max(1).default(1),
+  borderWidth: z.number().min(0).default(2),
+  borderColor: z.string().default("#ffffff"),
+  borderOpacity: z.number().min(0).max(1).default(1),
+  borderStyle: borderStyleSchema.optional(),
+  borderGradient: borderGradientSchema.optional(),
+  shadowEnabled: z.boolean().default(true),
+  shadowColor: z.string().default("var(--color-pip-shadow)"),
+  shadowBlur: z.number().min(0).default(16),
+  shadowOffsetX: z.number().default(0),
+  shadowOffsetY: z.number().default(6),
+})
+export type CameraFrameStyle = z.infer<typeof cameraFrameStyleSchema>
+
+// Source-window framing inside the cover crop: `focus` positions the crop
+// centre (0.5 = centred) and `zoom >= 1` shrinks the crop around it.
+export const cameraFrameFramingSchema = z.object({
+  focusX: z.number().min(0).max(1).default(0.5),
+  focusY: z.number().min(0).max(1).default(0.5),
+  zoom: z.number().min(1).default(1),
+})
+export type CameraFrameFraming = z.infer<typeof cameraFrameFramingSchema>
+
+// One resolution-independent camera spec (ADR 023). Additive on camera clips:
+// when present it wins over the pixel `transform`, which is kept in sync for
+// older app versions.
+export const cameraFrameSchema = z.object({
+  placement: cameraFramePlacementSchema.default(() => cameraFramePlacementSchema.parse({})),
+  shape: cameraFrameShapeSchema.default("rounded"),
+  aspect: cameraFrameAspectSchema.default("5:7"),
+  cornerRadius: z.number().min(0).max(0.5).default(CAMERA_CORNER_RADIUS_FRACTION),
+  style: cameraFrameStyleSchema.default(() => cameraFrameStyleSchema.parse({})),
+  framing: cameraFrameFramingSchema.default(() => cameraFrameFramingSchema.parse({})),
+  preset: cameraPlacementPresetSchema.optional(),
+  visible: z.boolean().optional(),
+})
+export type CameraFrame = z.infer<typeof cameraFrameSchema>
+
 // Camera clip: a picture-in-picture webcam slice with position, size, and shape.
 export const cameraClipSchema = timelineClipBaseSchema.extend({
   kind: z.literal("camera"),
   transform: clipTransformSchema.default(() => clipTransformSchema.parse({})),
+  // ADR 023: resolution-independent frame spec; wins over `transform` when set.
+  frame: cameraFrameSchema.optional(),
   // M4 camera effects. All optional so v1 projects load unchanged.
   color: cameraColorSchema.optional(),
   cutout: cameraCutoutSchema.optional(),
@@ -1234,8 +1342,13 @@ export const renderPlanOverlaySchema = z.object({
   opacity: z.number().min(0).max(1).default(1),
   visible: z.boolean().default(true),
   shape: z.enum(["rectangle", "rounded", "circle"]).default("rectangle"),
-  // Corner radius in canvas px for `shape: "rounded"`.
+  // Corner radius in canvas px for `shape: "rounded"`. Always emitted for
+  // `role: "camera"` (ADR 023: the resolver is authoritative).
   radius: z.number().min(0).optional(),
+  // Camera placement mode from the frame resolver; `split` carries `screen`.
+  mode: z.enum(["overlay", "split", "full"]).optional(),
+  // Static screen slot in canvas px for `mode: "split"` camera layers.
+  screen: boundsSchema.optional(),
   // How the source fills the layer rect. Camera bubbles use `cover` (today's
   // behaviour); b-roll defaults to `contain`.
   fit: z.enum(["contain", "cover", "fill"]).optional(),

@@ -363,7 +363,7 @@ fn screen_rect_varies(plan: &RenderPlan, canvas: &super::cursor::RenderCanvas) -
     let windows = super::merge_ms_windows(
         plan.overlays
             .iter()
-            .filter(|overlay| super::overlay_is_side_by_side(overlay, canvas))
+            .filter(|overlay| super::overlay_is_side_by_side(overlay))
             .map(|overlay| (overlay.output_start_ms, overlay.output_end_ms))
             .collect(),
     );
@@ -1662,31 +1662,44 @@ fn canvas_frame(
     let sbs_windows = super::merge_ms_windows(
         plan.overlays
             .iter()
-            .filter(|overlay| super::overlay_is_side_by_side(overlay, canvas))
+            .filter(|overlay| super::overlay_is_side_by_side(overlay))
             .map(|overlay| (overlay.output_start_ms, overlay.output_end_ms))
             .collect(),
     );
     let uniform_sbs =
         sbs_windows.len() == 1 && sbs_windows[0].0 == 0 && sbs_windows[0].1 >= plan.duration_ms;
     let layout_varies = !sbs_windows.is_empty() && !uniform_sbs;
+    // The plan's explicit screen slot wins (ADR 023); plans without one keep
+    // the legacy 76% target box so their output is unchanged.
+    let sbs_slot = plan
+        .overlays
+        .iter()
+        .find(|overlay| super::overlay_is_side_by_side(overlay))
+        .and_then(|overlay| overlay.screen)
+        .map(|slot| (slot.x, slot.y, slot.width, slot.height))
+        .unwrap_or_else(|| super::legacy_side_by_side_slot(canvas));
     // A uniform side-by-side layout decodes straight into the smaller slot —
     // one resample, exactly like the compatibility graph. A varying layout
     // decodes into the full rect and the compositor draws the slot per frame.
     let (rect, sbs_rect, sbs_windows) = if uniform_sbs {
         (
-            super::video_screen_rect(canvas, Some(source), true),
+            super::video_screen_rect(canvas, Some(source), Some(sbs_slot)),
             None,
             Vec::new(),
         )
     } else if layout_varies {
         (
-            super::video_screen_rect(canvas, Some(source), false),
-            Some(super::video_screen_rect(canvas, Some(source), true)),
+            super::video_screen_rect(canvas, Some(source), None),
+            Some(super::video_screen_rect(
+                canvas,
+                Some(source),
+                Some(sbs_slot),
+            )),
             sbs_windows,
         )
     } else {
         (
-            super::video_screen_rect(canvas, Some(source), false),
+            super::video_screen_rect(canvas, Some(source), None),
             None,
             Vec::new(),
         )
@@ -1805,9 +1818,11 @@ fn compositor_spec(
         let y = (overlay.y.round() as i32) / 2 * 2;
         let shape = match overlay.shape.as_str() {
             "circle" => compositor::Shape::Circle,
-            "rounded" => compositor::Shape::Rounded(
-                (overlay.width.min(overlay.height) * 0.12).max(4.0) as f32,
-            ),
+            "rounded" => compositor::Shape::Rounded(super::camera_corner_radius(
+                overlay.radius,
+                overlay.width,
+                overlay.height,
+            )),
             _ => compositor::Shape::Rect,
         };
         let border = overlay
@@ -1818,6 +1833,7 @@ fn compositor_spec(
                     width,
                     height,
                     &overlay.shape,
+                    overlay.radius,
                     border_width,
                     overlay.border_color.as_deref(),
                     overlay.border_opacity,
@@ -1836,6 +1852,7 @@ fn compositor_spec(
                 width as f64,
                 height as f64,
                 &overlay.shape,
+                overlay.radius,
                 overlay.shadow_color.as_deref(),
                 overlay.shadow_blur,
                 overlay.shadow_offset_x,

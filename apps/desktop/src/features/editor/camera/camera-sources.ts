@@ -3,7 +3,6 @@ import type {
   LibraryRecording,
   MediaJob,
   MediaMetadata,
-  TimelineState,
   recordForgeProject,
 } from "@recordforge/contracts"
 
@@ -55,27 +54,4 @@ export function resolveCameraSourceSize(
   const height = output?.height ?? asset?.height ?? stream?.height ?? fallback?.height
   if (!width || !height) return null
   return { width, height }
-}
-
-/**
- * Map camera clip id -> source size for every camera clip on the timeline.
- * Passed to `createUpdateCanvasCommand` so an aspect-ratio switch can rebuild
- * preset geometry with correct source-space crops. Clips whose source cannot
- * be resolved are omitted; the engine then preserves their existing crop
- * instead of guessing.
- */
-export function collectCameraSources(
-  timeline: TimelineState,
-  ctx: CameraSourceContext,
-): Record<string, CameraSourceSize> {
-  const sources: Record<string, CameraSourceSize> = {}
-  for (const track of timeline.tracks) {
-    if (track.kind !== "camera") continue
-    for (const clip of track.clips) {
-      if (clip.kind !== "camera") continue
-      const size = resolveCameraSourceSize(clip, ctx)
-      if (size) sources[clip.id] = size
-    }
-  }
-  return sources
 }

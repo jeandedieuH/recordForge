@@ -1,4 +1,5 @@
 import type { TimelineState } from "@recordforge/domain"
+import { normalizeCameraFrames } from "./camera-frame-state"
 import type { CommandRecord } from "./command-records"
 import { applyCommand, canApplyCommand } from "./commands"
 import type { CommandResult } from "./history"
@@ -30,7 +31,9 @@ export interface ExecuteOptions {
 }
 
 export function createEngine(state: TimelineState): CommandEngine {
-  return { history: createHistory(state) }
+  // Every camera clip entering the engine carries a frame + a mirrored legacy
+  // transform (ADR 023 phase 4) — the invariant holds for undo history too.
+  return { history: createHistory(normalizeCameraFrames(state)) }
 }
 
 export function canExecute(engine: CommandEngine, command: CommandRecord): CommandResult<void> {

@@ -153,7 +153,7 @@ sessions/{session_id}/
 | `borderStyle`    | enum         | `solid`   | `solid`, `gradient`, `double` (two strokes with a gap), or `glass` (tinted rim + inner highlight) |
 | `borderGradient` | object       | —         | `{ from, to, angle }` for `gradient`; `angle` is degrees clockwise from the top (default `135`)   |
 
-Camera bubbles carry the same treatment per clip: `transform.borderStyle` and `transform.borderGradient` sit next to the existing `borderWidth`/`borderColor`/`borderOpacity`. Both renderers rasterize the same ring — a tiny-skia plate on the compatibility path, an analytic SDF ring in the GPU composite pass — so the preview, the GPU export and the FFmpeg export agree. The exception is a side-by-side camera layout that moves the screen rect mid-timeline: the compatibility renderer cannot follow it with a static plate, drops the canvas border, and reports a `canvas-border` downgrade on the job (ADR 020).
+Camera bubbles carry the same treatment per clip: `frame.style.borderStyle` and `frame.style.borderGradient` (mirrored into `transform.*` for older readers, §2.2.4). Both renderers rasterize the same ring — a tiny-skia plate on the compatibility path, an analytic SDF ring in the GPU composite pass — so the preview, the GPU export and the FFmpeg export agree. The exception is a side-by-side camera layout that moves the screen rect mid-timeline: the compatibility renderer cannot follow it with a static plate, drops the canvas border, and reports a `canvas-border` downgrade on the job (ADR 020).
 
 ### 2.2.2 Camera layout lane (view-only track)
 
@@ -173,16 +173,42 @@ opens it. Deleting the anchor is rejected by the command engine.
 Camera clips may carry three optional effect blocks (ADR 021). All are optional
 on project v1; absent means today's plain camera.
 
-| Field | Type | Description |
-|---|---|---|
-| `color` | object | `{ exposure (-2…2), contrast (-1…1), saturation (-1…1), temperature (-1…1), tint (-1…1), lutId?, lutIntensity 0…1 }`. `lutId` is a bundled `look:*` id or a project asset id (`role: "lut"`). Free. |
-| `cutout` | object | `{ enabled, background: "none"\|"blur"\|"color"\|"image", blurRadius, color, imageAssetId?, edgeSoftness, edgeShrink }`. Pro. |
-| `faceTracking` | object | `{ enabled, framing: "tight"\|"medium"\|"wide", smoothness 0…1, headroom 0…1 }`. Pro. The face track itself is a derivative (`camera_ai` job), not stored in the project. |
+| Field          | Type   | Description                                                                                                                                                                                         |
+| -------------- | ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `color`        | object | `{ exposure (-2…2), contrast (-1…1), saturation (-1…1), temperature (-1…1), tint (-1…1), lutId?, lutIntensity 0…1 }`. `lutId` is a bundled `look:*` id or a project asset id (`role: "lut"`). Free. |
+| `cutout`       | object | `{ enabled, background: "none"\|"blur"\|"color"\|"image", blurRadius, color, imageAssetId?, edgeSoftness, edgeShrink }`. Pro.                                                                       |
+| `faceTracking` | object | `{ enabled, framing: "tight"\|"medium"\|"wide", smoothness 0…1, headroom 0…1 }`. Pro. The face track itself is a derivative (`camera_ai` job), not stored in the project.                           |
 
 Hide-during-silence is expressed in the existing `cameraLayouts` lane:
 generated segments have `source: "silence"` and `layout: "hidden"`, and are
 replaced wholesale by `generate-camera-silence-layouts`. Manual segments always
 win on overlap. Free exports strip silence-generated segments.
+
+### 2.2.4 Camera frame geometry (ADR 023)
+
+Camera clips may carry an optional `frame` object — the resolution-independent
+camera spec. When present it **wins over `transform` on read**; `transform` is
+kept in sync as a pixel mirror so older app versions still render the camera.
+
+| Field          | Type         | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| -------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `placement`    | object       | `{ mode: "overlay"\|"split"\|"full", align: {x,y 0–1}, size, margin, anchorTo: "content"\|"canvas", split: {side, ratio, gap, fit}, origin }`. `size`/`margin` are fractions of the canvas **short edge**; `align` positions the frame inside the margin-inset anchor area ((1,1) = bottom-right). `origin` records whether the placement came from the auto policy (`"auto"` — rebuilt on aspect-ratio changes) or a manual edit (`"pinned"` — fractions survive ratio and resolution changes). |
+| `shape`        | enum         | `rectangle`, `rounded`, or `circle`.                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `aspect`       | enum/number  | `"source"` or a ratio (`1:1`, `4:3`, `3:4`, `5:7`, `16:9`, `9:16`); circles and `full` placements ignore it.                                                                                                                                                                                                                                                                                                                                                                                     |
+| `cornerRadius` | number 0–0.5 | Fraction of the frame's short side for `rounded`.                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `style`        | object       | `{ opacity, borderWidth, borderColor, borderOpacity, borderStyle?, borderGradient?, shadowEnabled, shadowColor, shadowBlur, shadowOffsetX, shadowOffsetY }`. Lengths are **design units** — px on a 1080-short-edge canvas, scaled by `shortEdge / 1080` at resolve time.                                                                                                                                                                                                                        |
+| `framing`      | object       | `{ focusX, focusY (0–1), zoom (≥1) }` — the source window inside the cover crop; face tracking overrides it when enabled.                                                                                                                                                                                                                                                                                                                                                                        |
+| `preset`       | enum         | Optional `cameraPlacementPreset` recorded for auto frames.                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `visible`      | boolean      | Optional; absent means visible.                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+
+**Invariants.** Every camera clip entering the command engine is normalised in
+`createEngine` (`normalizeCameraFrames`): a missing `frame` is migrated from the
+legacy pixel `transform` (preset-matching geometry becomes `auto`, everything
+else `pinned`), and `transform` is then mirrored back from the frame
+(`syncCameraTransform`). Canvas changes reconcile `auto` frames only — `pinned`
+frames are never touched. New projects written by older builds therefore load
+with both fields, and projects written by this build still open in older builds
+via the mirrored `transform`.
 
 ### 2.3 Checksum
 

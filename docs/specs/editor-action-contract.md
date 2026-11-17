@@ -65,11 +65,23 @@ Locked layers are never shifted. Layers that are locked at the track level are s
 
 ### 3.3 Camera AI commands (M4)
 
-| Command | Undo boundary | Rules |
-|---|---|---|
-| `set-camera-effects { clipId, color?, cutout?, faceTracking? }` | One command per commit; sliders coalesce on `camera-effects:<clipId>:<field>` | Camera clips only; `null` clears a block; track/clip lock rejected; new blocks are Zod-parsed against the contract before commit |
-| `generate-camera-silence-layouts { ranges, minSilenceMs, padMs, transitionMs, durationMs, fps }` | One command replacing every `source: "silence"` segment | Camera-lane lock rejected; manual segments are preserved and win on overlap; ranges are padded, frame-snapped, and split around manual segments; generated segments are `layout: "hidden"` with `source: "silence"` |
+| Command                                                                                          | Undo boundary                                                                 | Rules                                                                                                                                                                                                               |
+| ------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `set-camera-effects { clipId, color?, cutout?, faceTracking? }`                                  | One command per commit; sliders coalesce on `camera-effects:<clipId>:<field>` | Camera clips only; `null` clears a block; track/clip lock rejected; new blocks are Zod-parsed against the contract before commit                                                                                    |
+| `generate-camera-silence-layouts { ranges, minSilenceMs, padMs, transitionMs, durationMs, fps }` | One command replacing every `source: "silence"` segment                       | Camera-lane lock rejected; manual segments are preserved and win on overlap; ranges are padded, frame-snapped, and split around manual segments; generated segments are `layout: "hidden"` with `source: "silence"` |
 
+### 3.3a Camera frame commands (ADR 023)
+
+| Command                                           | Undo boundary                                                                                   | Rules                                                                                                                                                                                                                                                                       |
+| ------------------------------------------------- | ----------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `update-camera-frame { clipId, patch, options? }` | One command per commit; drafts coalesce on `camera-frame:{clipId}` like `update-clip-transform` | Camera clips only; track/clip lock rejected. `patch` is a deep-partial `CameraFrame`; touching `placement`/`shape`/`aspect` pins the placement and clears `preset` unless `placement.origin` is given. The merged frame is schema-validated and `transform` is re-mirrored. |
+| `apply-camera-preset { clipId, preset }`          | One command per commit                                                                          | Rebuilds the frame from `autoCameraFrame` at the current canvas ratio (`origin: "auto"`, `preset` set), keeping `framing` and `visible`.                                                                                                                                    |
+
+The legacy `update-clip-transform` command stays for older readers and
+histories: applied transforms are migrated to a frame and re-mirrored.
+`update-canvas` no longer accepts `cameraSources` and never rewrites camera
+geometry — aspect-ratio changes rebuild `auto` frames via
+`reconcileCameraFramesForCanvas` and `pinned` frames are never touched.
 
 ### 3.3 Atomicity rules
 

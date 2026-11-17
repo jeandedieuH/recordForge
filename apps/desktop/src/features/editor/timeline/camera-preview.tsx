@@ -3,6 +3,7 @@ import type {
   CameraClip,
   CameraColor,
   CameraLayoutSegment,
+  CanvasAspectRatio,
   ClipTransform,
   FaceTrack,
   MediaVideoTrackOutput,
@@ -11,15 +12,26 @@ import type {
 import { cameraColorSchema } from "@recordforge/contracts"
 import {
   buildPreviewSegments,
+  cameraFrameNudgePatch,
+  cameraFramePatchFromRect,
+  cameraShortEdge,
   faceCropAt,
-  resolveCameraLayoutPoseAt,
+  getCameraFrame,
+  resolveCameraFrame,
   resolveFaceCropKeyframes,
+  screenContentRect,
+  snapCameraRect,
+  CAMERA_LAYOUT_MARGIN_FRACTION,
+  type CameraFramePatch,
+  type CameraLayoutPip,
+  type CameraSnapGuide,
+  type CameraSourceSize,
+  type CanvasRect,
   type PreviewSegment,
 } from "@recordforge/editor-core"
 import { cn } from "@recordforge/ui"
-import { Circle, Square } from "lucide-react"
+import { CameraFrameView } from "../camera/camera-frame-view"
 import { toAssetUrl } from "../media/derivative-resources"
-import { BorderOverlay } from "../canvas/border-overlay"
 import { useDualMediaSlots } from "./playback/use-dual-media-slots"
 import { usePlayheadMs } from "./use-playback-state"
 import { useTimelineStore } from "../../../stores/timeline-store"
@@ -43,6 +55,8 @@ interface CameraPreviewProps {
   canvasHeight: number
   /** Canvas padding, so camera layouts resolve the fitted screen rect. */
   canvasPadding?: number
+  /** Canvas ratio feeds the frame resolver's per-ratio preset table. */
+  canvasAspectRatio?: CanvasAspectRatio
   /** Camera layout lane (#5); an active window overrides the clip transform. */
   cameraLayouts?: CameraLayoutSegment[]
   /** Image asset URLs, used for the cutout background-image mode. */
@@ -51,11 +65,13 @@ interface CameraPreviewProps {
   previewScale?: number
   selectedClipId?: string | null
   onSelectClip?: (clipId: string) => void
-  onUpdateTransform?: (
+  onUpdateFrame?: (
     clipId: string,
-    transform: ClipTransform,
+    patch: CameraFramePatch,
     options?: { phase?: "draft" | "commit" | "cancel" },
   ) => void
+  /** Commit a layout-lane segment edit (pip lane drags). */
+  onUpdateCameraLayout?: (segmentId: string, update: { pip?: Partial<CameraLayoutPip> }) => void
 }
 
 // Colour preview needs WebGL2; when it is unavailable CameraLutCanvas reports
@@ -65,6 +81,8 @@ interface CameraPreviewProps {
 // Cutout without a grade still needs a colour object for the shared LUT path.
 const DEFAULT_CAMERA_COLOR: CameraColor = cameraColorSchema.parse({})
 
+const MIN_CAMERA_SIZE_PX = 80
+
 interface CameraGesture {
   clipId: string
   pointerId: number
@@ -72,7 +90,13 @@ interface CameraGesture {
   handle?: "nw" | "ne" | "se" | "sw"
   startX: number
   startY: number
-  transform: ClipTransform
+  /** Resolved rect at gesture start (canvas px). */
+  startRect: CanvasRect
+  /** Resolved rect aspect for aspect-locked resize. */
+  aspect: number
+  /** Active layout-lane pip segment; set => the drag edits the segment. */
+  segmentId: string | null
+  segmentPip: CameraLayoutPip | null
   moved: boolean
 }
 
@@ -86,12 +110,6 @@ interface CameraStreamGroup {
 
 function isClipActive(clip: CameraClip, playheadMs: number): boolean {
   return playheadMs >= clip.startMs && playheadMs < clip.startMs + clip.durationMs
-}
-
-function mixBorderColor(color: string | undefined, opacity: number | undefined): string {
-  const source = color ?? "var(--color-foreground)"
-  const alpha = Math.max(0, Math.min(1, opacity ?? 1))
-  return `color-mix(in srgb, ${source} ${Math.round(alpha * 100)}%, transparent)`
 }
 
 function buildCameraGroups(
@@ -121,79 +139,6 @@ function buildCameraGroups(
   return [...groups.values()].filter((group) => group.source)
 }
 
-function computeNextCameraTransform(
-  gesture: CameraGesture,
-  deltaX: number,
-  deltaY: number,
-  canvasWidth: number,
-  _canvasHeight: number,
-): ClipTransform {
-  if (gesture.mode === "resize") {
-    const handle = gesture.handle ?? "se"
-    const aspect = gesture.transform.width / Math.max(1, gesture.transform.height)
-
-    if (handle === "se") {
-      const scaleDelta = Math.max(deltaX, deltaY * aspect)
-      const nextW = Math.max(80, Math.min(canvasWidth, gesture.transform.width + scaleDelta))
-      const nextH = Math.round(nextW / aspect)
-      return {
-        ...gesture.transform,
-        width: Math.round(nextW),
-        height: nextH,
-        preset: undefined,
-      }
-    }
-    if (handle === "nw") {
-      const scaleDelta = Math.max(-deltaX, -deltaY * aspect)
-      const nextW = Math.max(80, Math.min(canvasWidth, gesture.transform.width + scaleDelta))
-      const nextH = Math.round(nextW / aspect)
-      const nextX = gesture.transform.x + (gesture.transform.width - nextW)
-      const nextY = gesture.transform.y + (gesture.transform.height - nextH)
-      return {
-        ...gesture.transform,
-        x: Math.round(nextX),
-        y: Math.round(nextY),
-        width: Math.round(nextW),
-        height: nextH,
-        preset: undefined,
-      }
-    }
-    if (handle === "ne") {
-      const scaleDelta = Math.max(deltaX, -deltaY * aspect)
-      const nextW = Math.max(80, Math.min(canvasWidth, gesture.transform.width + scaleDelta))
-      const nextH = Math.round(nextW / aspect)
-      const nextY = gesture.transform.y + (gesture.transform.height - nextH)
-      return {
-        ...gesture.transform,
-        y: Math.round(nextY),
-        width: Math.round(nextW),
-        height: nextH,
-        preset: undefined,
-      }
-    }
-    // "sw"
-    const scaleDelta = Math.max(-deltaX, deltaY * aspect)
-    const nextW = Math.max(80, Math.min(canvasWidth, gesture.transform.width + scaleDelta))
-    const nextH = Math.round(nextW / aspect)
-    const nextX = gesture.transform.x + (gesture.transform.width - nextW)
-    return {
-      ...gesture.transform,
-      x: Math.round(nextX),
-      width: Math.round(nextW),
-      height: nextH,
-      preset: undefined,
-    }
-  }
-
-  return {
-    ...gesture.transform,
-    x: Math.round(gesture.transform.x + deltaX),
-    y: Math.round(gesture.transform.y + deltaY),
-    preset: undefined,
-    locked: false,
-  }
-}
-
 interface CameraStreamSurfaceProps {
   group: CameraStreamGroup
   isPlaying: boolean
@@ -202,12 +147,14 @@ interface CameraStreamSurfaceProps {
   canvasWidth: number
   canvasHeight: number
   canvasPadding?: number
+  canvasAspectRatio?: CanvasAspectRatio
   cameraLayouts?: CameraLayoutSegment[]
   assetUrls?: Readonly<Record<string, string>>
   previewScale?: number
   selectedClipId?: string | null
   onSelectClip?: (clipId: string) => void
-  onUpdateTransform?: CameraPreviewProps["onUpdateTransform"]
+  onUpdateFrame?: CameraPreviewProps["onUpdateFrame"]
+  onUpdateCameraLayout?: CameraPreviewProps["onUpdateCameraLayout"]
 }
 
 /**
@@ -223,12 +170,14 @@ function CameraStreamSurface({
   canvasWidth,
   canvasHeight,
   canvasPadding = 0,
+  canvasAspectRatio,
   cameraLayouts,
   assetUrls = {},
   previewScale = 1,
   selectedClipId,
   onSelectClip,
-  onUpdateTransform,
+  onUpdateFrame,
+  onUpdateCameraLayout,
 }: CameraStreamSurfaceProps) {
   const playheadMs = usePlayheadMs()
   const slot0 = useRef<HTMLVideoElement>(null)
@@ -242,6 +191,10 @@ function CameraStreamSurface({
     [],
   )
   const gestureRef = useRef<CameraGesture | null>(null)
+  const [snapGuides, setSnapGuides] = useState<CameraSnapGuide[]>([])
+  // Lane `pip` drags have no draft plumbing: hold a transient canvas-px rect
+  // until pointer release commits the layout segment.
+  const [dragOverride, setDragOverride] = useState<CanvasRect | null>(null)
   const [naturalDimensions, setNaturalDimensions] = useState<{
     width: number
     height: number
@@ -426,34 +379,58 @@ function CameraStreamSurface({
   useEffect(() => {
     if (!useCanvas) setCanvasLive(false)
   }, [useCanvas])
-  // Camera layout lane (#5): an active window owns the camera geometry, so the
-  // preview shows exactly what the export plan will render.
-  const layoutPose =
-    activeClip && cameraLayouts && cameraLayouts.length > 0
-      ? (resolveCameraLayoutPoseAt(
-          { width: canvasWidth, height: canvasHeight, padding: canvasPadding },
-          cameraLayouts,
-          playheadMs,
-          activeClip.transform,
-        )?.pose ?? null)
-      : null
-  let transform = activeClip?.transform ?? group.clips[0]?.transform
-  if (activeClip && layoutPose) {
-    transform = {
-      ...activeClip.transform,
-      x: layoutPose.camera.x,
-      y: layoutPose.camera.y,
-      width: layoutPose.camera.width,
-      height: layoutPose.camera.height,
-      opacity: layoutPose.opacity,
-      shape: layoutPose.shape,
-    }
+  // Camera frame model (ADR 023): the preview resolves the same frame the
+  // render plan emits — the clip transform migrates to a frame when the clip
+  // carries none, and layout-lane windows apply on top at the playhead.
+  const frameCanvas = {
+    width: canvasWidth,
+    height: canvasHeight,
+    padding: canvasPadding,
+    aspectRatio: canvasAspectRatio,
   }
-  if (!transform) return null
+  const frameSource: CameraSourceSize | undefined =
+    group.width && group.height
+      ? { width: group.width, height: group.height }
+      : naturalDimensions
+        ? { width: naturalDimensions.width, height: naturalDimensions.height }
+        : undefined
+  const resolved = activeClip
+    ? resolveCameraFrame({
+        frame: getCameraFrame(activeClip, frameCanvas, frameSource),
+        canvas: frameCanvas,
+        source: frameSource,
+        segments: cameraLayouts,
+        timeMs: playheadMs,
+      })
+    : group.clips[0]
+      ? // No clip at the playhead: resolve the first clip's base frame so the
+        // surface keeps its (invisible) rect like the old transform fallback.
+        resolveCameraFrame({
+          frame: getCameraFrame(group.clips[0], frameCanvas, frameSource),
+          canvas: frameCanvas,
+          source: frameSource,
+        })
+      : null
+  // Gestures keep editing the persisted ClipTransform; during a lane window
+  // the merged values mirror what the old pose overlay produced.
+  const clipTransform = activeClip?.transform ?? group.clips[0]?.transform
+  if (!resolved || !clipTransform) return null
+  const laneOwnsGeometry = activeClip !== null && resolved.layout !== "base"
+  const transform: ClipTransform = laneOwnsGeometry
+    ? {
+        ...clipTransform,
+        x: resolved.rect.x,
+        y: resolved.rect.y,
+        width: resolved.rect.width,
+        height: resolved.rect.height,
+        opacity: resolved.opacity,
+        shape: resolved.shape,
+      }
+    : clipTransform
   const isActive = activeClip !== null
   const isLocked = transform.locked === true
+  const clipFrame = getCameraFrame(activeClip ?? group.clips[0], frameCanvas, frameSource)
   const isSelected = activeClip !== null && selectedClipId === activeClip.id
-  const radius = transform.shape === "circle" ? "50%" : transform.shape === "rounded" ? "12%" : 0
   const sourceWidth =
     group.width ?? naturalDimensions?.width ?? transform.crop?.width ?? canvasWidth
   const sourceHeight =
@@ -473,7 +450,10 @@ function CameraStreamSurface({
     })
   })()
   const trackedCrop = faceCropKeyframes ? faceCropAt(faceCropKeyframes, playheadMs) : null
-  const crop = trackedCrop ?? transform.crop
+  // Face-tracked framing wins; frame-backed clips resolve their crop from the
+  // frame's framing; legacy clips keep the stored pixel crop — the render
+  // plan's exact precedence.
+  const crop = trackedCrop ?? (activeClip?.frame && frameSource ? resolved.crop : transform.crop)
   const cropWidth = crop?.width ?? sourceWidth
   const cropHeight = crop?.height ?? sourceHeight
   const cropLeft = crop ? -(crop.x / cropWidth) * 100 : 0
@@ -506,14 +486,117 @@ function CameraStreamSurface({
         targetAspect,
       )
     })()
-  const borderColor = mixBorderColor(transform.borderColor, transform.borderOpacity)
-  const borderStyle = transform.borderStyle ?? "solid"
-  // Solid keeps the CSS border; every richer treatment needs the SVG ring so a
-  // gradient can follow the radius.
-  const cssBorder =
-    borderStyle === "solid" && transform.borderWidth
-      ? `${transform.borderWidth}px solid ${borderColor}`
-      : undefined
+  // Gesture rules: overlay base frames drag via frame patches; a lane `pip`
+  // window drags its layout segment instead. Full/split frames, other lane
+  // windows, hidden clips and locked presets never drag — pointer down still
+  // selects.
+  const lanePipSegment =
+    activeClip !== null && resolved.layout === "pip" && resolved.segmentId
+      ? (cameraLayouts?.find((segment) => segment.id === resolved.segmentId) ?? null)
+      : null
+  const canDragFrame =
+    isActive && resolved.mode === "overlay" && resolved.visible !== false && !laneOwnsGeometry
+  const canDragLanePip = lanePipSegment !== null && activeClip !== null
+  const isDraggable = (canDragFrame || canDragLanePip) && !transform.locked
+  const anchorAreaRect: CanvasRect =
+    clipFrame.placement.anchorTo === "content"
+      ? screenContentRect(frameCanvas)
+      : { x: 0, y: 0, width: canvasWidth, height: canvasHeight }
+  const snapMarginPx = lanePipSegment
+    ? canvasHeight * CAMERA_LAYOUT_MARGIN_FRACTION
+    : Math.round(clipFrame.placement.margin * cameraShortEdge(frameCanvas))
+  // Snap threshold is ~6 CSS px expressed in canvas px at the current zoom.
+  const snapThresholdPx = 6 / Math.max(0.01, previewScale)
+
+  function handleEdges(handle: CameraGesture["handle"]) {
+    return {
+      left: handle === "nw" || handle === "sw",
+      right: handle === "ne" || handle === "se",
+      top: handle === "nw" || handle === "ne",
+      bottom: handle === "sw" || handle === "se",
+    }
+  }
+
+  // Aspect-locked resize candidate: the corner opposite the handle stays
+  // fixed, width drives and height follows the locked aspect.
+  function resizeCandidate(gesture: CameraGesture, dx: number, dy: number): CanvasRect {
+    const handle = gesture.handle ?? "se"
+    const aspect = gesture.aspect
+    const start = gesture.startRect
+    const delta =
+      handle === "se"
+        ? Math.max(dx, dy * aspect)
+        : handle === "nw"
+          ? Math.max(-dx, -dy * aspect)
+          : handle === "ne"
+            ? Math.max(dx, -dy * aspect)
+            : Math.max(-dx, dy * aspect)
+    // Cap so the aspect-locked rect still fits inside the anchor area.
+    const maxW = Math.min(anchorAreaRect.width, anchorAreaRect.height * aspect)
+    const nextW = Math.max(MIN_CAMERA_SIZE_PX, Math.min(maxW, start.width + delta))
+    const nextH = Math.max(2, Math.round(nextW / aspect))
+    const nextX = handle === "nw" || handle === "sw" ? start.x + start.width - nextW : start.x
+    const nextY = handle === "nw" || handle === "ne" ? start.y + start.height - nextH : start.y
+    return { x: nextX, y: nextY, width: nextW, height: nextH }
+  }
+
+  // Re-lock aspect after an edge snap: width wins, height re-derives, the
+  // corner opposite the handle stays anchored.
+  function lockAspect(
+    rect: CanvasRect,
+    handle: CameraGesture["handle"],
+    aspect: number,
+  ): CanvasRect {
+    const w = rect.width
+    const h = Math.max(2, Math.round(w / aspect))
+    const x = handle === "nw" || handle === "sw" ? rect.x + rect.width - w : rect.x
+    const y = handle === "nw" || handle === "ne" ? rect.y + rect.height - h : rect.y
+    return { x, y, width: w, height: h }
+  }
+
+  function gestureRect(gesture: CameraGesture, dx: number, dy: number, snapping: boolean) {
+    if (gesture.mode === "resize") {
+      const candidate = resizeCandidate(gesture, dx, dy)
+      if (!snapping) return { rect: candidate, guides: [] as CameraSnapGuide[] }
+      const snapped = snapCameraRect({
+        rect: candidate,
+        canvas: frameCanvas,
+        area: anchorAreaRect,
+        marginPx: snapMarginPx,
+        thresholdPx: snapThresholdPx,
+        mode: "resize",
+        activeEdges: handleEdges(gesture.handle),
+      })
+      return {
+        rect: lockAspect(snapped.rect, gesture.handle, gesture.aspect),
+        guides: snapped.guides,
+      }
+    }
+    const start = gesture.startRect
+    const candidate: CanvasRect = {
+      x: Math.min(Math.max(0, start.x + dx), Math.max(0, canvasWidth - start.width)),
+      y: Math.min(Math.max(0, start.y + dy), Math.max(0, canvasHeight - start.height)),
+      width: start.width,
+      height: start.height,
+    }
+    if (!snapping) return { rect: candidate, guides: [] as CameraSnapGuide[] }
+    return snapCameraRect({
+      rect: candidate,
+      canvas: frameCanvas,
+      area: anchorAreaRect,
+      marginPx: snapMarginPx,
+      thresholdPx: snapThresholdPx,
+      mode: "move",
+    })
+  }
+
+  function canvasDelta(event: React.PointerEvent<HTMLDivElement>, startX: number, startY: number) {
+    const canvasElement = event.currentTarget.parentElement
+    return {
+      dx: ((event.clientX - startX) / Math.max(1, canvasElement?.clientWidth ?? 1)) * canvasWidth,
+      dy: ((event.clientY - startY) / Math.max(1, canvasElement?.clientHeight ?? 1)) * canvasHeight,
+    }
+  }
 
   function beginDrag(
     event: React.PointerEvent<HTMLDivElement>,
@@ -522,10 +605,9 @@ function CameraStreamSurface({
   ) {
     if (!activeClip) return
     onSelectClip?.(activeClip.id)
-    // A layout window owns the geometry: dragging the bubble would fight the
-    // lane, so only selection is allowed while one is active.
-    if (layoutPose) return
-    if (!onUpdateTransform || event.button !== 0 || transform.locked) return
+    if (!isDraggable || event.button !== 0) return
+    const startRect = resolved?.rect
+    if (!startRect) return
     event.stopPropagation()
     event.preventDefault()
     event.currentTarget.setPointerCapture(event.pointerId)
@@ -536,26 +618,43 @@ function CameraStreamSurface({
       handle,
       startX: event.clientX,
       startY: event.clientY,
-      transform,
+      startRect: { ...startRect },
+      aspect: startRect.width / Math.max(1, startRect.height),
+      segmentId: canDragLanePip ? lanePipSegment.id : null,
+      segmentPip: canDragLanePip ? (lanePipSegment.pip ?? null) : null,
       moved: false,
     }
   }
 
   function moveDrag(event: React.PointerEvent<HTMLDivElement>) {
     const gesture = gestureRef.current
-    if (!gesture || gesture.pointerId !== event.pointerId || !onUpdateTransform) return
-    const canvasElement = event.currentTarget.parentElement
-    const dx =
-      ((event.clientX - gesture.startX) / Math.max(1, canvasElement?.clientWidth ?? 1)) *
-      canvasWidth
-    const dy =
-      ((event.clientY - gesture.startY) / Math.max(1, canvasElement?.clientHeight ?? 1)) *
-      canvasHeight
+    if (!gesture || gesture.pointerId !== event.pointerId) return
+    const { dx, dy } = canvasDelta(event, gesture.startX, gesture.startY)
     if (Math.abs(dx) < 1 && Math.abs(dy) < 1 && !gesture.moved) return
     gesture.moved = true
     event.preventDefault()
-    const next = computeNextCameraTransform(gesture, dx, dy, canvasWidth, canvasHeight)
-    onUpdateTransform(gesture.clipId, next, { phase: "draft" })
+    // Alt disables snapping for the duration of the move.
+    const { rect, guides } = gestureRect(gesture, dx, dy, !event.altKey)
+    setSnapGuides(guides)
+    if (gesture.segmentId) {
+      // Lane pip sizeFraction is bounded to [0.05, 0.6] of canvas height.
+      const maxH = canvasHeight * 0.6
+      setDragOverride(
+        rect.height > maxH ? { ...rect, height: maxH, width: maxH * gesture.aspect } : rect,
+      )
+      return
+    }
+    if (!onUpdateFrame) return
+    onUpdateFrame(
+      gesture.clipId,
+      cameraFramePatchFromRect({
+        frame: clipFrame,
+        rect,
+        canvas: frameCanvas,
+        source: frameSource,
+      }),
+      { phase: "draft" },
+    )
   }
 
   function finishDrag(event: React.PointerEvent<HTMLDivElement>) {
@@ -564,133 +663,131 @@ function CameraStreamSurface({
     const wasCancelled = event.type === "pointercancel"
     const didMove = gesture.moved
     gestureRef.current = null
+    setSnapGuides([])
+    setDragOverride(null)
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId)
     }
-    if (!onUpdateTransform) return
+
+    if (gesture.segmentId) {
+      if (!wasCancelled && didMove && onUpdateCameraLayout) {
+        const { dx, dy } = canvasDelta(event, gesture.startX, gesture.startY)
+        const { rect } = gestureRect(gesture, dx, dy, !event.altKey)
+        onUpdateCameraLayout(gesture.segmentId, {
+          pip: {
+            ...(gesture.segmentPip ?? {}),
+            corner: "custom",
+            x: rect.x / canvasWidth,
+            y: rect.y / canvasHeight,
+            sizeFraction: Math.min(0.6, Math.max(0.05, rect.height / canvasHeight)),
+          },
+        })
+      }
+      return
+    }
+    if (!onUpdateFrame) return
 
     if (wasCancelled || !didMove) {
-      onUpdateTransform(gesture.clipId, gesture.transform, { phase: "cancel" })
+      onUpdateFrame(
+        gesture.clipId,
+        cameraFramePatchFromRect({
+          frame: clipFrame,
+          rect: gesture.startRect,
+          canvas: frameCanvas,
+          source: frameSource,
+        }),
+        { phase: "cancel" },
+      )
       return
     }
 
-    const canvasElement = event.currentTarget.parentElement
-    const dx =
-      ((event.clientX - gesture.startX) / Math.max(1, canvasElement?.clientWidth ?? 1)) *
-      canvasWidth
-    const dy =
-      ((event.clientY - gesture.startY) / Math.max(1, canvasElement?.clientHeight ?? 1)) *
-      canvasHeight
-    const next = computeNextCameraTransform(gesture, dx, dy, canvasWidth, canvasHeight)
-    onUpdateTransform(gesture.clipId, next, { phase: "commit" })
-  }
-
-  const handleSnapPreset = (position: "TL" | "TR" | "BL" | "BR") => {
-    if (!onUpdateTransform || !activeClip) return
-    const margin = 32
-    const w = transform.width
-    const h = transform.height
-    let x = margin
-    let y = margin
-    if (position === "TR") {
-      x = canvasWidth - w - margin
-    } else if (position === "BL") {
-      y = canvasHeight - h - margin
-    } else if (position === "BR") {
-      x = canvasWidth - w - margin
-      y = canvasHeight - h - margin
-    }
-    onUpdateTransform(
-      activeClip.id,
-      {
-        ...transform,
-        x: Math.max(0, x),
-        y: Math.max(0, y),
-        preset: undefined,
-      },
+    const { dx, dy } = canvasDelta(event, gesture.startX, gesture.startY)
+    const { rect } = gestureRect(gesture, dx, dy, !event.altKey)
+    onUpdateFrame(
+      gesture.clipId,
+      cameraFramePatchFromRect({
+        frame: clipFrame,
+        rect,
+        canvas: frameCanvas,
+        source: frameSource,
+      }),
       { phase: "commit" },
     )
   }
 
+  const handleSnapPreset = (position: "TL" | "TR" | "BL" | "BR") => {
+    if (!onUpdateFrame || !activeClip) return
+    const align =
+      position === "TL"
+        ? { x: 0, y: 0 }
+        : position === "TR"
+          ? { x: 1, y: 0 }
+          : position === "BL"
+            ? { x: 0, y: 1 }
+            : { x: 1, y: 1 }
+    // A corner pick is a positional choice, so it pins the placement.
+    onUpdateFrame(activeClip.id, { placement: { align } }, { phase: "commit" })
+  }
+
   const handleSetShape = (shape: "circle" | "rounded" | "rectangle") => {
-    if (!onUpdateTransform || !activeClip) return
-    onUpdateTransform(
+    if (!onUpdateFrame || !activeClip) return
+    // Keep the current origin so a shape-only change does not pin an auto frame.
+    onUpdateFrame(
       activeClip.id,
-      {
-        ...transform,
-        shape,
-      },
+      { shape, placement: { origin: clipFrame.placement.origin } },
       { phase: "commit" },
     )
   }
 
   return (
-    <div
-      role="button"
-      tabIndex={isActive ? 0 : -1}
-      aria-label={
-        isLocked ? "Camera overlay, select to edit" : "Camera overlay, drag to move or resize"
-      }
-      aria-hidden={!isActive}
-      aria-disabled={false}
-      className={cn(
-        "group absolute z-30 overflow-visible",
-        isActive && (isLocked ? "cursor-pointer" : "cursor-grab active:cursor-grabbing"),
-        "focus-visible:outline-none",
-      )}
-      style={{
-        left: `${(transform.x / canvasWidth) * 100}%`,
-        top: `${(transform.y / canvasHeight) * 100}%`,
-        width: `${(transform.width / canvasWidth) * 100}%`,
-        height: `${(transform.height / canvasHeight) * 100}%`,
-        opacity: isActive ? transform.opacity : 0,
-        pointerEvents: isActive ? "auto" : "none",
-      }}
-      onClick={() => {
-        if (activeClip) onSelectClip?.(activeClip.id)
-      }}
-      onKeyDown={(event) => {
-        if (!onUpdateTransform || !activeClip || isLocked || gestureRef.current) return
-        const step = event.shiftKey ? 10 : 1
-        const delta =
-          event.key === "ArrowLeft"
-            ? { x: -step, y: 0 }
-            : event.key === "ArrowRight"
-              ? { x: step, y: 0 }
-              : event.key === "ArrowUp"
-                ? { x: 0, y: -step }
-                : event.key === "ArrowDown"
-                  ? { x: 0, y: step }
-                  : null
-        if (!delta) return
-        event.preventDefault()
-        onUpdateTransform(
-          activeClip.id,
-          {
-            ...transform,
-            x: transform.x + delta.x,
-            y: transform.y + delta.y,
-            preset: undefined,
-            locked: false,
-          },
-          { phase: "commit" },
-        )
-      }}
-      onPointerDown={(event) => beginDrag(event, "move")}
-      onPointerMove={moveDrag}
-      onPointerUp={finishDrag}
-      onPointerCancel={finishDrag}
-    >
-      {/* Camera Video Surface — two slots, one visible at a time. */}
-      <div
-        className="relative size-full overflow-hidden"
-        style={{
-          borderRadius: radius,
-          border: cssBorder,
-          boxShadow: transform.shadowEnabled
-            ? `${transform.shadowOffsetX ?? 0}px ${transform.shadowOffsetY ?? 4}px ${transform.shadowBlur ?? 12}px ${transform.shadowColor ?? "var(--color-pip-shadow)"}`
-            : undefined,
+    <>
+      <CameraFrameView
+        frame={dragOverride ? { ...resolved, rect: dragOverride } : resolved}
+        canvasWidth={canvasWidth}
+        canvasHeight={canvasHeight}
+        previewScale={previewScale}
+        active={isActive}
+        locked={isLocked}
+        selected={isSelected}
+        interactive={Boolean(onUpdateFrame) && isDraggable}
+        showCornerSnaps={resolved.mode === "overlay" && !lanePipSegment}
+        onSelect={() => {
+          if (activeClip) onSelectClip?.(activeClip.id)
         }}
+        onKeyDown={(event) => {
+          if (!onUpdateFrame || !activeClip || !canDragFrame || gestureRef.current) return
+          const step = event.shiftKey ? 10 : 1
+          const delta =
+            event.key === "ArrowLeft"
+              ? { x: -step, y: 0 }
+              : event.key === "ArrowRight"
+                ? { x: step, y: 0 }
+                : event.key === "ArrowUp"
+                  ? { x: 0, y: -step }
+                  : event.key === "ArrowDown"
+                    ? { x: 0, y: step }
+                    : null
+          if (!delta) return
+          event.preventDefault()
+          onUpdateFrame(
+            activeClip.id,
+            cameraFrameNudgePatch({
+              frame: clipFrame,
+              canvas: frameCanvas,
+              source: frameSource,
+              dxPx: delta.x,
+              dyPx: delta.y,
+            }),
+            { phase: "commit" },
+          )
+        }}
+        onPointerDown={(event) => beginDrag(event, "move")}
+        onPointerMove={moveDrag}
+        onPointerUp={finishDrag}
+        onPointerCancel={finishDrag}
+        onResizeHandleDown={(event, handle) => beginDrag(event, "resize", handle)}
+        onSnapPreset={handleSnapPreset}
+        onSetShape={handleSetShape}
       >
         <video
           ref={slot0}
@@ -772,155 +869,23 @@ function CameraStreamSurface({
             }}
           />
         ) : null}
-        {transform.borderWidth && borderStyle !== "solid" ? (
-          <BorderOverlay
-            width={transform.width * previewScale}
-            height={transform.height * previewScale}
-            radius={
-              transform.shape === "rounded"
-                ? Math.min(transform.width, transform.height) * 0.12 * previewScale
-                : 0
-            }
-            circular={transform.shape === "circle"}
-            borderWidth={transform.borderWidth * previewScale}
-            style={borderStyle}
-            color={transform.borderColor ?? "#ffffff"}
-            opacity={transform.borderOpacity ?? 1}
-            gradient={transform.borderGradient}
-          />
-        ) : null}
-      </div>
-
-      {/* Selection Ring & On-Canvas Direct Manipulation Handles */}
-      {isSelected && activeClip && (
-        <div className="pointer-events-none absolute inset-0 rounded-[inherit] ring-2 ring-primary ring-offset-1 ring-offset-background/40" />
-      )}
-
-      {isSelected && activeClip && !isLocked && onUpdateTransform ? (
-        <>
-          {/* 4 Corner Resize Handles */}
-          <div
-            role="button"
-            tabIndex={0}
-            aria-label="Resize camera northwest"
-            className="absolute -top-1.5 -left-1.5 z-40 size-3 cursor-nwse-resize rounded-full border-2 border-primary bg-background shadow-e2"
-            onPointerDown={(e) => beginDrag(e, "resize", "nw")}
-            onClick={(e) => e.stopPropagation()}
-          />
-          <div
-            role="button"
-            tabIndex={0}
-            aria-label="Resize camera northeast"
-            className="absolute -top-1.5 -right-1.5 z-40 size-3 cursor-nesw-resize rounded-full border-2 border-primary bg-background shadow-e2"
-            onPointerDown={(e) => beginDrag(e, "resize", "ne")}
-            onClick={(e) => e.stopPropagation()}
-          />
-          <div
-            role="button"
-            tabIndex={0}
-            aria-label="Resize camera southwest"
-            className="absolute -bottom-1.5 -left-1.5 z-40 size-3 cursor-nesw-resize rounded-full border-2 border-primary bg-background shadow-e2"
-            onPointerDown={(e) => beginDrag(e, "resize", "sw")}
-            onClick={(e) => e.stopPropagation()}
-          />
-          <div
-            role="button"
-            tabIndex={0}
-            aria-label="Resize camera southeast"
-            className="absolute -bottom-1.5 -right-1.5 z-40 size-3 cursor-nwse-resize rounded-full border-2 border-primary bg-background shadow-e2"
-            onPointerDown={(e) => beginDrag(e, "resize", "se")}
-            onClick={(e) => e.stopPropagation()}
-          />
-
-          {/* Floating Direct Action Toolbar */}
-          <div
-            className="absolute -top-8 left-1/2 -translate-x-1/2 z-40 flex items-center gap-1 rounded-full border border-border/80 bg-background/90 px-2 py-0.5 shadow-e3 backdrop-blur-md"
-            onClick={(e) => e.stopPropagation()}
-            onPointerDown={(e) => e.stopPropagation()}
-          >
-            {/* Shape Switchers */}
-            <button
-              type="button"
-              title="Circle Shape"
-              aria-label="Circle Shape"
-              onClick={() => handleSetShape("circle")}
-              className={cn(
-                "flex size-5 items-center justify-center rounded transition-colors",
-                transform.shape === "circle"
-                  ? "bg-primary text-primary-foreground font-bold"
-                  : "text-muted-foreground hover:bg-surface-hover hover:text-foreground",
-              )}
-            >
-              <Circle className="size-2.5" aria-hidden />
-            </button>
-            <button
-              type="button"
-              title="Rounded Shape"
-              aria-label="Rounded Shape"
-              onClick={() => handleSetShape("rounded")}
-              className={cn(
-                "flex size-5 items-center justify-center rounded transition-colors",
-                transform.shape === "rounded"
-                  ? "bg-primary text-primary-foreground font-bold"
-                  : "text-muted-foreground hover:bg-surface-hover hover:text-foreground",
-              )}
-            >
-              <Square className="size-2.5 rounded-xs" aria-hidden />
-            </button>
-            <button
-              type="button"
-              title="Rectangle Shape"
-              aria-label="Rectangle Shape"
-              onClick={() => handleSetShape("rectangle")}
-              className={cn(
-                "flex size-5 items-center justify-center rounded transition-colors",
-                transform.shape === "rectangle"
-                  ? "bg-primary text-primary-foreground font-bold"
-                  : "text-muted-foreground hover:bg-surface-hover hover:text-foreground",
-              )}
-            >
-              <Square className="size-2.5" aria-hidden />
-            </button>
-
-            <div className="h-3 w-px bg-border/80 mx-0.5" aria-hidden />
-
-            {/* Corner Snap Buttons */}
-            <button
-              type="button"
-              title="Snap Top-Left"
-              onClick={() => handleSnapPreset("TL")}
-              className="px-1 py-0.5 font-mono text-[9px] font-semibold text-muted-foreground hover:bg-surface-hover hover:text-foreground rounded"
-            >
-              TL
-            </button>
-            <button
-              type="button"
-              title="Snap Top-Right"
-              onClick={() => handleSnapPreset("TR")}
-              className="px-1 py-0.5 font-mono text-[9px] font-semibold text-muted-foreground hover:bg-surface-hover hover:text-foreground rounded"
-            >
-              TR
-            </button>
-            <button
-              type="button"
-              title="Snap Bottom-Left"
-              onClick={() => handleSnapPreset("BL")}
-              className="px-1 py-0.5 font-mono text-[9px] font-semibold text-muted-foreground hover:bg-surface-hover hover:text-foreground rounded"
-            >
-              BL
-            </button>
-            <button
-              type="button"
-              title="Snap Bottom-Right"
-              onClick={() => handleSnapPreset("BR")}
-              className="px-1 py-0.5 font-mono text-[9px] font-semibold text-muted-foreground hover:bg-surface-hover hover:text-foreground rounded"
-            >
-              BR
-            </button>
-          </div>
-        </>
-      ) : null}
-    </div>
+      </CameraFrameView>
+      {snapGuides.map((guide, index) => (
+        <div
+          key={`${guide.axis}-${index}`}
+          aria-hidden
+          className={cn(
+            "pointer-events-none absolute z-40 bg-primary/60",
+            guide.axis === "x" ? "top-0 bottom-0 w-px" : "right-0 left-0 h-px",
+          )}
+          style={
+            guide.axis === "x"
+              ? { left: `${(guide.position / canvasWidth) * 100}%` }
+              : { top: `${(guide.position / canvasHeight) * 100}%` }
+          }
+        />
+      ))}
+    </>
   )
 }
 
@@ -939,12 +904,14 @@ export function CameraPreview({
   canvasWidth,
   canvasHeight,
   canvasPadding,
+  canvasAspectRatio,
   cameraLayouts,
   assetUrls,
   previewScale,
   selectedClipId,
   onSelectClip,
-  onUpdateTransform,
+  onUpdateFrame,
+  onUpdateCameraLayout,
 }: CameraPreviewProps) {
   const groups = useMemo(
     () => buildCameraGroups(clips, outputs, workDir),
@@ -962,12 +929,14 @@ export function CameraPreview({
           canvasWidth={canvasWidth}
           canvasHeight={canvasHeight}
           canvasPadding={canvasPadding}
+          canvasAspectRatio={canvasAspectRatio}
           cameraLayouts={cameraLayouts}
           assetUrls={assetUrls}
           previewScale={previewScale}
           selectedClipId={selectedClipId}
           onSelectClip={onSelectClip}
-          onUpdateTransform={onUpdateTransform}
+          onUpdateFrame={onUpdateFrame}
+          onUpdateCameraLayout={onUpdateCameraLayout}
         />
       ))}
     </>

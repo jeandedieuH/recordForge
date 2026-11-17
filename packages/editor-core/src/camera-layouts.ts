@@ -1,10 +1,17 @@
-import type {
-  CameraLayoutKind,
-  CameraLayoutSegment,
-  ClipTransform,
-  TimelineState,
+import {
+  CAMERA_CORNER_RADIUS_FRACTION,
+  type CameraLayoutKind,
+  type CameraLayoutSegment,
+  type ClipTransform,
+  type TimelineState,
 } from "@recordforge/contracts"
 import { zoomEasedProgress, type CanvasRect, type CanvasSize } from "./composition"
+import {
+  cameraFrameRadius,
+  computeSplit,
+  lanePipCameraRect,
+  LANE_SIDE_BY_SIDE_SPLIT,
+} from "./camera-frame"
 
 /**
  * Camera layout lane (modern-features #5).
@@ -21,8 +28,11 @@ import { zoomEasedProgress, type CanvasRect, type CanvasSize } from "./compositi
 
 /** Camera margin as a fraction of the canvas height for corner PiP layouts. */
 export const CAMERA_LAYOUT_MARGIN_FRACTION = 0.04
-/** Corner radius as a fraction of the shorter side for `rounded` shapes. */
-export const CAMERA_LAYOUT_ROUNDED_FRACTION = 0.08
+/**
+ * Corner radius as a fraction of the shorter side for `rounded` shapes —
+ * the canonical ADR 023 value (previously a lane-local 0.08).
+ */
+export const CAMERA_LAYOUT_ROUNDED_FRACTION = CAMERA_CORNER_RADIUS_FRACTION
 /** Transition samples written into the render plan (ms). */
 export const CAMERA_LAYOUT_KEYFRAME_STEP_MS = 80
 
@@ -76,11 +86,7 @@ export function screenContentRect(
 }
 
 function radiusForShape(rect: CanvasRect, shape: CameraLayoutPose["shape"]): number {
-  if (shape === "circle") return Math.min(rect.width, rect.height) / 2
-  if (shape === "rounded") {
-    return Math.round(Math.min(rect.width, rect.height) * CAMERA_LAYOUT_ROUNDED_FRACTION)
-  }
-  return 0
+  return cameraFrameRadius(rect, shape, CAMERA_LAYOUT_ROUNDED_FRACTION)
 }
 
 /**
@@ -133,26 +139,7 @@ function pipCameraRect(
   canvas: CanvasSize,
   base: CameraLayoutPose,
 ): CanvasRect {
-  const pip = segment.pip
-  const margin = Math.round(canvas.height * CAMERA_LAYOUT_MARGIN_FRACTION)
-  const fraction = Math.min(0.6, Math.max(0.05, pip?.sizeFraction ?? 0.24))
-  const height = Math.max(2, Math.round(canvas.height * fraction))
-  const width = Math.max(2, Math.round(height * aspectFor(base)))
-  const corner = pip?.corner ?? "br"
-  if (corner === "custom") {
-    return clampRectToCanvas(
-      {
-        x: Math.round((pip?.x ?? 0.7) * canvas.width),
-        y: Math.round((pip?.y ?? 0.7) * canvas.height),
-        width,
-        height,
-      },
-      canvas,
-    )
-  }
-  const x = corner === "tl" || corner === "bl" ? margin : canvas.width - width - margin
-  const y = corner === "tl" || corner === "tr" ? margin : canvas.height - height - margin
-  return clampRectToCanvas({ x, y, width, height }, canvas)
+  return lanePipCameraRect(segment.pip, canvas, aspectFor(base))
 }
 
 /** Steady-state pose for one segment against the current base layout. */
@@ -170,13 +157,15 @@ export function cameraLayoutPose(
       // Keep the base rect so `hidden` can fade out and back in place.
       return { ...base, screen, opacity: 0 }
     case "side-by-side": {
-      const halfWidth = Math.round(canvas.width / 2)
+      const { screen: slot, column } = computeSplit(canvas, LANE_SIDE_BY_SIDE_SPLIT, {
+        x: 0,
+        y: 0,
+        width: canvas.width,
+        height: canvas.height,
+      })
       return {
-        camera: clampRectToCanvas(
-          { x: halfWidth, y: 0, width: canvas.width - halfWidth, height: canvas.height },
-          canvas,
-        ),
-        screen: { x: 0, y: 0, width: halfWidth, height: canvas.height },
+        camera: clampRectToCanvas(column, canvas),
+        screen: slot,
         radius: 0,
         opacity: 1,
         shape: "rectangle",

@@ -27,6 +27,14 @@ import {
   cameraColorSchema,
   cameraCutoutSchema,
   cameraFaceTrackingSchema,
+  cameraFrameAlignSchema,
+  cameraFrameAspectSchema,
+  cameraFrameFramingSchema,
+  cameraFramePlacementSchema,
+  cameraFrameShapeSchema,
+  cameraFrameSplitSchema,
+  cameraFrameStyleSchema,
+  cameraPlacementPresetSchema,
   smartZoomSettingsSchema,
   textClipSchema,
   timelineCanvasSchema,
@@ -300,6 +308,42 @@ export const updateClipTransformCommandSchema = commandMetaSchema.extend({
 
 export type UpdateClipTransformCommand = z.infer<typeof updateClipTransformCommandSchema>
 
+// ADR 023 phase 4: frame-level edits replace transform-level writes. The patch
+// is a deep partial of `CameraFrame`; the engine merges, pins placement when
+// geometry moves, and mirrors the legacy transform for older readers.
+export const cameraFramePatchSchema = z.object({
+  placement: cameraFramePlacementSchema
+    .partial()
+    .extend({
+      align: cameraFrameAlignSchema.partial().optional(),
+      split: cameraFrameSplitSchema.partial().optional(),
+    })
+    .optional(),
+  shape: cameraFrameShapeSchema.optional(),
+  aspect: cameraFrameAspectSchema.optional(),
+  cornerRadius: z.number().min(0).max(0.5).optional(),
+  style: cameraFrameStyleSchema.partial().optional(),
+  framing: cameraFrameFramingSchema.partial().optional(),
+  visible: z.boolean().optional(),
+  preset: cameraPlacementPresetSchema.optional(),
+})
+
+export const updateCameraFrameCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("update-camera-frame"),
+  clipId: z.string(),
+  patch: cameraFramePatchSchema,
+})
+
+export type UpdateCameraFrameCommand = z.infer<typeof updateCameraFrameCommandSchema>
+
+export const applyCameraPresetCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("apply-camera-preset"),
+  clipId: z.string(),
+  preset: cameraPlacementPresetSchema,
+})
+
+export type ApplyCameraPresetCommand = z.infer<typeof applyCameraPresetCommandSchema>
+
 // M4 camera effects (#4a–c). Passing `null` clears the field so a reset is one
 // undoable command; omitted fields are left untouched.
 export const setCameraEffectsCommandSchema = commandMetaSchema.extend({
@@ -464,12 +508,6 @@ export type UpdateMaskClipCommand = z.infer<typeof updateMaskClipCommandSchema>
 export const updateCanvasCommandSchema = commandMetaSchema.extend({
   kind: z.literal("update-canvas"),
   canvas: timelineCanvasSchema.partial(),
-  // Camera source dimensions keyed by camera clip id. When an aspect-ratio
-  // change triggers the smart re-layout, the engine rebuilds each camera
-  // clip's preset transform and needs real source pixels to compute the crop.
-  cameraSources: z
-    .record(z.string(), z.object({ width: z.number().positive(), height: z.number().positive() }))
-    .optional(),
 })
 
 export type UpdateCanvasCommand = z.infer<typeof updateCanvasCommandSchema>
@@ -839,6 +877,8 @@ export const commandRecordSchema = z.discriminatedUnion("kind", [
   updateTrackCommandSchema,
   updateClipAudioCommandSchema,
   updateClipTransformCommandSchema,
+  updateCameraFrameCommandSchema,
+  applyCameraPresetCommandSchema,
   setCameraEffectsCommandSchema,
   generateCameraSilenceLayoutsCommandSchema,
   addCaptionClipCommandSchema,

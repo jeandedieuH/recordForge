@@ -217,8 +217,14 @@ interface RenderPlanOverlay {
   opacity: number
   visible: boolean
   shape: "rectangle" | "rounded" | "circle"
-  radius?: number // corner radius in canvas px (video layers)
+  radius?: number // corner radius in canvas px; always emitted (authoritative) for camera layers (ADR 023)
   fit?: "contain" | "cover" | "fill" // camera defaults to cover, b-roll to contain
+  // Camera-frame mode (ADR 023); absent means a legacy clip resolved from
+  // transform fields (Rust falls back to `preset`/0.76 geometry heuristics).
+  mode?: "overlay" | "split" | "full"
+  // Screen slot for `mode: "split"` — the letterboxed area the screen video
+  // occupies while the camera fills the complementary side.
+  screen?: { x: number; y: number; width: number; height: number }
   // Animated pose track, absolute output ms. Linear interpolation between
   // samples; a hold is two equal poses. Absent keeps the static rect.
   keyframes?: RenderPlanLayoutKeyframe[]
@@ -248,6 +254,13 @@ interface RenderPlanCameraLayout {
   coalescing + decode + quad path. Layers decode at the largest rect their
   keyframes reach (capped at source size) and the compositor rewrites the quad's
   destination rect per frame.
+- **Frame-backed camera layers (ADR 023).** Clips carrying `frame` emit fully
+  resolved geometry: `x`/`y`/`width`/`height` and `radius` are canvas px,
+  `borderWidth`/`borderOpacity`/`shadow*` style lengths are design units
+  resolved to px at the plan's short edge, and `mode`/`screen` describe the
+  camera slot and (for `split`) the screen slot. Rust consumes them verbatim —
+  it no longer infers side-by-side from x coordinates; only plans without
+  `mode` keep the legacy `preset === "side-by-side"` / 0.76 fallback.
 - **Draw order.** `layerOrder` lists the middle band (camera bubbles and video
   layers) in timeline track order. Screen is pinned to the bottom and
   cursor/items/keystrokes/captions to the top.

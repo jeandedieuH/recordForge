@@ -101,16 +101,11 @@ function cameraClipOf(state: TimelineState): CameraClip {
   return clip
 }
 
-const CAMERA_SOURCES = { "camera-clip": { width: 1280, height: 720 } }
-
 describe("smart per-ratio layout on aspect ratio switch", () => {
   it("applies the 9:16 default: 24px inset, centered video, 840px circle PiP", () => {
     const result = executeCommand(
       createEngine(makeState()),
-      createUpdateCanvasCommand(
-        { aspectRatio: "9:16", width: 1080, height: 1920 },
-        { cameraSources: CAMERA_SOURCES },
-      ),
+      createUpdateCanvasCommand({ aspectRatio: "9:16", width: 1080, height: 1920 }),
     )
     expect(result.ok).toBe(true)
     if (!result.ok) return
@@ -142,10 +137,7 @@ describe("smart per-ratio layout on aspect ratio switch", () => {
   ])("applies the $ratio default camera placement", ({ ratio, w, h, dim, x, y, posY }) => {
     const result = executeCommand(
       createEngine(makeState()),
-      createUpdateCanvasCommand(
-        { aspectRatio: ratio, width: w, height: h },
-        { cameraSources: CAMERA_SOURCES },
-      ),
+      createUpdateCanvasCommand({ aspectRatio: ratio, width: w, height: h }),
     )
     expect(result.ok).toBe(true)
     if (!result.ok) return
@@ -165,20 +157,14 @@ describe("smart per-ratio layout on aspect ratio switch", () => {
     const engine = createEngine(makeState())
     const portrait = executeCommand(
       engine,
-      createUpdateCanvasCommand(
-        { aspectRatio: "9:16", width: 1080, height: 1920 },
-        { cameraSources: CAMERA_SOURCES },
-      ),
+      createUpdateCanvasCommand({ aspectRatio: "9:16", width: 1080, height: 1920 }),
     )
     expect(portrait.ok).toBe(true)
     if (!portrait.ok) return
 
     const landscape = executeCommand(
       portrait.value,
-      createUpdateCanvasCommand(
-        { aspectRatio: "16:9", width: 1920, height: 1080 },
-        { cameraSources: CAMERA_SOURCES },
-      ),
+      createUpdateCanvasCommand({ aspectRatio: "16:9", width: 1920, height: 1080 }),
     )
     expect(landscape.ok).toBe(true)
     if (!landscape.ok) return
@@ -207,7 +193,7 @@ describe("smart per-ratio layout on aspect ratio switch", () => {
     expect(transform.height).toBe(expected.height)
   })
 
-  it("re-layouts cameras the user positioned manually", () => {
+  it("keeps pinned placement across a ratio switch", () => {
     const state = makeState()
     const clip = cameraClipOf(state)
     // Manual drag clears the preset tag and unlocks the transform.
@@ -215,27 +201,73 @@ describe("smart per-ratio layout on aspect ratio switch", () => {
 
     const result = executeCommand(
       createEngine(state),
-      createUpdateCanvasCommand(
-        { aspectRatio: "1:1", width: 1080, height: 1080 },
-        { cameraSources: CAMERA_SOURCES },
-      ),
+      createUpdateCanvasCommand({ aspectRatio: "1:1", width: 1080, height: 1080 }),
+    )
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+
+    const next = cameraClipOf(result.value.history.present)
+    // Pinned frames keep their fractions instead of snapping to the ratio's
+    // default: 40/1680 across the free width, 336/1080 of the short edge.
+    expect(next.frame?.placement.origin).toBe("pinned")
+    expect(next.transform.preset).toBeUndefined()
+    expect(next.transform.x).toBe(20)
+    expect(next.transform.y).toBe(40)
+    expect(next.transform.width).toBe(240)
+    expect(next.transform.height).toBe(336)
+  })
+
+  it("doubles pinned camera geometry on a resolution-tier switch", () => {
+    const state = makeState()
+    const clip = cameraClipOf(state)
+    clip.transform = { ...clip.transform, x: 40, y: 40, preset: undefined, locked: false }
+
+    const result = executeCommand(
+      createEngine(state),
+      createUpdateCanvasCommand({ width: 3840, height: 2160 }),
     )
     expect(result.ok).toBe(true)
     if (!result.ok) return
 
     const transform = cameraClipOf(result.value.history.present).transform
-    expect(transform.preset).toBe("circle-pip")
-    expect(transform.x).toBe(310)
-    expect(transform.y).toBe(595)
+    // Same ratio: the pinned fractions re-resolve at twice the pixels.
+    expect(transform.x).toBe(80)
+    expect(transform.y).toBe(80)
+    expect(transform.width).toBe(480)
+    expect(transform.height).toBe(672)
+  })
+
+  it("re-resolves auto cameras on a resolution-tier switch", () => {
+    const result = executeCommand(
+      createEngine(makeState()),
+      createUpdateCanvasCommand({ width: 3840, height: 2160 }),
+    )
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+
+    const next = result.value.history.present
+    const expected = buildCameraPresetTransform("vertical-pip", {
+      canvas: next.canvas,
+      source: { width: 1280, height: 720 },
+    })
+    const transform = cameraClipOf(next).transform
+    expect(transform.preset).toBe("vertical-pip")
+    expect(transform.x).toBe(expected.x)
+    expect(transform.y).toBe(expected.y)
+    expect(transform.width).toBe(expected.width)
+    expect(transform.height).toBe(expected.height)
   })
 
   it("lets explicit canvas fields win over the ratio defaults", () => {
     const result = executeCommand(
       createEngine(makeState()),
-      createUpdateCanvasCommand(
-        { aspectRatio: "9:16", width: 1080, height: 1920, padding: 64, videoPositionY: 0.2 },
-        { cameraSources: CAMERA_SOURCES },
-      ),
+      createUpdateCanvasCommand({
+        aspectRatio: "9:16",
+        width: 1080,
+        height: 1920,
+        padding: 64,
+        videoPositionY: 0.2,
+      }),
     )
     expect(result.ok).toBe(true)
     if (!result.ok) return
@@ -290,10 +322,7 @@ describe("smart per-ratio layout on aspect ratio switch", () => {
 
     const result = executeCommand(
       createEngine(state),
-      createUpdateCanvasCommand(
-        { aspectRatio: "9:16", width: 1080, height: 1920 },
-        { cameraSources: CAMERA_SOURCES },
-      ),
+      createUpdateCanvasCommand({ aspectRatio: "9:16", width: 1080, height: 1920 }),
     )
     expect(result.ok).toBe(true)
     if (!result.ok) return
@@ -309,19 +338,16 @@ describe("smart per-ratio layout on aspect ratio switch", () => {
     if (!result.ok) return
 
     const transform = cameraClipOf(result.value.history.present).transform
-    // No cameraSources were provided: the new crop must stay a centered square
-    // inside the previous 514x720 crop, offset back into source coordinates.
-    expect(transform.crop).toEqual({ x: 383, y: 103, width: 514, height: 514 })
+    // Source sizes are unknown at command time: the mirrored transform carries
+    // the preset's fallback-source crop; the real source resolves at render.
+    expect(transform.crop).toEqual({ x: 280, y: 0, width: 720, height: 720 })
   })
 
   it("restores canvas and camera placement in a single undo", () => {
     const engine = createEngine(makeState())
     const result = executeCommand(
       engine,
-      createUpdateCanvasCommand(
-        { aspectRatio: "9:16", width: 1080, height: 1920 },
-        { cameraSources: CAMERA_SOURCES },
-      ),
+      createUpdateCanvasCommand({ aspectRatio: "9:16", width: 1080, height: 1920 }),
     )
     expect(result.ok).toBe(true)
     if (!result.ok) return

@@ -1,23 +1,24 @@
 import type {
-  BorderStyle,
   CameraAiStatus,
   CameraClip,
   CameraColor,
   CameraCutout,
   CameraFaceTracking,
-  CameraPlacementPreset,
-  ClipTransform,
   MediaMetadata,
 } from "@recordforge/contracts"
 import { BUNDLED_CAMERA_LUTS } from "@recordforge/contracts"
-import { buildCameraPresetTransform, createSetCameraEffectsCommand } from "@recordforge/editor-core"
+import { createSetCameraEffectsCommand, getCameraFrame } from "@recordforge/editor-core"
+import type { CameraFramePatch } from "@recordforge/editor-core"
 import { useEffect, useMemo, useRef, useState } from "react"
 import { Palette, ScanFace, Sparkles, Video, Wand2 } from "lucide-react"
 import { Button, ColorPicker, SimpleSelect, Switch, useToast } from "@recordforge/ui"
 import { useTimelineInteraction } from "../timeline/use-timeline-interaction"
 import { ClipPropertiesInspector } from "./clip-properties-inspector"
 import { DebouncedSlider, InspectorSection, NumberField } from "./fields"
-import { CameraPresetPicker } from "./camera-preset-picker"
+import { CameraPlacementSection } from "./camera/camera-placement-section"
+import { CameraShapeSection } from "./camera/camera-shape-section"
+import { CameraStyleSection } from "./camera/camera-style-section"
+import { CameraFramingSection } from "./camera/camera-framing-section"
 import { useTimelineStore } from "../../../stores/timeline-store"
 import { useRecorderStore } from "../../../stores/recorder-store"
 import { useLicenseStore } from "../../../stores/license-store"
@@ -42,8 +43,6 @@ interface CameraClipInspectorProps {
   metadata: MediaMetadata | null
   selectedClipCount?: number
 }
-
-const GEOMETRY_KEYS: Array<keyof ClipTransform> = ["x", "y", "width", "height", "crop"]
 
 export function CameraClipInspector({
   clip,
@@ -258,72 +257,13 @@ export function CameraClipInspector({
     [clip, project, metadata, activeJob, recording],
   )
 
-  // If a clip was previously auto-framed using an approximate source size (e.g.
-  // the canvas fallback), recompute the crop when the real camera size is known.
-  // This only runs while the preset is still active; manual geometry edits clear
-  // the preset and therefore opt out of this auto-correction.
-  useEffect(() => {
-    if (!clip.transform.preset || !canvas || sourceSize.width <= 1 || sourceSize.height <= 1) return
+  // The frame is the source of truth; it resolves crop/aspect from the source
+  // at render time, so nothing here rewrites pixel geometry.
+  const source = sourceSize.width > 1 && sourceSize.height > 1 ? sourceSize : undefined
+  const frame = getCameraFrame(clip, canvas ?? { width: 1920, height: 1080 }, source)
 
-    const expected = buildCameraPresetTransform(clip.transform.preset, {
-      canvas,
-      source: sourceSize,
-    })
-    const current = clip.transform
-
-    if (
-      current.x !== expected.x ||
-      current.y !== expected.y ||
-      current.width !== expected.width ||
-      current.height !== expected.height ||
-      current.crop?.x !== expected.crop?.x ||
-      current.crop?.y !== expected.crop?.y ||
-      current.crop?.width !== expected.crop?.width ||
-      current.crop?.height !== expected.crop?.height
-    ) {
-      interaction.updateClipTransform(
-        clip.id,
-        {
-          ...current,
-          x: expected.x,
-          y: expected.y,
-          width: expected.width,
-          height: expected.height,
-          crop: expected.crop,
-        },
-        { phase: "commit" },
-      )
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- only react to preset and source-size scalar changes
-  }, [clip.id, clip.transform.preset, canvas, sourceSize.width, sourceSize.height])
-
-  function isGeometryChange(partial: Partial<ClipTransform>): boolean {
-    return (Object.keys(partial) as Array<keyof ClipTransform>).some((key) =>
-      GEOMETRY_KEYS.includes(key),
-    )
-  }
-
-  function updateTransform(partial: Partial<ClipTransform>) {
-    const next: ClipTransform = { ...clip.transform, ...partial }
-    // Once the user manually nudges the position or size, the transform no longer
-    // exactly matches the selected preset, so clear it to avoid confusion.
-    if (isGeometryChange(partial)) {
-      next.preset = undefined
-      next.locked = false
-    }
-    interaction.updateClipTransform(clip.id, next, { phase: "commit" })
-  }
-
-  function selectPreset(preset: CameraPlacementPreset) {
-    if (!canvas) return
-    // If we have not resolved a real camera size yet, fall back to a sensible
-    // 720p placeholder so the geometry is still reasonable while the prepare
-    // job completes. The effect above will recompute the crop with the real
-    // source dimensions once they are available.
-    const resolvedSource =
-      sourceSize.width > 1 && sourceSize.height > 1 ? sourceSize : { width: 1280, height: 720 }
-    const next = buildCameraPresetTransform(preset, { canvas, source: resolvedSource })
-    interaction.updateClipTransform(clip.id, next, { phase: "commit" })
+  function updateFrame(patch: CameraFramePatch) {
+    interaction.updateCameraFrame(clip.id, patch, { phase: "commit" })
   }
 
   const savePreferences = useRecorderStore((state) => state.savePreferences)
@@ -427,15 +367,30 @@ export function CameraClipInspector({
         </div>
       </InspectorSection>
 
-      <InspectorSection title="Placement" defaultOpen>
-        <div className="flex flex-col gap-3">
-          <CameraPresetPicker activePreset={clip.transform.preset} onSelect={selectPreset} />
-          <p className="text-[11px] leading-relaxed text-subtle-foreground">
-            Pick a starting layout. Camera-only fills the canvas and cannot be dragged; the other
-            presets can be moved, resized, and styled below.
-          </p>
-        </div>
-      </InspectorSection>
+      <CameraPlacementSection
+        clip={clip}
+        frame={frame}
+        canvas={canvas ?? { width: 1920, height: 1080 }}
+        onUpdate={updateFrame}
+      />
+      <CameraShapeSection
+        clip={clip}
+        frame={frame}
+        canvas={canvas ?? { width: 1920, height: 1080 }}
+        onUpdate={updateFrame}
+      />
+      <CameraStyleSection
+        clip={clip}
+        frame={frame}
+        canvas={canvas ?? { width: 1920, height: 1080 }}
+        onUpdate={updateFrame}
+      />
+      <CameraFramingSection
+        clip={clip}
+        frame={frame}
+        canvas={canvas ?? { width: 1920, height: 1080 }}
+        onUpdate={updateFrame}
+      />
 
       <InspectorSection title="Colour" defaultOpen>
         <div className="flex flex-col gap-3">
@@ -776,218 +731,6 @@ export function CameraClipInspector({
               Imported LUT loaded ({Math.round(lutText.length / 1024)} KB).
             </p>
           ) : null}
-        </div>
-      </InspectorSection>
-
-      <InspectorSection title="Advanced" defaultOpen>
-        <div className="flex flex-col gap-3">
-          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-subtle-foreground">
-            <Sparkles className="size-4 text-tertiary" aria-hidden />
-            <span>Picture in picture</span>
-          </div>
-          <div className="grid grid-cols-2 gap-3">
-            <NumberField
-              label="X"
-              value={clip.transform.x}
-              onChange={(value) => updateTransform({ x: value })}
-            />
-            <NumberField
-              label="Y"
-              value={clip.transform.y}
-              onChange={(value) => updateTransform({ y: value })}
-            />
-            <NumberField
-              label="Width"
-              value={clip.transform.width}
-              onChange={(value) => updateTransform({ width: value })}
-            />
-            <NumberField
-              label="Height"
-              value={clip.transform.height}
-              onChange={(value) => updateTransform({ height: value })}
-            />
-          </div>
-          <div className="flex items-center justify-between text-xs">
-            <span className="text-subtle-foreground">Opacity</span>
-            <span className="font-mono tabular-nums">
-              {Math.round(clip.transform.opacity * 100)}%
-            </span>
-          </div>
-          <DebouncedSlider
-            value={[clip.transform.opacity]}
-            min={0}
-            max={1}
-            step={0.05}
-            aria-label="Camera opacity"
-            onValueCommit={(value) => updateTransform({ opacity: value[0] ?? 1 })}
-          />
-          <label className="flex items-center justify-between gap-3 text-xs text-subtle-foreground">
-            <span>Show camera</span>
-            <Switch
-              checked={clip.transform.visible !== false}
-              onCheckedChange={(visible) => updateTransform({ visible })}
-            />
-          </label>
-          <div className="flex items-center justify-between gap-3 text-xs text-subtle-foreground">
-            <span>Shape</span>
-            <SimpleSelect
-              aria-label="Camera shape"
-              size="sm"
-              value={clip.transform.shape}
-              onValueChange={(val) =>
-                updateTransform({
-                  shape: val as ClipTransform["shape"],
-                })
-              }
-              className="w-32"
-              options={[
-                { value: "rectangle", label: "Rectangle" },
-                { value: "rounded", label: "Rounded" },
-                { value: "circle", label: "Circle" },
-              ]}
-            />
-          </div>
-
-          <div className="flex flex-col gap-2 rounded-md border border-border bg-surface-dim p-2">
-            <span className="text-[10px] font-semibold uppercase tracking-wider text-subtle-foreground">
-              Crop (source pixels)
-            </span>
-            <div className="grid grid-cols-2 gap-2">
-              {(["x", "y", "width", "height"] as const).map((field) => (
-                <NumberField
-                  key={field}
-                  label={field}
-                  value={clip.transform.crop?.[field] ?? 0}
-                  onChange={(value) =>
-                    updateTransform({
-                      crop: {
-                        x: clip.transform.crop?.x ?? 0,
-                        y: clip.transform.crop?.y ?? 0,
-                        width: clip.transform.crop?.width ?? sourceSize.width,
-                        height: clip.transform.crop?.height ?? sourceSize.height,
-                        [field]: value,
-                      },
-                    })
-                  }
-                />
-              ))}
-            </div>
-          </div>
-
-          <div className="grid grid-cols-2 gap-2">
-            <NumberField
-              label="Border width"
-              value={clip.transform.borderWidth ?? 0}
-              onChange={(value) => updateTransform({ borderWidth: value })}
-            />
-            <NumberField
-              label="Border opacity"
-              value={clip.transform.borderOpacity ?? 1}
-              onChange={(value) => updateTransform({ borderOpacity: value })}
-            />
-            <NumberField
-              label="Shadow blur"
-              value={clip.transform.shadowBlur ?? 0}
-              onChange={(value) => updateTransform({ shadowBlur: value, shadowEnabled: value > 0 })}
-            />
-            <NumberField
-              label="Shadow X"
-              value={clip.transform.shadowOffsetX ?? 0}
-              onChange={(value) => updateTransform({ shadowOffsetX: value })}
-            />
-            <NumberField
-              label="Shadow Y"
-              value={clip.transform.shadowOffsetY ?? 0}
-              onChange={(value) => updateTransform({ shadowOffsetY: value })}
-            />
-          </div>
-
-          <div className="flex items-center justify-between gap-3 text-xs text-subtle-foreground">
-            <span>Border style</span>
-            <SimpleSelect
-              aria-label="Camera border style"
-              size="sm"
-              value={clip.transform.borderStyle ?? "solid"}
-              onValueChange={(value) => updateTransform({ borderStyle: value as BorderStyle })}
-              className="w-32"
-              options={[
-                { value: "solid", label: "Solid" },
-                { value: "gradient", label: "Gradient" },
-                { value: "double", label: "Double" },
-                { value: "glass", label: "Glass" },
-              ]}
-            />
-          </div>
-
-          {(clip.transform.borderStyle ?? "solid") === "gradient" ? (
-            <div className="flex flex-col gap-2">
-              <div className="flex items-center justify-between gap-3 text-xs text-subtle-foreground">
-                <span>Gradient start</span>
-                <ColorPicker
-                  aria-label="Camera border gradient start colour"
-                  value={
-                    clip.transform.borderGradient?.from ?? clip.transform.borderColor ?? "#ffffff"
-                  }
-                  onChange={(from) =>
-                    updateTransform({
-                      borderGradient: {
-                        from,
-                        to: clip.transform.borderGradient?.to ?? "#6366f1",
-                        angle: clip.transform.borderGradient?.angle ?? 135,
-                      },
-                    })
-                  }
-                />
-              </div>
-              <div className="flex items-center justify-between gap-3 text-xs text-subtle-foreground">
-                <span>Gradient end</span>
-                <ColorPicker
-                  aria-label="Camera border gradient end colour"
-                  value={clip.transform.borderGradient?.to ?? "#6366f1"}
-                  onChange={(to) =>
-                    updateTransform({
-                      borderGradient: {
-                        from:
-                          clip.transform.borderGradient?.from ??
-                          clip.transform.borderColor ??
-                          "#ffffff",
-                        to,
-                        angle: clip.transform.borderGradient?.angle ?? 135,
-                      },
-                    })
-                  }
-                />
-              </div>
-              <NumberField
-                label="Gradient angle"
-                value={clip.transform.borderGradient?.angle ?? 135}
-                min={0}
-                max={360}
-                step={15}
-                onChange={(angle) =>
-                  updateTransform({
-                    borderGradient: {
-                      from:
-                        clip.transform.borderGradient?.from ??
-                        clip.transform.borderColor ??
-                        "#ffffff",
-                      to: clip.transform.borderGradient?.to ?? "#6366f1",
-                      angle,
-                    },
-                  })
-                }
-              />
-            </div>
-          ) : (
-            <div className="flex items-center justify-between gap-3 text-xs text-subtle-foreground">
-              <span>Border color</span>
-              <ColorPicker
-                aria-label="Camera border color"
-                value={clip.transform.borderColor ?? "#ffffff"}
-                onChange={(borderColor) => updateTransform({ borderColor })}
-              />
-            </div>
-          )}
         </div>
       </InspectorSection>
     </div>

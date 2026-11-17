@@ -10,7 +10,6 @@ import type {
   AppError,
   AudioClip,
   CameraLayoutSegment,
-  CameraPlacementPreset,
   CaptionClip,
   CaptionCue,
   CaptionDesign,
@@ -32,7 +31,6 @@ import type {
   VideoClip,
 } from "@recordforge/domain"
 import {
-  buildCameraPresetTransform,
   cameraLayoutPipSchema,
   cameraLayoutSegmentSchema,
   DEFAULT_CAPTION_DESIGN,
@@ -75,6 +73,15 @@ import {
 } from "./captions/caption-transcript"
 import { getClipGroupId } from "./grouping"
 import { applyLookToState } from "./looks"
+import { cameraFrameFromLegacyTransform } from "./camera-frame"
+import {
+  applyCameraPresetFrame,
+  mergeCameraFramePatch,
+  reconcileCameraFramesForCanvas,
+  syncCameraTransform,
+  updateCameraClipTransform,
+  type CameraFramePatch,
+} from "./camera-frame-state"
 import { clipDurationFromSourceRange, timelineToSource } from "./time-mapping"
 import { snapRangeEdgeToFrame } from "./smart-cut"
 import { warpTimeline } from "./time-warp"
@@ -92,6 +99,7 @@ import type {
   AddTrackCommand,
   AddVideoClipCommand,
   AddZoomSegmentCommand,
+  ApplyCameraPresetCommand,
   ApplyLookCommand,
   CommandRecord,
   DeleteCameraLayoutCommand,
@@ -135,6 +143,7 @@ import type {
   TrimClipCommand,
   TrimTimelineEndsCommand,
   UpdateAnnotationClipCommand,
+  UpdateCameraFrameCommand,
   UpdateCameraLayoutCommand,
   UpdateCanvasCommand,
   UpdateCaptionClipCommand,
@@ -494,6 +503,8 @@ export function canApplyCommand(state: TimelineState, command: CommandRecord): C
     case "delete-clip":
     case "update-clip-audio":
     case "update-clip-transform":
+    case "update-camera-frame":
+    case "apply-camera-preset":
     case "update-caption-clip":
     case "update-mask-clip":
     case "move-clip":
@@ -1223,6 +1234,10 @@ export function applyCommand(
       return applyUpdateClipAudio(state, command)
     case "update-clip-transform":
       return applyUpdateClipTransform(state, command)
+    case "update-camera-frame":
+      return applyUpdateCameraFrame(state, command)
+    case "apply-camera-preset":
+      return applyApplyCameraPreset(state, command)
     case "set-camera-effects":
       return applySetCameraEffects(state, command)
     case "add-caption-clip":
@@ -2978,10 +2993,60 @@ function applyUpdateClipTransform(
       error: editorError("invalid_clip", "Only camera clips support transforms"),
     }
   }
-  const next: CameraClip = {
-    ...clip,
-    transform: normalizeClipTransform(command.transform, state.canvas),
+  const nextTransform = normalizeClipTransform(command.transform, state.canvas)
+  // The pixel write routes through the frame model: migrate to a frame
+  // (preset-matched -> auto, otherwise pinned), keep framing/cornerRadius the
+  // transform cannot express, then mirror the transform back.
+  const next = updateCameraClipTransform(clip, nextTransform, state.canvas)
+  return { ok: true, value: replaceClipInState(state, track.id, command.clipId, next) }
+}
+
+function applyUpdateCameraFrame(
+  state: TimelineState,
+  command: UpdateCameraFrameCommand,
+): CommandResult<TimelineState> {
+  const found = findClip(state, command.clipId)
+  if (!found) {
+    return { ok: false, error: editorError("clip_not_found", "Clip not found") }
   }
+  const { track, clip } = found
+  if (track.locked) {
+    return { ok: false, error: editorError("track_locked", `Track "${track.name}" is locked`) }
+  }
+  if (clip.kind !== "camera") {
+    return {
+      ok: false,
+      error: editorError("invalid_clip", "Only camera clips support frames"),
+    }
+  }
+  const frame = mergeCameraFramePatch(
+    clip.frame ?? cameraFrameFromLegacyTransform(clip.transform, state.canvas),
+    command.patch,
+  )
+  const next = syncCameraTransform({ ...clip, frame }, state.canvas)
+  return { ok: true, value: replaceClipInState(state, track.id, command.clipId, next) }
+}
+
+function applyApplyCameraPreset(
+  state: TimelineState,
+  command: ApplyCameraPresetCommand,
+): CommandResult<TimelineState> {
+  const found = findClip(state, command.clipId)
+  if (!found) {
+    return { ok: false, error: editorError("clip_not_found", "Clip not found") }
+  }
+  const { track, clip } = found
+  if (track.locked) {
+    return { ok: false, error: editorError("track_locked", `Track "${track.name}" is locked`) }
+  }
+  if (clip.kind !== "camera") {
+    return {
+      ok: false,
+      error: editorError("invalid_clip", "Only camera clips support presets"),
+    }
+  }
+  const frame = applyCameraPresetFrame(clip.frame, clip, command.preset, state.canvas)
+  const next = syncCameraTransform({ ...clip, frame }, state.canvas)
   return { ok: true, value: replaceClipInState(state, track.id, command.clipId, next) }
 }
 
@@ -3914,11 +3979,6 @@ const SMART_LAYOUT_VIDEO_POSITION_Y: Record<CanvasAspectRatio, number> = {
   "5:4": 0.05,
   "4:5": 0.1,
 }
-// Standard 720p webcam assumption when neither the caller nor the existing
-// transform can tell us the real camera source size. The inspector recomputes
-// preset geometry once real dimensions resolve, matching `selectPreset`.
-const FALLBACK_CAMERA_SOURCE = { width: 1280, height: 720 }
-
 function applyUpdateCanvas(
   state: TimelineState,
   command: UpdateCanvasCommand,
@@ -3963,76 +4023,16 @@ function applyUpdateCanvas(
     }
   }
 
-  const tracks = ratioChanged
-    ? relayoutCameraClips(state.tracks, targetAspectRatio, nextCanvas, command.cameraSources)
-    : state.tracks
-
+  // ADR 023 phase 4: camera frames are resolution-independent, so a canvas
+  // change rebuilds `origin: "auto"` frames for the new ratio and re-mirrors
+  // every clip's transform — pinned placements keep their fractions.
   return {
     ok: true,
-    value: { ...state, canvas: nextCanvas, tracks, updatedAt: now() },
+    value: reconcileCameraFramesForCanvas(
+      { ...state, canvas: nextCanvas, updatedAt: now() },
+      state.canvas,
+    ),
   }
-}
-
-// Rebuild every camera clip's transform from the target ratio's default preset
-// so a ratio switch never leaves stale canvas-pixel geometry behind.
-function relayoutCameraClips(
-  tracks: TimelineTrack[],
-  aspectRatio: CanvasAspectRatio,
-  canvas: TimelineCanvas,
-  cameraSources?: Record<string, { width: number; height: number }>,
-): TimelineTrack[] {
-  if (!tracks.some((track) => track.kind === "camera")) return tracks
-  const preset: CameraPlacementPreset = aspectRatio === "16:9" ? "side-by-side" : "circle-pip"
-  return tracks.map((track) => {
-    if (track.kind !== "camera") return track
-    return {
-      ...track,
-      clips: track.clips.map((clip) =>
-        clip.kind === "camera"
-          ? {
-              ...clip,
-              transform: relayoutCameraTransform(clip, preset, canvas, cameraSources?.[clip.id]),
-            }
-          : clip,
-      ),
-    }
-  })
-}
-
-function relayoutCameraTransform(
-  clip: CameraClip,
-  preset: CameraPlacementPreset,
-  canvas: TimelineCanvas,
-  source?: { width: number; height: number },
-): ClipTransform {
-  let transform: ClipTransform
-  const existingCrop = clip.transform.crop
-  if (source) {
-    transform = buildCameraPresetTransform(preset, { canvas, source })
-  } else if (existingCrop && existingCrop.width > 0 && existingCrop.height > 0) {
-    // Without real source dims, treat the existing source-space crop as the
-    // bounds so the rebuilt transform keeps showing the framed region; the
-    // computed sub-crop is then offset back into source coordinates.
-    transform = buildCameraPresetTransform(preset, {
-      canvas,
-      source: { width: existingCrop.width, height: existingCrop.height },
-    })
-    if (transform.crop) {
-      transform.crop = {
-        ...transform.crop,
-        x: transform.crop.x + existingCrop.x,
-        y: transform.crop.y + existingCrop.y,
-      }
-    }
-  } else {
-    transform = buildCameraPresetTransform(preset, {
-      canvas,
-      source: FALLBACK_CAMERA_SOURCE,
-    })
-  }
-  // Visibility is a content decision, not layout: a deliberately hidden camera
-  // stays hidden rather than reappearing on every ratio switch.
-  return { ...transform, visible: clip.transform.visible ?? transform.visible }
 }
 
 function applyUpdateSmartZoomSettings(
@@ -5390,6 +5390,35 @@ export function createUpdateClipTransformCommand(
   }
 }
 
+/** ADR 023 phase 4: frame-level edits; the engine pins placement on geometry
+ * patches and mirrors the legacy transform for older readers. */
+export function createUpdateCameraFrameCommand(
+  clipId: string,
+  patch: CameraFramePatch,
+): CommandRecord {
+  return {
+    kind: "update-camera-frame",
+    name: "Update camera frame",
+    clipId,
+    patch,
+    coalesce: true,
+    coalesceKey: `camera-frame:${clipId}`,
+  }
+}
+
+/** Rebuild a camera clip's frame from a named placement preset. */
+export function createApplyCameraPresetCommand(
+  clipId: string,
+  preset: NonNullable<CameraClip["transform"]["preset"]>,
+): CommandRecord {
+  return {
+    kind: "apply-camera-preset",
+    name: "Apply camera preset",
+    clipId,
+    preset,
+  }
+}
+
 /** M4: update/clear camera colour, cutout, and face tracking in one command. */
 export function createSetCameraEffectsCommand(
   clipId: string,
@@ -5811,15 +5840,11 @@ export function createAddExternalAudioClipCommand(
   }
 }
 
-export function createUpdateCanvasCommand(
-  canvas: Partial<TimelineCanvas>,
-  options?: { cameraSources?: Record<string, { width: number; height: number }> },
-): CommandRecord {
+export function createUpdateCanvasCommand(canvas: Partial<TimelineCanvas>): CommandRecord {
   return {
     kind: "update-canvas",
     name: "Update canvas",
     canvas,
-    cameraSources: options?.cameraSources,
   }
 }
 

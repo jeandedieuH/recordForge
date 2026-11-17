@@ -9,6 +9,14 @@ import {
 import type { z } from "zod"
 import type { TimelineState } from "@recordforge/contracts"
 import { canvasSizeForAspectRatio } from "./composition"
+import { cameraFrameFromLegacyTransform } from "./camera-frame"
+import {
+  applyCameraPresetFrame,
+  mergeCameraFramePatch,
+  reconcileCameraFramesForCanvas,
+  syncCameraTransform,
+  type CameraFramePatch,
+} from "./camera-frame-state"
 import type { PresetCatalog, PresetDefinition } from "./presets/preset-registry"
 
 export type LookValuesRecord = PresetDefinition<LookValues>
@@ -56,15 +64,59 @@ export function applyLookToState(
       ? { ...state.canvas.cursorSettings, ...definedFields(look.cursor) }
       : state.canvas.cursorSettings
   const cameraScope = scope === "all" || scope === "camera"
-  const { layout: lookLayout, color: lookColor, cutout: lookCutout, ...lookTransform } = look.camera
+  const {
+    layout: lookLayout,
+    color: lookColor,
+    cutout: lookCutout,
+    preset: lookPreset,
+    ...lookStyle
+  } = look.camera
+  // Look values are authored as px on the 1080 design base — identical to the
+  // frame style's design units, so they copy into the frame as-is.
+  const stylePatch: CameraFramePatch["style"] = definedFields({
+    opacity: lookStyle.opacity,
+    borderWidth: lookStyle.borderWidth,
+    borderColor: lookStyle.borderColor,
+    borderOpacity: lookStyle.borderOpacity,
+    borderStyle: lookStyle.borderStyle,
+    borderGradient: lookStyle.borderGradient,
+    shadowEnabled: lookStyle.shadowEnabled,
+    shadowColor: lookStyle.shadowColor,
+    shadowBlur: lookStyle.shadowBlur,
+    shadowOffsetX: lookStyle.shadowOffsetX,
+    shadowOffsetY: lookStyle.shadowOffsetY,
+  })
+  const hasStylePatch = Object.keys(stylePatch).length > 0
+  const hasShapePatch = lookStyle.shape !== undefined
+  const hasLookEdit = lookPreset !== undefined || hasStylePatch || hasShapePatch
+  const canvasAsFrameCanvas = {
+    width: canvas.width,
+    height: canvas.height,
+    padding: canvas.padding,
+    aspectRatio: canvas.aspectRatio,
+  }
   const tracks = cameraScope
     ? state.tracks.map((track) => ({
         ...track,
         clips: track.clips.map((clip) => {
           if (clip.kind !== "camera") return clip
+          // A look preset rebuilds the frame like apply-camera-preset; style /
+          // shape fields merge on top as a frame patch, then the mirrored
+          // transform keeps older readers in sync.
+          let frame = lookPreset
+            ? applyCameraPresetFrame(clip.frame, clip, lookPreset, canvasAsFrameCanvas)
+            : (clip.frame ?? cameraFrameFromLegacyTransform(clip.transform, canvasAsFrameCanvas))
+          if (hasStylePatch || hasShapePatch) {
+            frame = mergeCameraFramePatch(frame, {
+              ...(hasShapePatch ? { shape: lookStyle.shape } : {}),
+              style: stylePatch,
+            })
+          }
+          const nextClip = hasLookEdit
+            ? syncCameraTransform({ ...clip, frame }, canvasAsFrameCanvas)
+            : clip
           return {
-            ...clip,
-            transform: { ...clip.transform, ...definedFields(lookTransform) },
+            ...nextClip,
             // Colour grade and cutout are clip-level fields, partial-merged so
             // a look can set just a LUT id without flattening existing grades.
             // Re-parsing through the full schema restores required defaults.
@@ -104,14 +156,17 @@ export function applyLookToState(
             : segment,
         )
       : state.cameraLayouts
-  return {
-    ...state,
-    canvas: { ...canvas, cursorSettings },
-    tracks,
-    // Keep the key absent when the project has no layout lane — writing
-    // `cameraLayouts: undefined` would change the serialized project shape.
-    ...(cameraLayouts ? { cameraLayouts } : {}),
-  }
+  return reconcileCameraFramesForCanvas(
+    {
+      ...state,
+      canvas: { ...canvas, cursorSettings },
+      tracks,
+      // Keep the key absent when the project has no layout lane — writing
+      // `cameraLayouts: undefined` would change the serialized project shape.
+      ...(cameraLayouts ? { cameraLayouts } : {}),
+    },
+    state.canvas,
+  )
 }
 
 // Strip `undefined` so a partial look never nulls out existing settings.

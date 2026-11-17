@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef } from "react"
 import type {
   AppError,
-  ClipTransform,
   ManualZoomSegment,
   MaskRect,
   MediaMetadata,
@@ -13,14 +12,15 @@ import {
   createInteractionTransaction,
   createMoveClipCommand,
   createMoveClipsCommand,
+  createUpdateCameraFrameCommand,
   createUpdateCaptionClipCommand,
-  createUpdateClipTransformCommand,
   createUpdateMaskClipCommand,
   createUpdateZoomSegmentCommand,
   expandClipIdsThroughGroups,
   findClip,
   getManualZoomSegments,
   type BuildCommandResult,
+  type CameraFramePatch,
   type CommandRecord,
   type CommandResult,
   type InteractionTransaction,
@@ -37,14 +37,13 @@ import { buildTrimCommand, type TrimDraft } from "./trim-command"
 type InteractionDraft =
   | { kind: "move"; clipId: string; newStartMs: number }
   | ({ kind: "trim" } & TrimDraft)
-  | { kind: "camera"; clipId: string; transform: ClipTransform }
+  | { kind: "camera-frame"; clipId: string; patch: CameraFramePatch }
   | { kind: "mask"; clipId: string; rect: MaskRect }
   | {
       kind: "mask-update"
       clipId: string
       update: Parameters<typeof createUpdateMaskClipCommand>[1]
     }
-  | { kind: "crop"; clipId: string; crop: NonNullable<ClipTransform["crop"]> }
   | {
       kind: "caption"
       clipId: string
@@ -70,9 +69,9 @@ export interface TimelineInteraction {
     edgeTimeMs: number,
     options?: { phase?: "draft" | "commit" | "cancel" },
   ) => void
-  updateClipTransform: (
+  updateCameraFrame: (
     clipId: string,
-    transform: ClipTransform,
+    patch: CameraFramePatch,
     options?: { phase?: "draft" | "commit" | "cancel" },
   ) => void
   updateMaskRect: (
@@ -83,11 +82,6 @@ export interface TimelineInteraction {
   updateMask: (
     clipId: string,
     update: Parameters<typeof createUpdateMaskClipCommand>[1],
-    options?: { phase?: "draft" | "commit" | "cancel" },
-  ) => void
-  updateClipCrop: (
-    clipId: string,
-    crop: NonNullable<ClipTransform["crop"]>,
     options?: { phase?: "draft" | "commit" | "cancel" },
   ) => void
   updateCaption: (
@@ -126,14 +120,12 @@ function buildCommand(
       return buildMoveCommand(draft, base, selection)
     case "trim":
       return buildTrimCommand(draft, base, metadata)
-    case "camera":
-      return buildCameraCommand(draft, base)
+    case "camera-frame":
+      return buildCameraFrameCommand(draft, base)
     case "mask":
       return buildMaskCommand(draft, base)
     case "mask-update":
       return buildMaskUpdateCommand(draft, base)
-    case "crop":
-      return buildCropCommand(draft, base)
     case "caption":
       return buildCaptionCommand(draft, base)
     case "zoom":
@@ -194,8 +186,8 @@ function buildMoveCommand(
   }
 }
 
-function buildCameraCommand(
-  draft: Extract<InteractionDraft, { kind: "camera" }>,
+function buildCameraFrameCommand(
+  draft: Extract<InteractionDraft, { kind: "camera-frame" }>,
   base: TimelineState,
 ): CommandResult<BuildCommandResult> {
   const found = findClip(base, draft.clipId)
@@ -220,7 +212,7 @@ function buildCameraCommand(
   }
   return {
     ok: true,
-    value: { command: createUpdateClipTransformCommand(clip.id, draft.transform), hint: null },
+    value: { command: createUpdateCameraFrameCommand(clip.id, draft.patch), hint: null },
   }
 }
 
@@ -281,41 +273,6 @@ function buildMaskUpdateCommand(
   return {
     ok: true,
     value: { command: createUpdateMaskClipCommand(clip.id, draft.update), hint: null },
-  }
-}
-
-function buildCropCommand(
-  draft: Extract<InteractionDraft, { kind: "crop" }>,
-  base: TimelineState,
-): CommandResult<BuildCommandResult> {
-  const found = findClip(base, draft.clipId)
-  if (!found) {
-    return {
-      ok: false,
-      error: { category: "editor", code: "clip_not_found", message: "Clip not found" },
-    }
-  }
-  const { clip, track } = found
-  if (track.locked || (clip.kind === "cursor-effect" && clip.locked)) {
-    return {
-      ok: false,
-      error: { category: "editor", code: "track_locked", message: "Track is locked" },
-    }
-  }
-  if (clip.kind !== "camera") {
-    return {
-      ok: false,
-      error: {
-        category: "editor",
-        code: "invalid_clip",
-        message: "Crop only applies to camera clips",
-      },
-    }
-  }
-  const transform: ClipTransform = { ...clip.transform, crop: draft.crop }
-  return {
-    ok: true,
-    value: { command: createUpdateClipTransformCommand(clip.id, transform), hint: null },
   }
 }
 
@@ -510,8 +467,8 @@ export function useTimelineInteraction(): TimelineInteraction {
       )
     },
 
-    updateClipTransform(clipId, transform, options) {
-      handleDraftOrCommit({ kind: "camera", clipId, transform }, options?.phase ?? "commit")
+    updateCameraFrame(clipId, patch, options) {
+      handleDraftOrCommit({ kind: "camera-frame", clipId, patch }, options?.phase ?? "commit")
     },
 
     updateMaskRect(clipId, rect, options) {
@@ -520,10 +477,6 @@ export function useTimelineInteraction(): TimelineInteraction {
 
     updateMask(clipId, update, options) {
       handleDraftOrCommit({ kind: "mask-update", clipId, update }, options?.phase ?? "commit")
-    },
-
-    updateClipCrop(clipId, crop, options) {
-      handleDraftOrCommit({ kind: "crop", clipId, crop }, options?.phase ?? "commit")
     },
 
     updateCaption(clipId, update, options) {

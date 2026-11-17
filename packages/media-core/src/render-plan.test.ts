@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import {
   annotationClipSchema,
+  buildCameraPresetTransform,
   defaultCursorSettings,
   defaultKeystrokeOverlaySettings,
   exportTimelineOptionsSchema,
@@ -16,6 +17,7 @@ import {
   generateAudioSegmentFilter,
   generateAudioVolumeFilter,
   isTimelineAudioMuted,
+  sideBySideScreenSlot,
 } from "./render-plan"
 import { createCursorEngine, normalizeCursorTelemetry } from "@recordforge/cursor-core"
 import { buildFollowCursorMotionPlan, resolveFollowCursorTarget } from "@recordforge/editor-core"
@@ -499,6 +501,130 @@ describe("render-plan", () => {
       mode: "auto",
       source: "click",
       preset: "product-demo",
+    })
+  })
+
+  it("resolves a legacy camera transform back to identical px geometry", () => {
+    // ADR 023: plan emission goes through getCameraFrame + resolveCameraFrame,
+    // but at the unchanged canvas a pinned (preset-less) transform must yield
+    // the same overlay rect and style the old manual path emitted.
+    const state = makeTimeline()
+    const transform = {
+      x: 1_400,
+      y: 720,
+      width: 480,
+      height: 336,
+      crop: { x: 0, y: 0, width: 1_280, height: 720 },
+      opacity: 0.75,
+      shape: "rounded" as const,
+      visible: true,
+      borderWidth: 4,
+      borderColor: "#ff00ff",
+      borderOpacity: 0.5,
+      shadowEnabled: true,
+      shadowColor: "#123456",
+      shadowBlur: 12,
+      shadowOffsetX: 2,
+      shadowOffsetY: 8,
+    }
+    state.tracks.push({
+      id: "camera-track",
+      kind: "camera",
+      name: "Camera",
+      muted: false,
+      locked: false,
+      solo: false,
+      volume: 1,
+      clips: [
+        {
+          id: "camera-clip",
+          kind: "camera",
+          assetId: "rec-1",
+          streamIndex: 1,
+          startMs: 0,
+          durationMs: 5_000,
+          sourceInMs: 0,
+          sourceOutMs: 5_000,
+          speed: 1,
+          transform,
+        },
+      ],
+    })
+
+    const plan = buildRenderPlan({ state, projectId: "project-1" })
+    expect(plan.ok).toBe(true)
+    if (!plan.ok) return
+    const overlay = plan.value.overlays[0]
+    expect(overlay).toMatchObject({
+      x: 1_400,
+      y: 720,
+      width: 480,
+      height: 336,
+      // Rounded rect: the resolver emits the canonical px radius explicitly.
+      radius: Math.round(Math.min(480, 336) * 0.12),
+      mode: "overlay",
+      opacity: 0.75,
+      shape: "rounded",
+      crop: { x: 0, y: 0, width: 1_280, height: 720 },
+      borderWidth: 4,
+      borderColor: "#ff00ff",
+      borderOpacity: 0.5,
+      shadowEnabled: true,
+      shadowColor: "#123456",
+      shadowBlur: 12,
+      shadowOffsetX: 2,
+      shadowOffsetY: 8,
+    })
+    expect(overlay.screen).toBeUndefined()
+  })
+
+  it("emits mode split and the even-rounded screen slot for side-by-side", () => {
+    const state = makeTimeline()
+    const canvas = { width: 1_920, height: 1_080, padding: 0 }
+    const transform = buildCameraPresetTransform("side-by-side", {
+      canvas,
+      source: { width: 1_280, height: 720 },
+    })
+    state.tracks.push({
+      id: "camera-track",
+      kind: "camera",
+      name: "Camera",
+      muted: false,
+      locked: false,
+      solo: false,
+      volume: 1,
+      clips: [
+        {
+          id: "camera-clip",
+          kind: "camera",
+          assetId: "rec-1",
+          streamIndex: 1,
+          startMs: 0,
+          durationMs: 5_000,
+          sourceInMs: 0,
+          sourceOutMs: 5_000,
+          speed: 1,
+          transform,
+        },
+      ],
+    })
+
+    const plan = buildRenderPlan({ state, projectId: "project-1" })
+    expect(plan.ok).toBe(true)
+    if (!plan.ok) return
+    const overlay = plan.value.overlays[0]
+    expect(overlay.mode).toBe("split")
+    expect(overlay.preset).toBe("side-by-side")
+    // Rust's side-by-side target box at 1920x1080, padding 0:
+    // contentWidth 1920 -> even(round(1920*0.76)) = 1458,
+    // even(round(1458/1920*1080)) = 820, y = (1080-820)/2 = 130.
+    expect(overlay.screen).toEqual({ x: 0, y: 130, width: 1_458, height: 820 })
+    // Camera rect reproduces the preset transform.
+    expect(overlay).toMatchObject({
+      x: transform.x,
+      y: transform.y,
+      width: transform.width,
+      height: transform.height,
     })
   })
 
@@ -2159,5 +2285,31 @@ describe("auto-reframe", () => {
     expect(plan.ok).toBe(true)
     if (!plan.ok) return
     expect(renderPlanSchema.safeParse(plan.value).success).toBe(true)
+  })
+})
+
+describe("sideBySideScreenSlot", () => {
+  // Hand-computed from Rust `video_screen_rect`'s side-by-side target box:
+  // targetW = even(round(contentWidth*0.76)), min 2;
+  // targetH = even(round(targetW/canvasWidth*canvasHeight)), min 2;
+  // x = padding; y = padding + (contentHeight - targetH)/2 (unrounded).
+  it.each([
+    {
+      canvas: { width: 1_920, height: 1_080, padding: 24 },
+      // content 1872x1032 -> w even(1423)=1422, h even(800)=800, y=140
+      expected: { x: 24, y: 140, width: 1_422, height: 800 },
+    },
+    {
+      canvas: { width: 1_920, height: 1_080, padding: 96 },
+      // content 1728x888 -> w even(1313)=1312, h even(738)=738, y=171
+      expected: { x: 96, y: 171, width: 1_312, height: 738 },
+    },
+    {
+      canvas: { width: 3_840, height: 2_160, padding: 48 },
+      // content 3744x2064 -> w even(2845)=2844, h even(1600)=1600, y=280
+      expected: { x: 48, y: 280, width: 2_844, height: 1_600 },
+    },
+  ])("matches the Rust slot arithmetic at %j", ({ canvas, expected }) => {
+    expect(sideBySideScreenSlot(canvas)).toEqual(expected)
   })
 })

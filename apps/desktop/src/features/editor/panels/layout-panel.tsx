@@ -31,7 +31,6 @@ import {
 } from "lucide-react"
 import { useTimelineStore } from "../../../stores/timeline-store"
 import { useLicenseStore } from "../../../stores/license-store"
-import { collectCameraSources } from "../camera/camera-sources"
 import { AspectRatioSelector, ASPECT_RATIO_OPTIONS } from "./layout/aspect-ratio-selector"
 import { ResolutionSelector } from "./layout/resolution-selector"
 import { SolidBackgroundPicker } from "./layout/solid-background-picker"
@@ -58,10 +57,6 @@ export function LayoutPanel() {
   const isPro = useLicenseStore((state) => state.status.tier === "pro")
   const openUpgradeDialog = useLicenseStore((state) => state.openUpgradeDialog)
   const isLoading = useTimelineStore((state) => state.isLoading)
-  const project = useTimelineStore((state) => state.project)
-  const metadata = useTimelineStore((state) => state.metadata)
-  const activeJob = useTimelineStore((state) => state.activeJob)
-  const recording = useTimelineStore((state) => state.recording)
 
   const currentBackground = timeline?.canvas.background ?? DEFAULT_CANVAS_BACKGROUND
   const detectedKind = getBackgroundKind(currentBackground)
@@ -126,7 +121,6 @@ export function LayoutPanel() {
   // Aspect-ratio switches apply a per-ratio smart layout (padding/radius +
   // camera placement) inside the command engine. Real camera source sizes are
   // attached so the rebuilt preset crops stay pixel-correct.
-  const cameraSourceCtx = { project, metadata, activeJob, recording }
 
   const handleAspectRatioChange = (option: {
     value: CanvasAspectRatio
@@ -134,14 +128,11 @@ export function LayoutPanel() {
     height: number
   }) => {
     execute(
-      createUpdateCanvasCommand(
-        {
-          aspectRatio: option.value,
-          width: option.width,
-          height: option.height,
-        },
-        { cameraSources: collectCameraSources(timeline, cameraSourceCtx) },
-      ),
+      createUpdateCanvasCommand({
+        aspectRatio: option.value,
+        width: option.width,
+        height: option.height,
+      }),
     )
   }
 
@@ -149,12 +140,7 @@ export function LayoutPanel() {
   // re-derives them from the aspect ratio, so the two stay consistent.
   const handleResolutionChange = (tier: CanvasResolutionTier) => {
     const size = canvasSizeForAspectRatio(canvas.aspectRatio ?? "16:9", canvas, tier)
-    execute(
-      createUpdateCanvasCommand(
-        { width: size.width, height: size.height },
-        { cameraSources: collectCameraSources(timeline, cameraSourceCtx) },
-      ),
-    )
+    execute(createUpdateCanvasCommand({ width: size.width, height: size.height }))
   }
 
   const isCustomYRatio = canvas.aspectRatio && canvas.aspectRatio !== "16:9"
@@ -390,22 +376,19 @@ export function LayoutPanel() {
           className="w-full text-xs text-subtle-foreground hover:text-foreground"
           onClick={() =>
             execute(
-              createUpdateCanvasCommand(
-                {
-                  width: 1920,
-                  height: 1080,
-                  padding: 0,
-                  borderRadius: 0,
-                  aspectRatio: "16:9",
-                  videoPositionY: 0.5,
-                  background: "#070b14",
-                  backgroundBlur: 0,
-                  backgroundDim: 0,
-                  shadow: false,
-                  borderWidth: 0,
-                },
-                { cameraSources: collectCameraSources(timeline, cameraSourceCtx) },
-              ),
+              createUpdateCanvasCommand({
+                width: 1920,
+                height: 1080,
+                padding: 0,
+                borderRadius: 0,
+                aspectRatio: "16:9",
+                videoPositionY: 0.5,
+                background: "#070b14",
+                backgroundBlur: 0,
+                backgroundDim: 0,
+                shadow: false,
+                borderWidth: 0,
+              }),
             )
           }
         >

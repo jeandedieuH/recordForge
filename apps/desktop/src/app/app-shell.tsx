@@ -18,7 +18,6 @@ import {
 import { EditorSession, EditorView } from "../features/editor"
 import { ExportView } from "../features/export"
 import { ExportGateDialog, UpgradeDialog } from "../features/licensing"
-import { collectCameraSources } from "../features/editor/camera/camera-sources"
 import { LibraryView } from "../features/library"
 import { ProjectsView } from "../features/projects"
 import { StorageView } from "../features/storage"
@@ -601,19 +600,7 @@ export function AppShell() {
     const state = useTimelineStore.getState()
     const timeline = state.engine?.history.present
     if (!timeline) return
-    state.execute(
-      createUpdateCanvasCommand(
-        { aspectRatio: "16:9" },
-        {
-          cameraSources: collectCameraSources(timeline, {
-            project: state.project,
-            metadata: state.metadata,
-            activeJob: state.activeJob,
-            recording: state.recording,
-          }),
-        },
-      ),
-    )
+    state.execute(createUpdateCanvasCommand({ aspectRatio: "16:9" }))
     // The aspect gate is resolved, but other Pro features may still remain.
     const nextAnalysis = analyzeCurrentExport()
     if (nextAnalysis?.requiresPro) {

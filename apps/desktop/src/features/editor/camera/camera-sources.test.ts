@@ -4,10 +4,9 @@ import type {
   LibraryRecording,
   MediaJob,
   MediaMetadata,
-  TimelineState,
   recordForgeProject,
 } from "@recordforge/contracts"
-import { collectCameraSources, resolveCameraSourceSize } from "./camera-sources"
+import { resolveCameraSourceSize } from "./camera-sources"
 
 function makeClip(overrides?: Partial<CameraClip>): CameraClip {
   return {
@@ -83,33 +82,5 @@ describe("resolveCameraSourceSize", () => {
     // streamIndex 0 + no webcam path = not treated as a camera stream
     const clip = makeClip({ streamIndex: 0 })
     expect(resolveCameraSourceSize(clip, emptyCtx)).toBeNull()
-  })
-})
-
-describe("collectCameraSources", () => {
-  it("maps resolvable camera clips and skips everything else", () => {
-    const timeline = {
-      tracks: [
-        {
-          id: "screen",
-          kind: "screen",
-          clips: [{ id: "screen-clip", kind: "screen" }],
-        },
-        {
-          id: "camera",
-          kind: "camera",
-          clips: [makeClip({ id: "cam-a" }), makeClip({ id: "cam-b", streamIndex: 0 })],
-        },
-      ],
-    } as unknown as TimelineState
-
-    const sources = collectCameraSources(timeline, {
-      ...emptyCtx,
-      metadata: {
-        streams: [{ index: 1, kind: "video", width: 1280, height: 720 }],
-      } as MediaMetadata,
-    })
-
-    expect(sources).toEqual({ "cam-a": { width: 1280, height: 720 } })
   })
 })

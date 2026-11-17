@@ -28,13 +28,16 @@ import type {
   TimelineClip,
   TimelineState,
 } from "@recordforge/domain"
-import type { CameraColor, FaceTrack } from "@recordforge/contracts"
+import type { Bounds, CameraColor, FaceTrack } from "@recordforge/contracts"
 import {
   applyCaptionContinuity,
   baseCameraLayoutPose,
+  cameraFramingIsDefault,
   buildFollowCursorMotionPlan,
   evaluateCameraLayoutWindow,
+  getCameraFrame,
   getOverlayContentEndMs,
+  resolveCameraFrame,
   resolveCameraLayoutWindows,
   resolveCameraShots,
   resolveCaptionLayout,
@@ -254,6 +257,40 @@ function cameraColorIsActive(color: CameraColor): boolean {
   )
 }
 
+/** Screen slot share of the side-by-side split — matches Rust's legacy slot. */
+const SIDE_BY_SIDE_SCREEN_RATIO = 0.76
+
+/** Rust YUV rule: round, then truncate to the next even integer, floor of 2. */
+function evenAtLeastTwo(value: number): number {
+  return Math.max(2, Math.floor(Math.round(value) / 2) * 2)
+}
+
+/**
+ * The static screen slot a side-by-side camera overlay reserves, in canvas px.
+ * Replicates Rust `video_screen_rect`'s side-by-side target box exactly —
+ * even-rounded target size, slot anchored at the content origin and
+ * vertically centred with an UNROUNDED origin (Rust keeps the half-pixel) —
+ * so a plan carrying `screen` produces bit-identical output to the legacy
+ * constant path.
+ */
+export function sideBySideScreenSlot(canvas: {
+  width: number
+  height: number
+  padding?: number
+}): Bounds {
+  const padding = canvas.padding ?? 0
+  const contentWidth = Math.max(1, canvas.width - padding * 2)
+  const contentHeight = Math.max(1, canvas.height - padding * 2)
+  const width = evenAtLeastTwo(contentWidth * SIDE_BY_SIDE_SCREEN_RATIO)
+  const height = evenAtLeastTwo((width / canvas.width) * canvas.height)
+  return {
+    x: padding,
+    y: padding + (contentHeight - height) / 2,
+    width,
+    height,
+  }
+}
+
 /**
  * The unified video-layer list (F3): the camera bubble and every b-roll /
  * media-track video clip, in track order. A muted track contributes nothing,
@@ -275,8 +312,6 @@ function toOverlays(
         const window = windowClip(clip, range)
         if (!window) continue
         const transform = clip.transform
-        const width = Math.min(Math.max(0, transform.width), canvas.width)
-        const height = Math.min(Math.max(0, transform.height), canvas.height)
         const asset = assetById.get(clip.assetId)
         const isStandaloneWebcam =
           asset?.role === "webcam" &&
@@ -285,6 +320,32 @@ function toOverlays(
           )
         const streamIndex = isStandaloneWebcam ? undefined : clip.streamIndex
         const ai = cameraAi?.[String(streamIndex ?? -1)]
+        // Camera source dims: the face track is measured on the camera stream;
+        // asset dims follow the `toSegments` convention. Unknown stays
+        // undefined so legacy crop handling is untouched.
+        const source =
+          ai?.faceTrack && ai.faceTrack.width > 0 && ai.faceTrack.height > 0
+            ? { width: ai.faceTrack.width, height: ai.faceTrack.height }
+            : asset?.width && asset.width > 0 && asset.height && asset.height > 0
+              ? { width: asset.width, height: asset.height }
+              : undefined
+        const frame = getCameraFrame(clip, canvas, source)
+        const resolved = resolveCameraFrame({ frame, canvas, source })
+        // A degenerate legacy transform (never placed) keeps its clamped
+        // zero rect rather than growing through the migration fractions.
+        const legacyRect =
+          !clip.frame && (transform.width <= 0 || transform.height <= 0)
+            ? (() => {
+                const w = Math.min(Math.max(0, transform.width), canvas.width)
+                const h = Math.min(Math.max(0, transform.height), canvas.height)
+                return {
+                  x: Math.min(Math.max(0, transform.x), Math.max(0, canvas.width - w)),
+                  y: Math.min(Math.max(0, transform.y), Math.max(0, canvas.height - h)),
+                  width: w,
+                  height: h,
+                }
+              })()
+            : null
         const color = clip.color
         const colorPlan =
           color && cameraColorIsActive(color)
@@ -347,10 +408,17 @@ function toOverlays(
           outputStartMs: window.outputStartMs,
           outputEndMs: window.outputEndMs,
           speed: clip.speed,
-          x: Math.min(Math.max(0, transform.x), Math.max(0, canvas.width - width)),
-          y: Math.min(Math.max(0, transform.y), Math.max(0, canvas.height - height)),
-          width,
-          height,
+          x: Math.round(legacyRect?.x ?? resolved.rect.x),
+          y: Math.round(legacyRect?.y ?? resolved.rect.y),
+          width: Math.round(legacyRect?.width ?? resolved.rect.width),
+          height: Math.round(legacyRect?.height ?? resolved.rect.height),
+          radius: resolved.radius,
+          mode: resolved.mode,
+          ...(resolved.mode === "split" ? { screen: sideBySideScreenSlot(canvas) } : {}),
+          // Face-tracked framing wins; frame-backed clips resolve their crop
+          // from framing (no crop for default framing — Rust `fit: cover` is
+          // identical) and never fall back to the stale pixel crop; legacy
+          // clips keep the stored pixel crop.
           crop: faceKeyframes?.[0]
             ? {
                 x: faceKeyframes[0].x,
@@ -358,21 +426,42 @@ function toOverlays(
                 width: faceKeyframes[0].width,
                 height: faceKeyframes[0].height,
               }
-            : transform.crop,
-          opacity: transform.opacity,
-          visible: transform.visible !== false,
-          shape: transform.shape,
-          borderWidth: transform.borderWidth,
-          borderColor: transform.borderColor,
-          borderOpacity: transform.borderOpacity,
-          borderStyle: transform.borderStyle,
-          borderGradient: transform.borderGradient,
-          shadowEnabled: transform.shadowEnabled,
-          shadowColor: transform.shadowColor,
-          shadowBlur: transform.shadowBlur,
-          shadowOffsetX: transform.shadowOffsetX,
-          shadowOffsetY: transform.shadowOffsetY,
-          preset: transform.preset,
+            : clip.frame
+              ? source && !cameraFramingIsDefault(clip.frame.framing)
+                ? resolved.crop
+                : undefined
+              : transform.crop,
+          opacity: resolved.opacity,
+          visible: resolved.visible,
+          shape: resolved.shape,
+          // Legacy clips keep absent style fields absent so Rust defaults
+          // still apply; frame-backed clips emit the resolved px style.
+          ...(clip.frame
+            ? {
+                borderWidth: resolved.style.borderWidth,
+                borderColor: resolved.style.borderColor,
+                borderOpacity: resolved.style.borderOpacity,
+                borderStyle: resolved.style.borderStyle,
+                borderGradient: resolved.style.borderGradient,
+                shadowEnabled: resolved.style.shadowEnabled,
+                shadowColor: resolved.style.shadowColor,
+                shadowBlur: resolved.style.shadowBlur,
+                shadowOffsetX: resolved.style.shadowOffsetX,
+                shadowOffsetY: resolved.style.shadowOffsetY,
+              }
+            : {
+                borderWidth: transform.borderWidth,
+                borderColor: transform.borderColor,
+                borderOpacity: transform.borderOpacity,
+                borderStyle: transform.borderStyle,
+                borderGradient: transform.borderGradient,
+                shadowEnabled: transform.shadowEnabled,
+                shadowColor: transform.shadowColor,
+                shadowBlur: transform.shadowBlur,
+                shadowOffsetX: transform.shadowOffsetX,
+                shadowOffsetY: transform.shadowOffsetY,
+              }),
+          preset: frame.preset ?? transform.preset,
           ...(colorPlan ? { color: colorPlan } : {}),
           ...(cutout ? { cutout } : {}),
           ...(faceKeyframes ? { cropKeyframes: faceKeyframes } : {}),

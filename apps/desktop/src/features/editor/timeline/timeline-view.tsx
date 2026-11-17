@@ -71,6 +71,8 @@ import {
   sourceToTimelineForTrack,
   canvasShadowStyle,
   computeBackgroundImageLayerStyle,
+  getCameraFrame,
+  resolveCameraFrame,
 } from "@recordforge/editor-core"
 import {
   findCursorEventAtTime,
@@ -119,6 +121,13 @@ import { getPlayheadSnapshot, subscribeToPlayhead } from "./use-playback-state"
 import { ResizableHandle } from "../shell/resizable-handle"
 import { useResizableDimension } from "../shell/use-resizable-dimension"
 import { VideoCanvasControls } from "../canvas/video-canvas-controls"
+import {
+  contentRect,
+  fitScreenDefault,
+  fitScreenInSlot,
+  sameScreenSlot,
+  type ScreenSlotRect,
+} from "../canvas/screen-slot-bounds"
 import { CanvasToolbarOverlay } from "../canvas/canvas-toolbar-overlay"
 
 interface TimelineViewProps {
@@ -637,8 +646,9 @@ export function TimelineView({
 
   // Whether the playhead sits inside a side-by-side camera clip — tracked in a
   // ref and recomputed via an imperative playhead subscription so playback
-  // ticks don't re-render the view just to flip a boolean.
-  const sideBySideRef = useRef(false)
+  // Resolved camera screen slot (clip-level split or a layout-lane side-by-side
+  // window). The ref keeps per-tick slot resolution out of React state.
+  const screenSlotRef = useRef<ScreenSlotRect | null>(null)
 
   const updateVideoBounds = useCallback(() => {
     const canvas = canvasRef.current
@@ -662,68 +672,31 @@ export function TimelineView({
 
     const canvasScale = canvasWidth / width
 
-    if (sideBySideRef.current) {
-      const usableWidth = width - padding * 2
-      const usableHeight = height - padding * 2
-      const targetScreenWidth = Math.round(usableWidth * 0.76)
-      const targetScreenHeight = Math.round((targetScreenWidth / width) * height)
-      const sourceWidth = video && video.videoWidth > 0 ? video.videoWidth : width
-      const sourceHeight = video && video.videoHeight > 0 ? video.videoHeight : height
-      const screenScale = Math.min(
-        (targetScreenWidth * canvasScale) / sourceWidth,
-        (targetScreenHeight * canvasScale) / sourceHeight,
-      )
-      const screenWidth = sourceWidth * screenScale
-      const screenHeight = sourceHeight * screenScale
-      const screenLeft = padding * canvasScale + (targetScreenWidth * canvasScale - screenWidth) / 2
-      const positionY =
-        timeline?.canvas.aspectRatio === "16:9" ? 0.5 : (timeline?.canvas.videoPositionY ?? 0.5)
-      const screenTop =
-        (padding + (usableHeight - targetScreenHeight) / 2) * canvasScale +
-        (targetScreenHeight * canvasScale - screenHeight) * positionY
-
-      const nextBounds = {
-        left: screenLeft,
-        top: screenTop,
-        width: screenWidth,
-        height: screenHeight,
-        scale: canvasScale * (targetScreenWidth / width),
-      }
-      setVideoBounds((previous) => {
-        if (
-          previous &&
-          previous.left === nextBounds.left &&
-          previous.top === nextBounds.top &&
-          previous.width === nextBounds.width &&
-          previous.height === nextBounds.height &&
-          previous.scale === nextBounds.scale
-        ) {
-          return previous
-        }
-        return nextBounds
-      })
-      return
-    }
-
-    const maxScreenWidth = Math.max(1, (width - padding * 2) * canvasScale)
-    const maxScreenHeight = Math.max(1, (height - padding * 2) * canvasScale)
     const sourceWidth = video && video.videoWidth > 0 ? video.videoWidth : width
     const sourceHeight = video && video.videoHeight > 0 ? video.videoHeight : height
-    const screenScale = Math.min(maxScreenWidth / sourceWidth, maxScreenHeight / sourceHeight)
-    const screenWidth = sourceWidth * screenScale
-    const screenHeight = sourceHeight * screenScale
-
     const positionY =
       timeline?.canvas.aspectRatio === "16:9" ? 0.5 : (timeline?.canvas.videoPositionY ?? 0.5)
-    const screenTop = padding * canvasScale + (maxScreenHeight - screenHeight) * positionY
 
-    const nextBounds = {
-      left: (canvasRect.width - screenWidth) / 2,
-      top: screenTop,
-      width: screenWidth,
-      height: screenHeight,
-      scale: canvasScale,
-    }
+    const slot = screenSlotRef.current
+    const nextBounds = slot
+      ? // Split or layout-lane screen slot — same fit the export applies inside
+        // the resolver's slot rect.
+        fitScreenInSlot({
+          slot,
+          canvasWidth: width,
+          sourceWidth,
+          sourceHeight,
+          canvasScale,
+          positionY,
+        })
+      : fitScreenDefault({
+          canvas: { width, height, padding },
+          sourceWidth,
+          sourceHeight,
+          canvasScale,
+          canvasCssWidth: canvasRect.width,
+          positionY,
+        })
     setVideoBounds((previous) => {
       if (
         previous &&
@@ -745,27 +718,43 @@ export function TimelineView({
     timeline?.canvas.videoPositionY,
   ])
 
-  // When the playhead crosses a side-by-side boundary the screen rect changes,
-  // so videoBounds must be recomputed outside the render path.
+  // When the playhead crosses a camera split boundary or a layout-lane window
+  // moves the screen slot, videoBounds must be recomputed outside the render
+  // path. The slot comes from the same resolver the render plan uses; it is
+  // null whenever the resolved screen equals the default content rect.
   useEffect(() => {
-    const computeSideBySide = (timeMs: number) =>
-      cameraClips.some(
-        (clip) =>
-          clip.transform.preset === "side-by-side" &&
-          clip.transform.visible !== false &&
-          timeMs >= clip.startMs &&
-          timeMs < clip.startMs + clip.durationMs,
+    const computeScreenSlot = (timeMs: number): ScreenSlotRect | null => {
+      const canvas = timeline?.canvas
+      if (!canvas) return null
+      const clip = cameraClips.find(
+        (c) =>
+          c.transform.visible !== false && timeMs >= c.startMs && timeMs < c.startMs + c.durationMs,
       )
+      if (!clip) return null
+      const frameCanvas = {
+        width: canvas.width,
+        height: canvas.height,
+        padding: canvas.padding,
+        aspectRatio: canvas.aspectRatio,
+      }
+      const resolved = resolveCameraFrame({
+        frame: getCameraFrame(clip, frameCanvas),
+        canvas: frameCanvas,
+        segments: timeline.cameraLayouts,
+        timeMs,
+      })
+      return sameScreenSlot(resolved.screen, contentRect(frameCanvas)) ? null : resolved.screen
+    }
     const refreshIfChanged = () => {
-      const next = computeSideBySide(getPlayheadSnapshot())
-      if (next !== sideBySideRef.current) {
-        sideBySideRef.current = next
+      const next = computeScreenSlot(getPlayheadSnapshot())
+      if (!sameScreenSlot(next, screenSlotRef.current)) {
+        screenSlotRef.current = next
         updateVideoBounds()
       }
     }
     refreshIfChanged()
     return subscribeToPlayhead(refreshIfChanged)
-  }, [cameraClips, updateVideoBounds])
+  }, [cameraClips, timeline?.canvas, timeline?.cameraLayouts, updateVideoBounds])
 
   const canvasStyle = useMemo<React.CSSProperties>(() => {
     if (!timeline) return {}
@@ -2385,6 +2374,7 @@ export function TimelineView({
                   canvasWidth={timeline.canvas.width}
                   canvasHeight={timeline.canvas.height}
                   canvasPadding={timeline.canvas.padding}
+                  canvasAspectRatio={timeline.canvas.aspectRatio}
                   cameraLayouts={timeline.cameraLayouts}
                   assetUrls={overlayAssetUrls}
                   previewScale={videoBounds?.scale ?? 1}
@@ -2394,8 +2384,11 @@ export function TimelineView({
                   onSelectClip={(clipId) =>
                     setSelection({ kind: "clip", primaryClipId: clipId, clipIds: [clipId] })
                   }
-                  onUpdateTransform={(clipId, transform, options) =>
-                    interaction.updateClipTransform(clipId, transform, options)
+                  onUpdateFrame={(clipId, patch, options) =>
+                    interaction.updateCameraFrame(clipId, patch, options)
+                  }
+                  onUpdateCameraLayout={(segmentId, update) =>
+                    execute(createUpdateCameraLayoutCommand(segmentId, update))
                   }
                 />
               ) : null}
