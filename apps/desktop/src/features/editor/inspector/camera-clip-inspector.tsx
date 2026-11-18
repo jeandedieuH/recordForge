@@ -269,6 +269,16 @@ export function CameraClipInspector({
   const savePreferences = useRecorderStore((state) => state.savePreferences)
   const { toast } = useToast()
 
+  // `aiStatus.ready` only means "runtime + at least one model", so it cannot
+  // gate feature buttons: a matte-only setup must still surface the face
+  // detector download. Gate each action on its own model instead.
+  const missingModels = aiStatus?.models.filter((model) => !model.downloaded) ?? []
+  const modelDownloaded = (id: string) =>
+    aiStatus?.runtimeReady === true &&
+    aiStatus.models.some((model) => model.id === id && model.downloaded)
+  const matteModelReady = modelDownloaded("camera-matte")
+  const faceModelReady = modelDownloaded("face-detect")
+
   function nudgeOffset(deltaMs: number) {
     const nextStartMs = Math.max(0, clip.startMs + deltaMs)
     interaction.moveClip(clip, track, nextStartMs, { phase: "commit" })
@@ -496,7 +506,7 @@ export function CameraClipInspector({
           {aiStatus ? (
             <p className="text-[11px] leading-relaxed text-subtle-foreground">
               {aiStatus.supported
-                ? aiStatus.ready
+                ? aiStatus.runtimeReady && missingModels.length === 0
                   ? "Runtime ready. AI runs offline and never during export."
                   : "Download the runtime and models once; inference runs locally."
                 : (aiStatus.reason ?? "Camera AI is not available on this platform.")}
@@ -504,7 +514,7 @@ export function CameraClipInspector({
           ) : (
             <p className="text-[11px] text-subtle-foreground">Checking camera AI status…</p>
           )}
-          {aiStatus?.supported && !aiStatus.ready ? (
+          {aiStatus?.supported && (!aiStatus.runtimeReady || missingModels.length > 0) ? (
             <Button
               variant="secondary"
               size="sm"
@@ -512,7 +522,9 @@ export function CameraClipInspector({
               onClick={() => void handleDownloadModels()}
               className="w-full"
             >
-              Download camera AI ({aiStatus.models.filter((m) => !m.downloaded).length} models)
+              {missingModels.length > 0
+                ? `Download camera AI (${missingModels.length} model${missingModels.length === 1 ? "" : "s"})`
+                : "Download camera AI runtime"}
             </Button>
           ) : null}
           {aiBusy && aiProgress ? (
@@ -559,7 +571,7 @@ export function CameraClipInspector({
                   <Button
                     variant="secondary"
                     size="sm"
-                    disabled={aiBusy || !aiStatus?.ready || !proEnabled}
+                    disabled={aiBusy || !matteModelReady || !proEnabled}
                     onClick={() => void handleAnalyze({ matte: true, faceTrack: false })}
                   >
                     Generate matte for this clip
@@ -666,7 +678,7 @@ export function CameraClipInspector({
                   <Button
                     variant="secondary"
                     size="sm"
-                    disabled={aiBusy || !aiStatus?.ready || !proEnabled}
+                    disabled={aiBusy || !faceModelReady || !proEnabled}
                     onClick={() => void handleAnalyze({ matte: false, faceTrack: true })}
                   >
                     Track face for this clip

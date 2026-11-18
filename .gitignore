@@ -44,6 +44,9 @@ Thumbs.db
 # Test
 coverage
 
+# Benchmark/render outputs (tooling/benchmarks)
+out/
+
 # Env
 .env
 .env.local

@@ -1541,7 +1541,11 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
         : [],
     )
     const cameraAi = currentProject?.recordingId
-      ? await loadCameraAiArtifactsForExport(currentProject.recordingId, cameraClips)
+      ? await loadCameraAiArtifactsForExport(
+          currentProject.recordingId,
+          cameraClips,
+          currentProject.assets,
+        )
       : undefined
 
     const plan = buildRenderPlan({

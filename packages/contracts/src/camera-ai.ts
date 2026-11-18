@@ -80,6 +80,20 @@ export type CameraAiSetupProgress = z.infer<typeof cameraAiSetupProgressSchema>
 
 export const CAMERA_AI_SETUP_EVENT = "camera-ai-setup"
 
+/**
+ * Whether an asset path points at a standalone webcam sidecar file rather than
+ * a stream inside the recording's primary output. The capture pipeline writes
+ * `webcam.mp4` next to `output.mp4` (and `trim_<id>_webcam.mp4` for trimmed
+ * recordings); an embedded camera stream shares the output file's path
+ * instead. Absolute paths always contain a drive/URI separator and never
+ * match.
+ */
+export function isStandaloneWebcamAssetPath(assetPath: string | null | undefined): boolean {
+  if (!assetPath || assetPath.includes(":")) return false
+  const name = assetPath.replace(/\\/g, "/").split("/").pop()?.toLowerCase()
+  return name === "webcam.mp4" || (name?.endsWith("_webcam.mp4") ?? false)
+}
+
 // Face track write format (`camera-face-<stream>.json`). Boxes are in camera
 // source pixels at the recording's container time. `score` is YuNet's
 // cls·obj confidence in 0…1.

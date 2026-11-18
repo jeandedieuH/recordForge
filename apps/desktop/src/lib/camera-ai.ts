@@ -8,6 +8,7 @@ import {
   cameraAiSetupProgressSchema,
   cameraAiStatusSchema,
   faceTrackSchema,
+  isStandaloneWebcamAssetPath,
   type CameraAiArtifacts,
   type CameraAiJobRequest,
   type CameraAiJobResult,
@@ -15,6 +16,7 @@ import {
   type CameraAiSetupProgress,
   type CameraAiStatus,
   type FaceTrack,
+  type ProjectAsset,
 } from "@recordforge/contracts"
 import { invokeValidated } from "./ipc"
 import type { CameraClip } from "@recordforge/contracts"
@@ -123,15 +125,23 @@ export interface CameraAiExportArtifacts {
  * Load every camera clip's completed derivatives for the render plan. Keys are
  * the render plan's stream keys (`"<index>"`, or `"-1"` for a standalone
  * webcam asset). Missing files simply produce an entry without that artifact.
+ *
+ * A standalone webcam carries a synthetic project stream index that names its
+ * derivative directory, but the render plan looks the asset up under `"-1"` —
+ * so the artifact fetch keeps `clip.streamIndex` while the result key follows
+ * the plan's convention.
  */
 export async function loadCameraAiArtifactsForExport(
   recordingId: string,
   cameraClips: CameraClip[],
+  assets?: ProjectAsset[],
 ): Promise<Record<string, CameraAiExportArtifacts>> {
+  const assetById = new Map((assets ?? []).map((asset) => [asset.id, asset]))
   const keys = new Map<string, number | undefined>()
   for (const clip of cameraClips) {
-    const stream = clip.streamIndex
-    keys.set(String(stream ?? -1), stream)
+    const asset = assetById.get(clip.assetId)
+    const standalone = asset?.role === "webcam" && isStandaloneWebcamAssetPath(asset.path)
+    keys.set(standalone ? "-1" : String(clip.streamIndex ?? -1), clip.streamIndex)
   }
   const result: Record<string, CameraAiExportArtifacts> = {}
   for (const [key, streamIndex] of keys) {

@@ -41,7 +41,13 @@ pub fn camera_ai_cancelled() -> AppError {
 pub struct CameraAiOptions {
     pub ffmpeg_path: PathBuf,
     pub source_path: PathBuf,
+    /// Project-level stream index — names the derivative directory and is
+    /// recorded in the face-track file. Standalone webcam assets carry a
+    /// synthetic index that does not exist inside the file.
     pub stream_index: i32,
+    /// The stream FFmpeg `-map`s for decoding. Differs from `stream_index`
+    /// for standalone webcams (probed index of the file's real video stream).
+    pub decode_stream_index: i32,
     pub source_width: u32,
     pub source_height: u32,
     pub fps: f64,
@@ -155,6 +161,7 @@ pub fn run(
         .stdout
         .take()
         .ok_or_else(|| InternalError::Media("camera AI decoder produced no stdout".into()))?;
+    let decoder_stderr = decoder.stderr.take().map(drain_stderr);
     let mut encoder = if need_matte {
         Some(spawn_matte_encoder(
             &options.ffmpeg_path,
@@ -166,6 +173,10 @@ pub fn run(
     } else {
         None
     };
+    let encoder_stderr = encoder
+        .as_mut()
+        .and_then(|proc| proc.stderr.take())
+        .map(drain_stderr);
 
     let frame_bytes = (width * height * 3) as usize;
     let mut frame = vec![0u8; frame_bytes];
@@ -250,12 +261,12 @@ pub fn run(
     if !decode_status.success() {
         let _ = std::fs::remove_file(&matte_out);
         let _ = std::fs::remove_file(&matte_partial);
-        return Err(InternalError::Media("camera AI decode failed".into()).into());
+        return Err(child_error("camera AI decode failed", decoder_stderr));
     }
     if encode_status.is_some_and(|status| !status.success()) {
         let _ = std::fs::remove_file(&matte_out);
         let _ = std::fs::remove_file(&matte_partial);
-        return Err(InternalError::Media("camera matte encode failed".into()).into());
+        return Err(child_error("camera matte encode failed", encoder_stderr));
     }
     if need_matte {
         finish_matte_encode(&matte_partial, &matte_out)?;
@@ -288,6 +299,60 @@ fn kill_children(decoder: &mut std::process::Child, encoder: Option<&mut std::pr
     }
 }
 
+/// Pump a child's stderr on a reader thread so it never blocks on a full
+/// pipe; the captured tail is attached to the failure error (FFmpeg's useful
+/// line is always the last one).
+fn drain_stderr(pipe: std::process::ChildStderr) -> std::thread::JoinHandle<String> {
+    std::thread::spawn(move || {
+        let mut buf = String::new();
+        let _ = pipe.take(64 * 1024).read_to_string(&mut buf);
+        buf.trim()
+            .lines()
+            .rev()
+            .take(6)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join(" | ")
+    })
+}
+
+fn child_error(
+    message: &str,
+    stderr: Option<std::thread::JoinHandle<String>>,
+) -> crate::errors::AppError {
+    let detail = stderr
+        .and_then(|handle| handle.join().ok())
+        .filter(|text| !text.is_empty());
+    InternalError::Media(match detail {
+        Some(detail) => format!("{message}: {detail}"),
+        None => message.to_string(),
+    })
+    .into()
+}
+
+fn decoder_args(options: &CameraAiOptions, width: u32, height: u32, fps: f64) -> Vec<String> {
+    vec![
+        "-hide_banner".into(),
+        "-loglevel".into(),
+        "error".into(),
+        "-nostdin".into(),
+        "-i".into(),
+        options.source_path.to_string_lossy().to_string(),
+        "-map".into(),
+        format!("0:{}", options.decode_stream_index),
+        "-an".into(),
+        "-sn".into(),
+        "-dn".into(),
+        "-vf".into(),
+        format!("fps={fps:.6},scale={width}:{height}:flags=bilinear,format=rgb24"),
+        "-f".into(),
+        "rawvideo".into(),
+        "pipe:1".into(),
+    ]
+}
+
 fn spawn_decoder(
     options: &CameraAiOptions,
     width: u32,
@@ -296,24 +361,10 @@ fn spawn_decoder(
 ) -> Result<std::process::Child> {
     let mut command = crate::process::create_command(&options.ffmpeg_path);
     command
-        .arg("-hide_banner")
-        .arg("-loglevel")
-        .arg("error")
-        .arg("-nostdin")
-        .arg("-i")
-        .arg(&options.source_path)
-        .arg("-map")
-        .arg(format!("0:{}", options.stream_index))
-        .args(["-an", "-sn", "-dn"])
-        .arg("-vf")
-        .arg(format!(
-            "fps={:.6},scale={width}:{height}:flags=bilinear,format=rgb24",
-            fps
-        ))
-        .args(["-f", "rawvideo", "pipe:1"])
+        .args(decoder_args(options, width, height, fps))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .stderr(Stdio::piped());
     command
         .spawn()
         .map_err(|error| InternalError::Media(format!("start camera AI decoder: {error}")).into())
@@ -353,7 +404,7 @@ fn spawn_matte_encoder(
         .arg(&partial)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(Stdio::piped());
     let child = command
         .spawn()
         .map_err(|error| InternalError::Media(format!("start camera matte encoder: {error}")))?;
@@ -448,5 +499,29 @@ mod tests {
         assert!(face_track_path(work, 2)
             .to_string_lossy()
             .ends_with("face_track.json"));
+    }
+
+    #[test]
+    fn decoder_maps_decode_stream_index_not_synthetic() {
+        // Standalone webcam assets carry a synthetic project stream index
+        // (derivative naming) that does not exist inside webcam.mp4; FFmpeg
+        // must map the probed file index or decode fails outright.
+        let options = CameraAiOptions {
+            ffmpeg_path: PathBuf::from("ffmpeg"),
+            source_path: PathBuf::from("webcam.mp4"),
+            stream_index: 3,
+            decode_stream_index: 0,
+            source_width: 1280,
+            source_height: 720,
+            fps: 30.0,
+            duration_ms: 1000,
+            work_dir: PathBuf::from("work"),
+            matte: true,
+            face_track: false,
+            force: false,
+        };
+        let args = decoder_args(&options, 640, 360, 30.0);
+        let map_at = args.iter().position(|arg| arg == "-map").unwrap();
+        assert_eq!(args[map_at + 1], "0:0");
     }
 }

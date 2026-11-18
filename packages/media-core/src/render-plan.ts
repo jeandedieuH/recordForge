@@ -29,6 +29,7 @@ import type {
   TimelineState,
 } from "@recordforge/domain"
 import type { Bounds, CameraColor, FaceTrack } from "@recordforge/contracts"
+import { isStandaloneWebcamAssetPath } from "@recordforge/contracts"
 import {
   applyCaptionContinuity,
   baseCameraLayoutPose,
@@ -316,10 +317,7 @@ function toOverlays(
         const transform = clip.transform
         const asset = assetById.get(clip.assetId)
         const isStandaloneWebcam =
-          asset?.role === "webcam" &&
-          Boolean(
-            asset.path && !asset.path.includes(":") && asset.path.toLowerCase().endsWith(".mp4"),
-          )
+          asset?.role === "webcam" && isStandaloneWebcamAssetPath(asset.path)
         const streamIndex = isStandaloneWebcam ? undefined : clip.streamIndex
         const ai = cameraAi?.[String(streamIndex ?? -1)]
         // Camera source dims: the face track is measured on the camera stream;

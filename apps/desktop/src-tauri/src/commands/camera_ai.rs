@@ -374,7 +374,7 @@ pub async fn analyze_camera_ai(
         return Err(InternalError::Media("Download the face detector model first".into()).into());
     }
 
-    let (source_path, work_dir, stream_index, stream, standalone_meta) =
+    let (source_path, work_dir, stream_index, stream, standalone, standalone_meta) =
         {
             let db = state
                 .db
@@ -389,9 +389,17 @@ pub async fn analyze_camera_ai(
                 .assets
                 .iter()
                 .find(|asset| asset.id == request.asset_id);
+            // Standalone webcam assets are sidecar files next to the output —
+            // `webcam.mp4`, or `trim_<id>_webcam.mp4` on trimmed recordings —
+            // while an embedded camera stream shares the output's path. Keep
+            // this in sync with `isStandaloneWebcamAssetPath` in contracts.
             let standalone = asset.filter(|asset| {
                 asset.role == crate::projects::ProjectAssetRole::Webcam
-                    && asset.path.to_lowercase().ends_with(".mp4")
+                    && Path::new(&asset.path)
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .map(|name| name.to_ascii_lowercase())
+                        .is_some_and(|name| name == "webcam.mp4" || name.ends_with("_webcam.mp4"))
                     && !asset.path.contains(':')
             });
             let metadata = crate::database::media::get_metadata(&db, &request.recording_id)?;
@@ -406,13 +414,10 @@ pub async fn analyze_camera_ai(
                 })
                 .unwrap_or_default();
             let (stream_index, stream) = if standalone.is_some() {
-                let index = request.stream_index.unwrap_or(0);
-                let stream = video_streams
-                    .iter()
-                    .find(|stream| stream.index == index)
-                    .copied()
-                    .cloned();
-                (index, stream)
+                // The standalone webcam's project stream index is synthetic —
+                // it does not exist inside the file. The decoder maps the
+                // probed index below; `stream_index` only names derivatives.
+                (request.stream_index.unwrap_or(0), None)
             } else {
                 if video_streams.is_empty() {
                     return Err(InternalError::Media("recording has no video stream".into()).into());
@@ -440,31 +445,74 @@ pub async fn analyze_camera_ai(
                 };
             let standalone_meta =
                 standalone.map(|asset| (asset.width, asset.height, asset.fps, asset.duration_ms));
-            (source_path, work_dir, stream_index, stream, standalone_meta)
+            (
+                source_path,
+                work_dir,
+                stream_index,
+                stream,
+                standalone.cloned(),
+                standalone_meta,
+            )
         };
 
-    let fps = standalone_meta
+    // Standalone webcam assets carry a synthetic project stream index and no
+    // reliable geometry in the project file; probe the file itself for the
+    // stream to decode plus the camera's real dimensions and frame rate.
+    let standalone_stream = if standalone.is_some() {
+        let probed = crate::media::probe::probe_media(
+            &state.ffprobe_path.to_string_lossy(),
+            &source_path,
+            &request.recording_id,
+        )?;
+        probed
+            .streams
+            .into_iter()
+            .find(|stream| stream.kind == "video")
+    } else {
+        None
+    };
+    let decode_stream_index = match &standalone_stream {
+        Some(stream) => stream.index,
+        None => {
+            if standalone.is_some() {
+                return Err(
+                    InternalError::Media("standalone webcam has no video stream".into()).into(),
+                );
+            }
+            stream_index
+        }
+    };
+
+    let fps = standalone_stream
         .as_ref()
-        .and_then(|meta| meta.2)
+        .and_then(|stream| stream.fps)
+        .or_else(|| standalone_meta.as_ref().and_then(|meta| meta.2))
         .or_else(|| stream.as_ref().and_then(|stream| stream.fps))
         .filter(|fps| *fps > 0.0)
         .unwrap_or(30.0);
-    let width = standalone_meta
+    let width = standalone_stream
         .as_ref()
-        .and_then(|meta| meta.0)
+        .and_then(|stream| stream.width)
+        .or_else(|| standalone_meta.as_ref().and_then(|meta| meta.0))
         .or_else(|| stream.as_ref().and_then(|stream| stream.width))
         .unwrap_or(1280)
         .max(2) as u32;
-    let height = standalone_meta
+    let height = standalone_stream
         .as_ref()
-        .and_then(|meta| meta.1)
+        .and_then(|stream| stream.height)
+        .or_else(|| standalone_meta.as_ref().and_then(|meta| meta.1))
         .or_else(|| stream.as_ref().and_then(|stream| stream.height))
         .unwrap_or(720)
         .max(2) as u32;
-    let duration_ms = standalone_meta
+    let duration_ms = standalone_stream
         .as_ref()
-        .map(|meta| meta.3)
-        .filter(|duration| *duration > 0)
+        .and_then(|stream| stream.duration_ms)
+        .or_else(|| {
+            standalone_meta
+                .as_ref()
+                .map(|meta| meta.3)
+                .filter(|d| *d > 0)
+        })
         .or_else(|| stream.as_ref().and_then(|stream| stream.duration_ms))
         .unwrap_or(0);
 
@@ -476,6 +524,7 @@ pub async fn analyze_camera_ai(
         ffmpeg_path: state.ffmpeg_path.clone(),
         source_path,
         stream_index,
+        decode_stream_index,
         source_width: width,
         source_height: height,
         fps,

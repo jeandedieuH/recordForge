@@ -1902,6 +1902,169 @@ describe("render-plan", () => {
     expect(plan.value.overlays[0].streamIndex).toBeUndefined()
   })
 
+  it("resolves standalone webcam camera-AI artifacts under the -1 key", () => {
+    const state = makeTimeline()
+    state.tracks.push({
+      id: "camera-track",
+      kind: "camera",
+      name: "Camera",
+      muted: false,
+      locked: false,
+      solo: false,
+      volume: 1,
+      clips: [
+        {
+          id: "webcam-clip",
+          kind: "camera",
+          assetId: "rec-1:webcam:3",
+          // Synthetic project index: webcam.mp4 only contains stream 0.
+          streamIndex: 3,
+          startMs: 0,
+          durationMs: 20_000,
+          sourceInMs: 0,
+          sourceOutMs: 20_000,
+          speed: 1,
+          transform: {
+            x: 100,
+            y: 100,
+            width: 320,
+            height: 240,
+            opacity: 1,
+            shape: "rectangle",
+            visible: true,
+            borderWidth: 0,
+            shadowEnabled: false,
+          },
+          cutout: {
+            enabled: true,
+            background: "blur",
+            blurRadius: 18,
+            color: "#0f172a",
+            edgeSoftness: 2,
+            edgeShrink: 0,
+          },
+        },
+      ],
+    })
+
+    const assets: ProjectAsset[] = [
+      {
+        id: "rec-1",
+        role: "screen",
+        path: "output.mp4",
+        status: "available",
+        derivativeVersion: 1,
+        durationMs: 60_000,
+        hasAudio: true,
+      },
+      {
+        id: "rec-1:webcam:3",
+        role: "webcam",
+        path: "webcam.mp4",
+        status: "available",
+        derivativeVersion: 1,
+        durationMs: 60_000,
+        hasAudio: false,
+        streamIndex: 3,
+      },
+    ]
+
+    // loadCameraAiArtifactsForExport stores standalone webcam artifacts under
+    // "-1" while the derivative directory keeps the synthetic stream index.
+    const mattePath = "/work/derivatives/camera_ai/stream_003/matte.mp4"
+    const plan = buildRenderPlan({
+      state,
+      projectId: "project-webcam-ai",
+      assets,
+      cameraAi: { "-1": { mattePath } },
+    })
+    expect(plan.ok).toBe(true)
+    if (!plan.ok) return
+    expect(plan.value.overlays[0].streamIndex).toBeUndefined()
+    expect(plan.value.overlays[0].cutout?.mattePath).toBe(mattePath)
+  })
+
+  it("keeps the real stream index for webcam-role assets inside the output", () => {
+    const state = makeTimeline()
+    state.tracks.push({
+      id: "camera-track",
+      kind: "camera",
+      name: "Camera",
+      muted: false,
+      locked: false,
+      solo: false,
+      volume: 1,
+      clips: [
+        {
+          id: "camera-clip",
+          kind: "camera",
+          assetId: "rec-1:webcam:1",
+          streamIndex: 1,
+          startMs: 0,
+          durationMs: 20_000,
+          sourceInMs: 0,
+          sourceOutMs: 20_000,
+          speed: 1,
+          transform: {
+            x: 100,
+            y: 100,
+            width: 320,
+            height: 240,
+            opacity: 1,
+            shape: "rectangle",
+            visible: true,
+            borderWidth: 0,
+            shadowEnabled: false,
+          },
+          cutout: {
+            enabled: true,
+            background: "blur",
+            blurRadius: 18,
+            color: "#0f172a",
+            edgeSoftness: 2,
+            edgeShrink: 0,
+          },
+        },
+      ],
+    })
+
+    const assets: ProjectAsset[] = [
+      {
+        id: "rec-1",
+        role: "screen",
+        path: "output.mp4",
+        status: "available",
+        derivativeVersion: 1,
+        durationMs: 60_000,
+        hasAudio: true,
+      },
+      {
+        id: "rec-1:webcam:1",
+        role: "webcam",
+        // Embedded camera stream shares the primary output's path — a loose
+        // ".mp4" check would wrongly treat it as a standalone webcam file.
+        path: "output.mp4",
+        status: "available",
+        derivativeVersion: 1,
+        durationMs: 60_000,
+        hasAudio: false,
+        streamIndex: 1,
+      },
+    ]
+
+    const mattePath = "/work/derivatives/camera_ai/stream_001/matte.mp4"
+    const plan = buildRenderPlan({
+      state,
+      projectId: "project-embedded-ai",
+      assets,
+      cameraAi: { "1": { mattePath }, "-1": { mattePath: "/wrong/matte.mp4" } },
+    })
+    expect(plan.ok).toBe(true)
+    if (!plan.ok) return
+    expect(plan.value.overlays[0].streamIndex).toBe(1)
+    expect(plan.value.overlays[0].cutout?.mattePath).toBe(mattePath)
+  })
+
   it("builds a valid render plan with GIF export settings", () => {
     const state = makeTimeline()
     const plan = buildRenderPlan({
