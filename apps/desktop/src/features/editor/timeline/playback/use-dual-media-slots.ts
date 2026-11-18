@@ -108,6 +108,38 @@ function slotHoldsSegment(
   return Math.abs(element.currentTime * 1000 - segment.sourceInMs) <= frameMs
 }
 
+/**
+ * Pull a follower element (e.g. the camera-AI matte video) onto a leader
+ * element's clock. Both dual-slot pairs track the playhead independently with
+ * a ±2-frame drift budget each, so the pair could sit several frames apart —
+ * visible as the cutout lagging a moving person. Offsets past half a frame
+ * hard-seek; smaller ones ride a ±2% playback-rate nudge until they converge.
+ */
+export function lockMediaToLeader(
+  element: HTMLMediaElement,
+  leader: HTMLMediaElement | null,
+  frameMs: number,
+): void {
+  if (!leader || leader.readyState < 1 || leader === element) return
+  const frameS = Math.max(1, frameMs) / 1000
+  const relDriftS = element.currentTime - leader.currentTime
+  if (Math.abs(relDriftS) > frameS * 0.5) {
+    try {
+      element.currentTime = leader.currentTime
+    } catch {
+      // Metadata not loaded yet; the next tick retries.
+    }
+    return
+  }
+  const rate =
+    Math.abs(relDriftS) > 0.004
+      ? leader.playbackRate * (relDriftS > 0 ? 0.98 : 1.02)
+      : leader.playbackRate
+  if (Math.abs(element.playbackRate - rate) > 0.001) {
+    element.playbackRate = Math.max(0.25, Math.min(4, rate))
+  }
+}
+
 export interface DualMediaSlotOptions {
   segments: PreviewSegment[]
   playheadMs: number

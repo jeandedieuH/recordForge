@@ -461,6 +461,11 @@ function toOverlays(
                 shadowOffsetX: transform.shadowOffsetX,
                 shadowOffsetY: transform.shadowOffsetY,
               }),
+          // Portrait cutout drops the bubble chrome: a ring or drop shadow
+          // around the invisible rectangle breaks the effect once the
+          // background is alpha'd out. The clip's own style is untouched, so
+          // disabling the cutout brings the chrome back.
+          ...(cutout ? { borderWidth: 0, shadowEnabled: false } : {}),
           preset: frame.preset ?? transform.preset,
           ...(colorPlan ? { color: colorPlan } : {}),
           ...(cutout ? { cutout } : {}),

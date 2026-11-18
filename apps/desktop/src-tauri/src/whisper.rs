@@ -321,6 +321,20 @@ pub fn delete_model(app_data_dir: &Path, model_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Shared client for engine/model downloads. A `User-Agent` matters:
+/// `media.githubusercontent.com` and `huggingface.co` answer plain
+/// `reqwest::get` requests inconsistently (sporadic 4xx on valid URLs).
+fn download_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .user_agent(concat!("RecordForge/", env!("CARGO_PKG_VERSION")))
+            .build()
+            // A failed custom build still deserves the plain default client.
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
+}
+
 pub(crate) async fn download_to_file(
     url: &str,
     dest: &Path,
@@ -328,12 +342,14 @@ pub(crate) async fn download_to_file(
 ) -> Result<()> {
     use futures_util::StreamExt;
 
-    let response = reqwest::get(url)
+    let response = download_client()
+        .get(url)
+        .send()
         .await
         .map_err(|e| InternalError::Storage(format!("engine download: {e}")))?;
     if !response.status().is_success() {
         return Err(InternalError::Storage(format!(
-            "engine download failed: HTTP {}",
+            "engine download failed: HTTP {} ({url})",
             response.status()
         ))
         .into());

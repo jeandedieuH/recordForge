@@ -32,7 +32,7 @@ import {
 import { cn } from "@recordforge/ui"
 import { CameraFrameView } from "../camera/camera-frame-view"
 import { toAssetUrl } from "../media/derivative-resources"
-import { useDualMediaSlots } from "./playback/use-dual-media-slots"
+import { lockMediaToLeader, useDualMediaSlots } from "./playback/use-dual-media-slots"
 import { usePlayheadMs } from "./use-playback-state"
 import { useTimelineStore } from "../../../stores/timeline-store"
 import {
@@ -327,8 +327,13 @@ function CameraStreamSurface({
     enabled: Boolean(matteUrl) && segments.length > 0,
     slots: matteSlots,
     sourceUrlOf: () => matteUrl,
-    onSync: (_slot, _segment: PreviewSegment | null, element) => {
+    onSync: (_slot, _segment: PreviewSegment | null, element, isActive) => {
       element.muted = true
+      // The matte pair tracks the playhead independently of the camera pair,
+      // so the mask could lag a moving person by a few frames. Lock it to the
+      // camera element's own clock instead of its own drift budget.
+      if (!isActive) return
+      lockMediaToLeader(element, slots[activeSlot]?.current ?? null, frameMs)
     },
   })
 
@@ -739,10 +744,16 @@ function CameraStreamSurface({
     )
   }
 
+  // A live cutout drops the bubble chrome — a ring/shadow around the
+  // now-invisible rectangle looks broken, matching the render plan.
+  const viewFrame = cutoutActive
+    ? { ...resolved, style: { ...resolved.style, borderWidth: 0, shadowEnabled: false } }
+    : resolved
+
   return (
     <>
       <CameraFrameView
-        frame={dragOverride ? { ...resolved, rect: dragOverride } : resolved}
+        frame={dragOverride ? { ...viewFrame, rect: dragOverride } : viewFrame}
         canvasWidth={canvasWidth}
         canvasHeight={canvasHeight}
         previewScale={previewScale}

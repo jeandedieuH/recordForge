@@ -4330,6 +4330,25 @@ fn render_composition_window(
         let chain_start_ms = plan.overlays[job.pieces[0].overlay_index].output_start_ms as f64
             + job.pieces[0].clamp.cut_out_s * 1000.0;
         let face_tracked = overlay.crop_keyframes.len() > 1;
+        // The matte derivative is stored at a downscaled working size while
+        // crop rects live in source pixels: bring it back to the camera
+        // stream's decoded size so shared crop ops land on the same region.
+        let matte_prescale = if face_tracked || overlay.crop.is_some() {
+            asset_paths
+                .get(&overlay.asset_id)
+                .and_then(|path| {
+                    camera_stream_dimensions(
+                        &shared.probe,
+                        path,
+                        &overlay.asset_id,
+                        overlay.stream_index,
+                    )
+                })
+                .map(|(width, height)| format!(",scale={width}:{height}:flags=bilinear"))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
 
         if face_tracked {
             let first = &overlay.crop_keyframes[0];
@@ -4356,20 +4375,24 @@ fn render_composition_window(
                     first.width, first.height, first.x, first.y
                 ));
                 matte_geometry_ops.push_str(&format!(
-                    ",crop@{matte_name}=w={}:h={}:x={}:y={},sendcmd=f='{escaped}'",
+                    "{matte_prescale},crop@{matte_name}=w={}:h={}:x={}:y={},sendcmd=f='{escaped}'",
                     first.width, first.height, first.x, first.y
                 ));
             }
-            geometry_ops.push_str(&format!(
+            let fit_ops = format!(
                 ",scale={fit_w}:{fit_h}:force_original_aspect_ratio=decrease:force_divisible_by=2:threads=auto,pad={fit_w}:{fit_h}:(ow-iw)/2:(oh-ih)/2:color=black@0"
-            ));
+            );
+            geometry_ops.push_str(&fit_ops);
+            matte_geometry_ops.push_str(&fit_ops);
         } else if let Some(crop) = &overlay.crop {
             let crop_ops = format!(",crop={}:{}:{}:{}", crop.width, crop.height, crop.x, crop.y);
             geometry_ops.push_str(&crop_ops);
-            matte_geometry_ops.push_str(&crop_ops);
-            geometry_ops.push_str(&format!(
+            matte_geometry_ops.push_str(&format!("{matte_prescale}{crop_ops}"));
+            let fit_ops = format!(
                 ",scale={fit_w}:{fit_h}:force_original_aspect_ratio=decrease:force_divisible_by=2:threads=auto,pad={fit_w}:{fit_h}:(ow-iw)/2:(oh-ih)/2:color=black@0"
-            ));
+            );
+            geometry_ops.push_str(&fit_ops);
+            matte_geometry_ops.push_str(&fit_ops);
         } else {
             geometry_ops.push_str(&format!(
                 ",scale={fit_w}:{fit_h}:force_original_aspect_ratio=increase:force_divisible_by=2:threads=auto,crop={fit_w}:{fit_h}:(iw-ow)/2:(ih-oh)/2"
@@ -4432,14 +4455,19 @@ fn render_composition_window(
         let matte_label = if let Some(matte_index) = job.matte_input_index {
             let mut labels = Vec::with_capacity(job.pieces.len());
             for (piece_index, piece) in job.pieces.iter().enumerate() {
+                let piece_overlay = &plan.overlays[piece.overlay_index];
                 let clamp = piece.clamp;
                 let frames = ((clamp.chain_dur_s * fps).round().max(0.0) as u64).max(1);
                 let piece_duration = fmt_secs(frames as f64 / fps);
                 let label = format!("camera{index}_matte_piece{piece_index}");
+                // Mirror the camera piece's setpts (cut_out offset + speed) so
+                // the matte frames stay on the same output grid.
                 filters.push(format!(
-                    "[{matte_index}:v]trim=start={}:end={},setpts=PTS-STARTPTS,fps={},setsar=1,tpad=stop_mode=clone:stop_duration={piece_duration},tpad=stop_mode=add:stop_duration={piece_duration}:color=black,trim=end_frame={frames},setpts=PTS-STARTPTS[{label}]",
+                    "[{matte_index}:v]trim=start={}:end={},setpts=(PTS-STARTPTS+{:.6}/TB)/{:.6},fps={},setsar=1,tpad=stop_mode=clone:stop_duration={piece_duration},tpad=stop_mode=add:stop_duration={piece_duration}:color=black,trim=end_frame={frames},setpts=PTS-STARTPTS[{label}]",
                     fmt_secs((clamp.src_in_s - job.matte_delay_s - job.matte_seek_s).max(0.0)),
                     fmt_secs((clamp.src_out_s - job.matte_delay_s - job.matte_seek_s).max(0.0)),
+                    clamp.cut_out_s * piece_overlay.speed,
+                    piece_overlay.speed,
                     canvas.fps,
                 ));
                 labels.push(format!("[{label}]"));
@@ -11609,6 +11637,37 @@ fn resolve_video_stream_specifier(
         .ok_or_else(|| InternalError::Media("render asset has no video stream".into()).into())
 }
 
+/// Decoded frame size of the camera stream an overlay draws — the coordinate
+/// space every camera crop rect (manual or face-tracked) is expressed in.
+/// The camera-AI matte is stored at a downscaled working size, so the export
+/// prescales it back to these dims before applying source-space crops.
+/// `None` when probing is off or the stream carries no dimensions.
+pub(crate) fn camera_stream_dimensions(
+    probe: &ProbeCache,
+    asset_path: &Path,
+    asset_id: &str,
+    stream_index: Option<i32>,
+) -> Option<(u32, u32)> {
+    let metadata = probe.metadata(asset_path, asset_id)?.ok()?;
+    let video_streams = metadata
+        .streams
+        .iter()
+        .filter(|stream| stream.kind == "video")
+        .collect::<Vec<_>>();
+    // Same selection as `resolve_video_stream_specifier`: the requested
+    // stream when it exists, otherwise the file's first video stream —
+    // which is also what a standalone webcam decode ends up reading.
+    let stream = stream_index
+        .and_then(|index| video_streams.iter().copied().find(|s| s.index == index))
+        .or_else(|| video_streams.first().copied())?;
+    match (stream.width, stream.height) {
+        (Some(width), Some(height)) if width > 0 && height > 0 => {
+            Some((width as u32, height as u32))
+        }
+        _ => None,
+    }
+}
+
 fn resolve_audio_stream_specifier(
     probe: &ProbeCache,
     asset_path: &Path,
@@ -12545,6 +12604,94 @@ mod tests {
         assert!((cache.video_start_delay_s(path, "screen") - 0.067).abs() < 1e-3);
         let disabled = ProbeCache::new(None);
         assert_eq!(disabled.video_start_delay_s(path, "screen"), 0.0);
+    }
+
+    #[test]
+    fn camera_stream_dimensions_selects_camera_coordinate_space() {
+        use crate::database::media::{MediaFormat, MediaMetadata, MediaStream};
+        fn stream(index: i32, kind: &str, width: Option<i32>, height: Option<i32>) -> MediaStream {
+            MediaStream {
+                index,
+                kind: kind.into(),
+                codec: String::new(),
+                title: None,
+                start_ms: Some(0),
+                duration_ms: None,
+                codec_long_name: None,
+                width,
+                height,
+                fps: None,
+                bitrate_kbps: None,
+                sample_rate: None,
+                channels: None,
+                channel_layout: None,
+                language: None,
+            }
+        }
+        fn metadata(streams: Vec<MediaStream>) -> MediaMetadata {
+            MediaMetadata {
+                recording_id: "test".into(),
+                path: "asset.mp4".into(),
+                duration_ms: 0,
+                width: None,
+                height: None,
+                fps: None,
+                has_audio: true,
+                video_codec: None,
+                audio_codec: None,
+                bitrate_kbps: None,
+                streams,
+                format: MediaFormat::default(),
+                updated_at: String::new(),
+            }
+        }
+        let path = Path::new("C:/media/camera.mp4");
+
+        // Embedded camera stream: the requested index wins so crop rects stay
+        // in that stream's pixel space.
+        let embedded = ProbeCache::with_prober(|_, _| {
+            Ok(metadata(vec![
+                stream(0, "video", Some(1920), Some(1080)),
+                stream(1, "audio", None, None),
+                stream(2, "video", Some(640), Some(480)),
+            ]))
+        });
+        assert_eq!(
+            camera_stream_dimensions(&embedded, path, "camera", Some(2)),
+            Some((640, 480))
+        );
+        assert_eq!(
+            camera_stream_dimensions(&embedded, path, "camera", None),
+            Some((1920, 1080))
+        );
+
+        // Standalone webcam: the synthetic project stream index (e.g. 3) is
+        // absent from the file, so the decode — and the prescale — fall back
+        // to the file's only video stream.
+        let standalone = ProbeCache::with_prober(|_, _| {
+            Ok(metadata(vec![
+                stream(0, "video", Some(1280), Some(720)),
+                stream(1, "audio", None, None),
+            ]))
+        });
+        assert_eq!(
+            camera_stream_dimensions(&standalone, path, "camera", Some(3)),
+            Some((1280, 720))
+        );
+
+        // Missing dims and disabled probing both degrade to None (no
+        // prescale — the legacy behaviour for crop-free overlays).
+        let dimless =
+            ProbeCache::with_prober(|_, _| Ok(metadata(vec![stream(0, "video", None, None)])));
+        assert_eq!(
+            camera_stream_dimensions(&dimless, path, "camera", Some(0)),
+            None
+        );
+        let disabled = ProbeCache::new(None);
+        assert_eq!(
+            camera_stream_dimensions(&disabled, path, "camera", Some(0)),
+            None
+        );
     }
 
     #[test]

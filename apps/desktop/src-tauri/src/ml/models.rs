@@ -24,6 +24,9 @@ pub struct ModelSpec {
     pub size_bytes: u64,
     pub sha256: &'static str,
     pub url: &'static str,
+    /// Mirror URLs tried in order when `url` fails. The pinned SHA-256 still
+    /// verifies the bytes, so only the transport differs between hosts.
+    pub mirrors: &'static [&'static str],
 }
 
 pub const MATTE: &str = "camera-matte";
@@ -37,6 +40,7 @@ pub const MODELS: &[ModelSpec] = &[
         size_bytes: 25_969_398,
         sha256: "de03cc16f3c91f25b7c2f0b42ea1a8d34f40a752234f3887572655e744e55306",
         url: "https://github.com/yakhyo/modnet/releases/download/weights/modnet_webcam.onnx",
+        mirrors: &[],
     },
     ModelSpec {
         id: FACE,
@@ -48,6 +52,12 @@ pub const MODELS: &[ModelSpec] = &[
         // media.githubusercontent.com because opencv_zoo tracks .onnx in Git
         // LFS — the plain raw host returns the 131-byte LFS pointer instead.
         url: "https://media.githubusercontent.com/media/opencv/opencv_zoo/f12e12798e8314f7c074a6656816c048dcc95b7a/models/face_detection_yunet/face_detection_yunet_2023mar.onnx",
+        // Hugging Face mirrors the OpenCV Zoo repo. The media host is a
+        // flaky edge CDN (sporadic 404s on a valid URL), so fall back when
+        // it misbehaves — the hash check below pins identical bytes.
+        mirrors: &[
+            "https://huggingface.co/opencv/opencv_zoo/resolve/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx",
+        ],
     },
 ];
 
@@ -99,12 +109,25 @@ pub async fn download(app_data_dir: &Path, id: &str, on_progress: impl Fn(u64, u
         std::fs::create_dir_all(parent)
             .map_err(|error| InternalError::Storage(format!("create ML models dir: {error}")))?;
     }
-    crate::whisper::download_to_file(spec.url, &path, on_progress).await?;
-    if let Err(error) = verify(&path, spec.sha256) {
-        let _ = std::fs::remove_file(&path);
-        return Err(error);
+    // Pinned URL first, then each mirror — transient edge-CDN failures on one
+    // host (the 404s media.githubusercontent.com sometimes serves) should not
+    // strand the feature when a mirror can serve the same verified bytes.
+    let mut last_error = None;
+    for url in [spec.url].into_iter().chain(spec.mirrors.iter().copied()) {
+        let attempt = async {
+            crate::whisper::download_to_file(url, &path, &on_progress).await?;
+            verify(&path, spec.sha256)
+        };
+        match attempt.await {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                let _ = std::fs::remove_file(&path);
+                last_error = Some(error);
+            }
+        }
     }
-    Ok(())
+    Err(last_error
+        .unwrap_or_else(|| InternalError::Media("camera model has no download URL".into()).into()))
 }
 
 /// Remove a downloaded model (the matte model is ~26 MB).
@@ -144,7 +167,13 @@ mod tests {
             assert!(spec.sha256.chars().all(|c| c.is_ascii_hexdigit()));
             assert!(spec.size_bytes > 0);
             assert!(spec.url.starts_with("https://"));
+            for mirror in spec.mirrors {
+                assert!(mirror.starts_with("https://"));
+            }
         }
+        // The YuNet mirror must exist — media.githubusercontent.com is the
+        // flaky edge CDN that motivated the fallback path.
+        assert!(!model_spec(FACE).unwrap().mirrors.is_empty());
         assert!(model_spec(FACE).is_some());
         assert!(model_spec("nope").is_none());
     }

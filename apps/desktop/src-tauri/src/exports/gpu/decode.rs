@@ -596,16 +596,21 @@ trim=end_frame={frames},setpts=PTS-STARTPTS[{label}]",
                 hwaccel: false,
             });
             let mut matte_labels = Vec::with_capacity(clamps.len());
-            for (piece_index, (_overlay_index, clamp)) in clamps.iter().enumerate() {
+            for (piece_index, (overlay_index, clamp)) in clamps.iter().enumerate() {
+                let overlay = &overlays[*overlay_index];
                 let frames = ((clamp.chain_dur_s * frame_rate).round().max(0.0) as u64).max(1);
                 let duration = fmt_secs(frames as f64 / frame_rate);
                 let label = format!("matte{piece_index}");
+                // Mirror the camera piece's setpts (cut_out offset + speed)
+                // so the matte stays on the same output grid.
                 filters.push(format!(
-                    "[{matte_index}:v]trim=start={}:end={},setpts=PTS-STARTPTS,fps={fps},setsar=1,\
+                    "[{matte_index}:v]trim=start={}:end={},setpts=(PTS-STARTPTS+{:.6}/TB)/{:.6},fps={fps},setsar=1,\
 tpad=stop_mode=clone:stop_duration={duration},tpad=stop_mode=add:stop_duration={duration}:color=black,\
 trim=end_frame={frames},setpts=PTS-STARTPTS[{label}]",
                     fmt_secs((clamp.src_in_s - video_delay_s - matte_seek_s).max(0.0)),
                     fmt_secs((clamp.src_out_s - video_delay_s - matte_seek_s).max(0.0)),
+                    clamp.cut_out_s * overlay.speed,
+                    overlay.speed.max(1e-6),
                 ));
                 matte_labels.push(format!("[{label}]"));
             }
@@ -619,7 +624,31 @@ trim=end_frame={frames},setpts=PTS-STARTPTS[{label}]",
                 ));
                 "[matte_concat]".to_string()
             };
-            let mut matte_ops = format!("{matte_crop}{sendcmd}");
+            // The matte is stored at a downscaled working size while crop
+            // rects live in source pixels: prescale it to the camera stream's
+            // decoded size so shared crop ops land on the same region.
+            let matte_prescale = (face_tracked || first.crop.is_some())
+                .then(|| {
+                    super::super::camera_stream_dimensions(
+                        &shared.probe,
+                        &asset_path,
+                        &first.asset_id,
+                        first.stream_index,
+                    )
+                })
+                .flatten()
+                .map(|(w, h)| format!("scale={w}:{h}:flags=bilinear,"))
+                .unwrap_or_default();
+            let mut matte_ops = if face_tracked || first.crop.is_some() {
+                // Mirror the camera chain exactly: prescale, crop, sendcmd,
+                // then the camera's own fit (cropped overlays letterbox).
+                format!(
+                    "{matte_prescale}{}{sendcmd}{fit}",
+                    matte_crop.trim_start_matches(',')
+                )
+            } else {
+                format!("{matte_crop}{sendcmd}")
+            };
             matte_ops.push_str(&format!(
                 ",scale={width}:{height}:force_original_aspect_ratio=increase:force_divisible_by=2:threads=auto,crop={width}:{height},format=gray"
             ));

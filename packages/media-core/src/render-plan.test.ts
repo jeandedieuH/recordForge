@@ -1932,8 +1932,10 @@ describe("render-plan", () => {
             opacity: 1,
             shape: "rectangle",
             visible: true,
-            borderWidth: 0,
-            shadowEnabled: false,
+            // Non-zero chrome: the cutout must strip it in the plan.
+            borderWidth: 4,
+            borderColor: "#ffffff",
+            shadowEnabled: true,
           },
           cutout: {
             enabled: true,
@@ -1982,6 +1984,9 @@ describe("render-plan", () => {
     if (!plan.ok) return
     expect(plan.value.overlays[0].streamIndex).toBeUndefined()
     expect(plan.value.overlays[0].cutout?.mattePath).toBe(mattePath)
+    // A live cutout drops the bubble chrome: no border ring, no drop shadow.
+    expect(plan.value.overlays[0].borderWidth).toBe(0)
+    expect(plan.value.overlays[0].shadowEnabled).toBe(false)
   })
 
   it("keeps the real stream index for webcam-role assets inside the output", () => {

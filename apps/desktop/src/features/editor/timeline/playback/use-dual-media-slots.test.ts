@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest"
 import type { PreviewSegment } from "@recordforge/editor-core"
-import { planDualSlotTick, previewSegmentSourceMs } from "./use-dual-media-slots"
+import {
+  lockMediaToLeader,
+  planDualSlotTick,
+  previewSegmentSourceMs,
+} from "./use-dual-media-slots"
 
 function segment(startMs: number, endMs: number, sourceInMs = startMs, speed = 1): PreviewSegment {
   return {
@@ -79,5 +83,50 @@ describe("planDualSlotTick", () => {
     expect(previewSegmentSourceMs(fast, 500)).toBe(11_000)
     expect(previewSegmentSourceMs(fast, 1_500)).toBe(12_000)
     expect(previewSegmentSourceMs(fast, -100)).toBe(10_000)
+  })
+})
+
+function media(currentTime: number, playbackRate = 1, readyState = 4): HTMLMediaElement {
+  return { currentTime, playbackRate, readyState } as HTMLMediaElement
+}
+
+describe("lockMediaToLeader", () => {
+  const frameMs = 1000 / 30 // ~33ms
+
+  it("hard-seeks the follower past half a frame of relative drift", () => {
+    const follower = media(10.0)
+    const leader = media(10.09) // ~2.7 frames ahead
+    lockMediaToLeader(follower, leader, frameMs)
+    expect(follower.currentTime).toBe(10.09)
+  })
+
+  it("seeks backwards when the follower runs ahead", () => {
+    const follower = media(10.2)
+    const leader = media(10.0)
+    lockMediaToLeader(follower, leader, frameMs)
+    expect(follower.currentTime).toBe(10.0)
+  })
+
+  it("nudges rate to converge inside half a frame", () => {
+    const follower = media(10.0, 1)
+    const leader = media(10.01, 1) // 10ms ahead, under half a frame
+    lockMediaToLeader(follower, leader, frameMs)
+    expect(follower.currentTime).toBe(10.0) // no seek
+    expect(follower.playbackRate).toBeCloseTo(1.02, 3)
+  })
+
+  it("keeps the leader's own rate once converged", () => {
+    const follower = media(10.0, 1)
+    const leader = media(10.0, 0.98) // camera was rate-nudged by the playhead sync
+    lockMediaToLeader(follower, leader, frameMs)
+    expect(follower.playbackRate).toBeCloseTo(0.98, 3)
+  })
+
+  it("does nothing without usable leader metadata", () => {
+    const follower = media(10.0)
+    lockMediaToLeader(follower, media(11.0, 1, 0), frameMs)
+    expect(follower.currentTime).toBe(10.0)
+    lockMediaToLeader(follower, null, frameMs)
+    expect(follower.currentTime).toBe(10.0)
   })
 })
