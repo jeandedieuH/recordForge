@@ -1081,7 +1081,10 @@ pub(crate) fn render_timeline_on_gpu(
                 .flatten()
                 .filter(super::loupe::LoupePose::is_visible)
                 .map(|pose| {
-                    let rect = frame.rect;
+                    // The sample square is normalized against the rect the
+                    // screen is actually drawn into this frame — the layout
+                    // pose inside camera-layout windows, not the base rect.
+                    let rect = dest;
                     let ring = super::parse_color_hex(&pose.settings.ring_color, 1.0);
                     // Magnification = `scale`: the lens samples `diameter /
                     // scale` and draws it across the lens, so a 2x loupe is
@@ -1428,7 +1431,7 @@ fn build_overlay_runtime(
     if !has_cursor && !has_items && !has_keys {
         return Ok(None);
     }
-    let screen_windows = side_by_side_screen_windows(plan, frame);
+    let screen_windows = cursor_screen_windows(plan, frame);
     let renderers = super::build_cursor_renderers(
         plan,
         project_id,
@@ -1464,28 +1467,58 @@ fn build_overlay_runtime(
     Ok(Some(runtimes))
 }
 
-/// Screen-rect windows the cursor renderer maps through when the side-by-side
-/// layout changes mid-timeline. `None` when the slot is constant (or absent).
-fn side_by_side_screen_windows(
+/// Screen-rect windows the cursor renderer maps through when the screen
+/// leaves the base rect: side-by-side windows map through the slot and
+/// camera-layout windows through the layout's rest pose — the same mid-window
+/// approximation the compatibility graph applies so both renderers land the
+/// cursor identically. `None` when the screen rect never varies.
+fn cursor_screen_windows(
     plan: &RenderPlan,
     frame: &compositor::CanvasFrame,
 ) -> Option<Vec<super::cursor::ScreenRectWindow>> {
-    let sbs = frame.sbs_rect?;
-    let full = frame.rect;
+    type ScreenState = (u64, u64, (f64, f64, f64, f64));
+    let mut screen_states: Vec<ScreenState> = Vec::new();
+    if let Some(sbs) = frame.sbs_rect {
+        for &(start, end) in &frame.sbs_windows {
+            screen_states.push((start, end, sbs));
+        }
+    }
+    for layout in &plan.camera_layouts {
+        if let (Some(keyframes), Some(rect)) = (
+            layout.screen.as_ref(),
+            super::layout_rest_screen_rect(layout),
+        ) {
+            screen_states.push((
+                keyframes[0].time_ms,
+                keyframes[keyframes.len() - 1].time_ms,
+                rect,
+            ));
+        }
+    }
+    if screen_states.is_empty() {
+        return None;
+    }
+    // The compatibility merge order: sorted by start, earliest window wins an
+    // overlap, uncovered spans fall back to the base rect.
+    screen_states.sort_by_key(|(start, _, _)| *start);
     let mut windows = Vec::new();
     let mut cursor = 0u64;
-    for &(start, end) in &frame.sbs_windows {
+    for (start, end, rect) in screen_states {
+        if end <= cursor {
+            continue;
+        }
+        let start = start.max(cursor);
         if start > cursor {
             windows.push(super::cursor::ScreenRectWindow {
                 start_ms: cursor,
                 end_ms: start,
-                rect: full,
+                rect: frame.rect,
             });
         }
         windows.push(super::cursor::ScreenRectWindow {
             start_ms: start,
             end_ms: end,
-            rect: sbs,
+            rect,
         });
         cursor = end;
     }
@@ -1493,7 +1526,7 @@ fn side_by_side_screen_windows(
         windows.push(super::cursor::ScreenRectWindow {
             start_ms: cursor,
             end_ms: plan.duration_ms,
-            rect: full,
+            rect: frame.rect,
         });
     }
     Some(windows)
@@ -2343,6 +2376,108 @@ mod tests {
         let mid = screen_layout_rect_at(&plan, 1_500.0).expect("screen pose");
         assert!((mid.2 - 720.0).abs() < 0.01);
         assert!(limitations(&plan).is_empty(), "{:?}", limitations(&plan));
+    }
+
+    fn canvas_frame_at(rect: (f64, f64, f64, f64)) -> compositor::CanvasFrame {
+        compositor::CanvasFrame {
+            rect,
+            sbs_rect: None,
+            sbs_windows: Vec::new(),
+            radius: 0,
+            background: [0.0, 0.0, 0.0],
+            plate: None,
+            sbs_plate: None,
+            border: None,
+        }
+    }
+
+    fn screen_pose(time_ms: u64, rect: (f64, f64, f64, f64)) -> RenderLayoutKeyframe {
+        RenderLayoutKeyframe {
+            time_ms,
+            x: rect.0,
+            y: rect.1,
+            width: rect.2,
+            height: rect.3,
+            radius: 0.0,
+            opacity: 1.0,
+        }
+    }
+
+    #[test]
+    fn cursor_screen_windows_follow_camera_layout_screen_poses() {
+        // A uniform side-by-side slot plus a PiP layout that widens the
+        // screen: without the layout window in the cursor table the pointer
+        // maps through the narrow slot while the screen draws at the wider
+        // pose — the reported left-shifted tip.
+        let mut plan = plan_with_canvas(gated_canvas());
+        plan.duration_ms = 10_000;
+        plan.camera_layouts = vec![RenderPlanCameraLayout {
+            id: "pip".into(),
+            start_ms: 2_000,
+            end_ms: 8_000,
+            camera: vec![keyframe(2_000, 1_500.0, 400.0, 1.0)],
+            screen: Some(vec![
+                screen_pose(2_000, (64.0, 64.0, 1_792.0, 952.0)),
+                screen_pose(7_900, (64.0, 64.0, 1_792.0, 952.0)),
+            ]),
+            source: None,
+        }];
+        let frame = canvas_frame_at((64.0, 157.0, 1_362.0, 766.0));
+        let windows = cursor_screen_windows(&plan, &frame).expect("layout windows");
+        assert_eq!(windows.len(), 3);
+        assert_eq!(
+            (windows[0].start_ms, windows[0].end_ms, windows[0].rect),
+            (0, 2_000, frame.rect)
+        );
+        assert_eq!(
+            (windows[1].start_ms, windows[1].end_ms, windows[1].rect),
+            (2_000, 7_900, (64.0, 64.0, 1_792.0, 952.0))
+        );
+        assert_eq!(
+            (windows[2].start_ms, windows[2].end_ms, windows[2].rect),
+            (7_900, 10_000, frame.rect)
+        );
+    }
+
+    #[test]
+    fn cursor_screen_windows_merge_side_by_side_and_layout_states() {
+        let mut plan = plan_with_canvas(gated_canvas());
+        plan.duration_ms = 10_000;
+        plan.camera_layouts = vec![RenderPlanCameraLayout {
+            id: "pip".into(),
+            start_ms: 5_000,
+            end_ms: 8_000,
+            camera: vec![keyframe(5_000, 1_500.0, 400.0, 1.0)],
+            screen: Some(vec![
+                screen_pose(5_000, (64.0, 64.0, 1_792.0, 952.0)),
+                screen_pose(7_500, (64.0, 64.0, 1_792.0, 952.0)),
+            ]),
+            source: None,
+        }];
+        let mut frame = canvas_frame_at((0.0, 0.0, 1_920.0, 1_080.0));
+        frame.sbs_rect = Some((64.0, 157.0, 1_362.0, 766.0));
+        frame.sbs_windows = vec![(0, 3_000)];
+        let windows = cursor_screen_windows(&plan, &frame).expect("windows");
+        let rects: Vec<_> = windows
+            .iter()
+            .map(|window| (window.start_ms, window.end_ms, window.rect))
+            .collect();
+        assert_eq!(
+            rects,
+            vec![
+                (0, 3_000, (64.0, 157.0, 1_362.0, 766.0)),
+                (3_000, 5_000, frame.rect),
+                (5_000, 7_500, (64.0, 64.0, 1_792.0, 952.0)),
+                (7_500, 10_000, frame.rect),
+            ]
+        );
+    }
+
+    #[test]
+    fn cursor_screen_windows_stay_none_without_screen_variation() {
+        let plan = plan_with_canvas(gated_canvas());
+        let frame = canvas_frame_at((0.0, 0.0, 1_920.0, 1_080.0));
+        assert!(cursor_screen_windows(&plan, &frame).is_none());
     }
 
     #[test]

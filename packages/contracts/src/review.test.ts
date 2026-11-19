@@ -21,7 +21,7 @@ describe("Review contracts", () => {
       text: "Solid recorder, exports are fast.",
       name: "Hagen",
       tier: "pro",
-      appVersion: "2.5.4",
+      appVersion: "2.5.5",
       os: "windows",
       source: "app",
       website: "",

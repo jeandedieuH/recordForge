@@ -1,10 +1,6 @@
 import { describe, expect, it } from "vitest"
 import type { PreviewSegment } from "@recordforge/editor-core"
-import {
-  lockMediaToLeader,
-  planDualSlotTick,
-  previewSegmentSourceMs,
-} from "./use-dual-media-slots"
+import { lockMediaToLeader, planDualSlotTick, previewSegmentSourceMs } from "./use-dual-media-slots"
 
 function segment(startMs: number, endMs: number, sourceInMs = startMs, speed = 1): PreviewSegment {
   return {
