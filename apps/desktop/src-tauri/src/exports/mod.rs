@@ -13266,7 +13266,7 @@ mod tests {
             1080.0,
         );
         assert!(z_expr.contains("lt(it,1)"));
-        assert!(z_expr.contains("/max(1,("));
+        assert!(z_expr.contains("/max(1,min(1920,("));
         assert!(x_expr.contains("max(0,min(iw-iw/zoom"));
         assert!(y_expr.contains("max(0,min(ih-ih/zoom"));
     }
