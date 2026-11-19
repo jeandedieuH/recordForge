@@ -347,6 +347,13 @@ export function LayoutPanel() {
         </Tabs>
       </div>
 
+      {/* Motion blur + zoom clarity — placed above shadow/border so creators
+          discover motion polish without scrolling past decorative frame controls. */}
+      <EffectsControls
+        canvas={canvas}
+        onChange={(updates) => execute(createUpdateCanvasCommand(updates))}
+      />
+
       {/* Elevation & Shadow */}
       <ShadowControls
         canvas={canvas}
@@ -355,12 +362,6 @@ export function LayoutPanel() {
 
       {/* Frame Border */}
       <BorderControls
-        canvas={canvas}
-        onChange={(updates) => execute(createUpdateCanvasCommand(updates))}
-      />
-
-      {/* Zoom clarity + motion blur */}
-      <EffectsControls
         canvas={canvas}
         onChange={(updates) => execute(createUpdateCanvasCommand(updates))}
       />

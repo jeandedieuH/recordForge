@@ -9,6 +9,8 @@ import {
   type CursorZoomTransform,
 } from "@recordforge/cursor-core"
 import type { CursorSettings, CursorTelemetryFile } from "@recordforge/contracts"
+import type { CursorMotionBlurSample } from "@recordforge/editor-core"
+import { CursorMotionBlurCanvas } from "./cursor-motion-blur-canvas"
 
 interface CustomCursorOverlayProps {
   /** Canonical cursor frame from the engine. */
@@ -25,6 +27,8 @@ interface CustomCursorOverlayProps {
   zoomTransform?: CursorZoomTransform | null
   /** Radius for clipping the overlay to the video screen. */
   borderRadius?: number | string
+  /** Optional shutter samples for linear premultiplied cursor motion blur. */
+  motionBlurSamples?: readonly CursorMotionBlurSample[]
 }
 
 function fitSourcePoint(
@@ -48,6 +52,7 @@ export function CustomCursorOverlay({
   offsetY = 0,
   zoomTransform,
   borderRadius,
+  motionBlurSamples,
 }: CustomCursorOverlayProps) {
   const instanceId = useId()
   const spotlightMaskId = `spotlight-mask-${instanceId.replace(/:/g, "")}`
@@ -141,13 +146,11 @@ export function CustomCursorOverlay({
   const posY = zoomed.y
   // DPI-consistent size factor (1 for legacy projects) — same math as export.
   const sizeFactor = cursorSizeFactor(cursorSettings, telemetry)
-  const cursorScale =
-    (cursorSettings.scale ?? 1) *
-    sizeFactor *
-    (fitted.scale ?? 1) *
-    zoomed.scale *
-    (frame.clickScale ?? 1)
+  const baseScale =
+    (cursorSettings.scale ?? 1) * sizeFactor * (fitted.scale ?? 1) * (frame.clickScale ?? 1)
+  const cursorScale = baseScale * zoomed.scale
   const isCursorVisible = cursorSettings.enabled && frame.visible && frame.opacity > 0
+  const hasMotionBlur = isCursorVisible && (motionBlurSamples?.length ?? 0) > 1
 
   return (
     <div
@@ -274,35 +277,56 @@ export function CustomCursorOverlay({
           })
         : null}
 
-      {/* Custom cursor icon */}
-      {isCursorVisible ? (
-        <div
-          className="pointer-events-none absolute"
-          style={{
-            left: posX - asset.hotspotX * (asset.width / 24) * cursorScale,
-            top: posY - asset.hotspotY * (asset.height / 24) * cursorScale,
-            transform: asset.isCenterHotspot
-              ? `translate(-50%, -50%) scale(${cursorScale})`
-              : `scale(${cursorScale})`,
-            transformOrigin: asset.isCenterHotspot ? "center" : "top left",
-            filter: cursorSettings.shadowEnabled
-              ? `drop-shadow(${cursorSettings.shadowOffsetX}px ${cursorSettings.shadowOffsetY}px ${cursorSettings.shadowBlur}px ${cursorSettings.shadowColor})`
-              : "none",
-            opacity: frame.opacity,
-            willChange: "transform, opacity",
-          }}
-        >
-          <svg
-            width={asset.width}
-            height={asset.height}
-            viewBox={asset.viewBox}
-            className="overflow-visible"
-            aria-hidden
-          >
-            <g dangerouslySetInnerHTML={{ __html: cursorMarkup }} />
-          </svg>
-        </div>
-      ) : null}
+      {/* Custom cursor icon — linear shutter accumulator when motion blur is active */}
+      {isCursorVisible
+        ? (() => {
+            const sharpCursor = (
+              <div
+                className="pointer-events-none absolute"
+                style={{
+                  left: posX - asset.hotspotX * (asset.width / 24) * cursorScale,
+                  top: posY - asset.hotspotY * (asset.height / 24) * cursorScale,
+                  transform: asset.isCenterHotspot
+                    ? `translate(-50%, -50%) scale(${cursorScale})`
+                    : `scale(${cursorScale})`,
+                  transformOrigin: asset.isCenterHotspot ? "center" : "top left",
+                  filter: cursorSettings.shadowEnabled
+                    ? `drop-shadow(${cursorSettings.shadowOffsetX}px ${cursorSettings.shadowOffsetY}px ${cursorSettings.shadowBlur}px ${cursorSettings.shadowColor})`
+                    : "none",
+                  opacity: frame.opacity,
+                  willChange: "transform, opacity",
+                }}
+              >
+                <svg
+                  width={asset.width}
+                  height={asset.height}
+                  viewBox={asset.viewBox}
+                  className="overflow-visible"
+                  aria-hidden
+                >
+                  <g dangerouslySetInnerHTML={{ __html: cursorMarkup }} />
+                </svg>
+              </div>
+            )
+            if (hasMotionBlur && motionBlurSamples) {
+              return (
+                <CursorMotionBlurCanvas
+                  asset={asset}
+                  cursorMarkup={cursorMarkup}
+                  cursorSettings={cursorSettings}
+                  baseScale={baseScale}
+                  centerScale={cursorScale}
+                  opacity={frame.opacity}
+                  samples={motionBlurSamples}
+                  containerWidth={containerWidth}
+                  containerHeight={containerHeight}
+                  fallback={sharpCursor}
+                />
+              )
+            }
+            return sharpCursor
+          })()
+        : null}
     </div>
   )
 }

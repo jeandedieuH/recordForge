@@ -43,6 +43,7 @@ import {
   resolveCameraShots,
   resolveCaptionLayout,
   resolveLoupes,
+  resolveZoomTransform,
   type CameraShot,
   resolveClipDesign,
   resolveFaceCropKeyframes,
@@ -1105,15 +1106,75 @@ function toZoomSegments(
       const window = windowTimeRange(shot.startMs, shot.startMs + shot.durationMs, range)
       if (!window) return []
       const duration = window.endMs - window.startMs
-      const defaultTrans = Math.min(450, Math.max(60, Math.round(duration * 0.3)))
+      const shotStartMs = Math.round(shot.startMs)
+      const shotEndMs = Math.round(shot.startMs + shot.durationMs)
+      const origDuration = Math.max(1, shotEndMs - shotStartMs)
+      const origDefaultTrans = Math.min(450, Math.max(60, Math.round(origDuration * 0.3)))
+      let origIn = Math.min(
+        origDuration,
+        Math.max(0, Math.round(shot.transitionInMs ?? origDefaultTrans)),
+      )
+      let origOut = Math.min(
+        origDuration,
+        Math.max(0, Math.round(shot.transitionOutMs ?? origDefaultTrans)),
+      )
+      if (origIn + origOut > origDuration) {
+        origIn = Math.round(origDuration / 2)
+        origOut = origDuration - origIn
+      }
+
+      const windowStartSourceMs = window.startMs + sourceTimelineOffsetMs
+      const windowEndSourceMs = window.endMs + sourceTimelineOffsetMs
+      const cutStart = Math.max(0, windowStartSourceMs - shotStartMs)
+      const cutEnd = Math.max(0, shotEndMs - windowEndSourceMs)
 
       let motionPlan: RenderPlanZoomMotionPlan | undefined = undefined
       if (engine && shot.mode === "follow-cursor") {
         motionPlan = buildFollowCursorMotionPlan(shot, state, engine, {
-          windowStartMs: window.startMs + sourceTimelineOffsetMs,
-          windowEndMs: window.endMs + sourceTimelineOffsetMs,
+          windowStartMs: windowStartSourceMs,
+          windowEndMs: windowEndSourceMs,
           timeOffsetMs: sourceTimelineOffsetMs,
         })
+      }
+
+      const target = canonicalizeZoomTarget(shot.target, state.canvas, shot.scale)
+      let transitionInMs = origIn
+      let transitionOutMs = origOut
+      let fromTarget = shot.fromTarget
+        ? canonicalizeZoomTarget(shot.fromTarget, state.canvas, shot.fromScale ?? 1)
+        : undefined
+      let fromScale = shot.fromScale
+
+      // Preserve transition parity when a selected-range export slices into
+      // the middle of a zoom or loupe segment instead of replaying ease-in/out.
+      if (cutStart > 0) {
+        if (cutStart >= origIn) {
+          transitionInMs = 0
+          fromTarget = undefined
+          fromScale = undefined
+        } else {
+          transitionInMs = Math.min(duration, origIn - cutStart)
+          if (shot.style !== "loupe") {
+            const mid = resolveZoomTransform(shot, windowStartSourceMs, state.canvas, {
+              target,
+              transitionInMs: origIn,
+              transitionOutMs: origOut,
+              fromTarget: shot.fromTarget,
+              fromScale: shot.fromScale,
+            })
+            fromTarget = canonicalizeZoomTarget(mid.crop, state.canvas, mid.scale)
+            fromScale = mid.scale
+          }
+        }
+      }
+
+      if (cutEnd > 0) {
+        transitionOutMs = cutEnd >= origOut ? 0 : Math.min(duration, origOut - cutEnd)
+      }
+
+      if (transitionInMs + transitionOutMs > duration) {
+        transitionInMs = Math.min(transitionInMs, Math.round(duration / 2))
+        transitionOutMs = Math.max(0, duration - transitionInMs)
       }
 
       return [
@@ -1121,11 +1182,11 @@ function toZoomSegments(
           id: shot.id,
           startMs: window.startMs,
           endMs: window.endMs,
-          target: canonicalizeZoomTarget(shot.target, state.canvas, shot.scale),
+          target,
           scale: shot.scale ?? 1.5,
           easing: shot.easing ?? "smooth",
-          transitionInMs: shot.transitionInMs ?? defaultTrans,
-          transitionOutMs: shot.transitionOutMs ?? defaultTrans,
+          transitionInMs,
+          transitionOutMs,
           enabled: shot.enabled,
           mode: shot.mode,
           source: shot.source,
@@ -1133,10 +1194,8 @@ function toZoomSegments(
           followDeadzonePercent: shot.followDeadzonePercent,
           followSmoothingAlpha: shot.followSmoothingAlpha,
           label: shot.label,
-          fromTarget: shot.fromTarget
-            ? canonicalizeZoomTarget(shot.fromTarget, state.canvas, shot.fromScale ?? 1)
-            : undefined,
-          fromScale: shot.fromScale,
+          fromTarget,
+          fromScale,
           motionPlan,
           // Glass Loupe (#2): the export renders these with the loupe pass, so
           // the style and presentation must cross the plan boundary.

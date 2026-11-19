@@ -2556,4 +2556,102 @@ describe("M2 pro effects reach the render plan", () => {
     const frame = wire.zoomSegments.find((segment) => segment.id === "zoom-frame")
     expect(frame?.style).not.toBe("loupe")
   })
+
+  it("reconciles zoom transitions and mid-transition start when exporting a selected range", () => {
+    const state = makeTimeline()
+    state.zoomSegments = [
+      {
+        id: "zoom-hold-slice",
+        startMs: 1_000,
+        durationMs: 4_000, // 1000..5000, hold 1400..4600
+        target: { x: 480, y: 270, width: 960, height: 540 },
+        scale: 2,
+        easing: "linear",
+        transitionInMs: 400,
+        transitionOutMs: 400,
+        enabled: true,
+        locked: false,
+        mode: "manual",
+        source: "manual",
+      },
+      {
+        id: "zoom-mid-ease",
+        startMs: 6_000,
+        durationMs: 4_000, // 6000..10000, ease-in 6000..7000
+        target: { x: 480, y: 270, width: 960, height: 540 },
+        scale: 2,
+        easing: "linear",
+        transitionInMs: 1_000,
+        transitionOutMs: 400,
+        enabled: true,
+        locked: false,
+        mode: "manual",
+        source: "manual",
+      },
+      {
+        id: "loupe-slice",
+        startMs: 1_000,
+        durationMs: 4_000,
+        target: { x: 480, y: 270, width: 960, height: 540 },
+        scale: 2,
+        easing: "smooth",
+        transitionInMs: 300,
+        transitionOutMs: 300,
+        enabled: true,
+        locked: false,
+        mode: "manual",
+        source: "manual",
+        style: "loupe",
+      },
+    ]
+
+    // Slicing strictly inside the hold of zoom-hold-slice and loupe-slice must
+    // suppress already-elapsed ease-in/ease-out instead of re-animating from 1x.
+    const holdRange = buildRenderPlan({
+      state,
+      projectId: "project-1",
+      range: { startMs: 2_000, endMs: 4_000 },
+    })
+    expect(holdRange.ok).toBe(true)
+    if (!holdRange.ok) return
+
+    const clippedHold = holdRange.value.zoomSegments.find((s) => s.id === "zoom-hold-slice")
+    expect(clippedHold).toMatchObject({
+      startMs: 0,
+      endMs: 2_000,
+      transitionInMs: 0,
+      transitionOutMs: 0,
+    })
+    expect(clippedHold?.fromTarget).toBeUndefined()
+    expect(clippedHold?.fromScale).toBeUndefined()
+
+    const clippedLoupe = holdRange.value.zoomSegments.find((s) => s.id === "loupe-slice")
+    expect(clippedLoupe).toMatchObject({
+      startMs: 0,
+      endMs: 2_000,
+      style: "loupe",
+      transitionInMs: 0,
+      transitionOutMs: 0,
+    })
+
+    // Starting halfway through zoom-mid-ease's 1000ms ease-in preserves the
+    // remaining 500ms ease-in from the exact mid-transition crop/scale (~sqrt(2)).
+    const midEaseRange = buildRenderPlan({
+      state,
+      projectId: "project-1",
+      range: { startMs: 6_500, endMs: 9_800 },
+    })
+    expect(midEaseRange.ok).toBe(true)
+    if (!midEaseRange.ok) return
+
+    const clippedMid = midEaseRange.value.zoomSegments.find((s) => s.id === "zoom-mid-ease")
+    expect(clippedMid).toBeDefined()
+    expect(clippedMid?.startMs).toBe(0)
+    expect(clippedMid?.endMs).toBe(3_300)
+    expect(clippedMid?.transitionInMs).toBe(500)
+    // 200ms clipped off the 400ms ease-out -> 200ms remaining.
+    expect(clippedMid?.transitionOutMs).toBe(200)
+    expect(clippedMid?.fromScale).toBeCloseTo(Math.SQRT2, 4)
+    expect(clippedMid?.fromTarget?.width).toBeCloseTo(1_920 / Math.SQRT2, 3)
+  })
 })

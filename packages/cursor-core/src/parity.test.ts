@@ -89,6 +89,7 @@ interface WasmEngine {
     timeMs: number,
     settings: CursorSettings,
   ) => ReturnType<ReturnType<typeof createCursorEngine>["evaluate"]>
+  evaluateMotionSamples: CursorEngine["evaluateMotionSamples"]
   evaluateMotionPlan: (
     timeMs: number,
     motionPlan: RenderPlanZoomMotionPlan,
@@ -109,6 +110,7 @@ function createWasmEngine(telemetry: CursorTelemetryFile): WasmEngine {
   const wrapped = wrapWasmCursorEngine(raw, telemetry)
   return {
     evaluate: wrapped.evaluate,
+    evaluateMotionSamples: wrapped.evaluateMotionSamples,
     evaluateMotionPlan: (timeMs, motionPlan) =>
       JSON.parse(raw.evaluate_motion_plan(JSON.stringify(motionPlan), timeMs)),
     fit: (sourceX, sourceY, targetWidth, targetHeight, padding) =>
@@ -367,5 +369,45 @@ describe("cursor engine cross-language parity", () => {
     expect(
       engine.evaluateMotionPlan(0, { version: 1, kind: "cubic-bezier", segments: [] }),
     ).toBeNull()
+  })
+
+  it("evaluateMotionSamples is identical between wasm and typescript", () => {
+    const telemetry = loadFixture("cursor-v1-left-clicks-10s.json")
+    const tsEngine = createCursorEngine(telemetry)
+    const wasmEngine = createWasmEngine(telemetry)
+    const settings: CursorSettings = {
+      ...defaultCursorSettings,
+      smoothMovement: true,
+      smoothFactor: 0.18,
+      clickPressAnimation: true,
+    }
+
+    for (const timeMs of [50, 250, 800, 1500, 4200]) {
+      for (const [shutter, samples] of [
+        [0, 1],
+        [0.5, 5],
+        [1, 16],
+      ] as const) {
+        const wasmSamples = wasmEngine.evaluateMotionSamples(
+          timeMs,
+          1000 / 30,
+          shutter,
+          samples,
+          settings,
+        )
+        const tsSamples = tsEngine.evaluateMotionSamples(
+          timeMs,
+          1000 / 30,
+          shutter,
+          samples,
+          settings,
+        )
+        expect(wasmSamples.length).toBe(tsSamples.length)
+        for (let i = 0; i < tsSamples.length; i++) {
+          expect(wasmSamples[i].x).toBeCloseTo(tsSamples[i].x, 2)
+          expect(wasmSamples[i].y).toBeCloseTo(tsSamples[i].y, 2)
+        }
+      }
+    }
   })
 })

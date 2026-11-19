@@ -200,6 +200,64 @@ describe("resolveLoupeAt", () => {
     const pose = resolveLoupeAt(rounded, makeState([rounded]), 2_500)
     expect(loupeCornerRadius(pose)).toBeCloseTo((pose.rect.width * 0.2) / 2, 6)
   })
+
+  it("maps parked zoom-space targets into screenRect on a 9:16 portrait canvas", () => {
+    // 9:16 portrait canvas with a centered 16:9 screen slot (letterboxed top/bottom).
+    const segment = loupeSegment({
+      target: { x: 270, y: 480, width: 540, height: 960 },
+      scale: 2,
+    })
+    const state = makeState([segment])
+    state.canvas = { ...state.canvas, width: 1_080, height: 1_920, padding: 48 }
+    const screenRect = { x: 48, y: 688, width: 984, height: 554 }
+
+    const pose = resolveLoupeAt(segment, state, 2_500, null, null, { screenRect })
+    // Target centre in zoom space is (540, 960) = (0.5, 0.5), which maps to the
+    // exact centre of screenRect in canvas pixels.
+    expect(pose.center.x).toBeCloseTo(48 + 984 / 2, 6)
+    expect(pose.center.y).toBeCloseTo(688 + 554 / 2, 6)
+    // Lens stays a true square sized from the canvas short edge (1080).
+    expect(pose.rect.width).toBeCloseTo(0.34 * 1_080, 6)
+    expect(pose.rect.width).toBeCloseTo(pose.rect.height, 6)
+
+    const sample = loupeSampleSquare(pose, screenRect)
+    expect(sample.x).toBeGreaterThanOrEqual(screenRect.x - 1e-6)
+    expect(sample.y).toBeGreaterThanOrEqual(screenRect.y - 1e-6)
+    expect(sample.x + sample.width).toBeLessThanOrEqual(screenRect.x + screenRect.width + 1e-6)
+    expect(sample.y + sample.height).toBeLessThanOrEqual(screenRect.y + screenRect.height + 1e-6)
+  })
+
+  it("separates zoomed display position from unzoomed sample target during overlapping frame zoom", () => {
+    const segment = loupeSegment({
+      loupe: resolveLoupeSettings({ offset: { x: 20, y: -15 } }),
+    })
+    const state = makeState([segment])
+    const screenRect = { x: 48, y: 27, width: 1_824, height: 1_026 }
+    // Cursor is at (480, 270) in zoom space, i.e. 25% across screenRect, while
+    // an active frame zoom places the visible cursor at (1200, 600) on canvas.
+    const pose = resolveLoupeAt(
+      segment,
+      state,
+      2_500,
+      null,
+      { x: 480, y: 270 },
+      {
+        screenRect,
+        displayCursorPoint: { x: 1_200, y: 600 },
+      },
+    )
+
+    expect(pose.following).toBe(true)
+    // Lens rides the visible (zoomed) cursor position + offset.
+    expect(pose.center.x).toBeCloseTo(1_220, 6)
+    expect(pose.center.y).toBeCloseTo(585, 6)
+    // Magnified sample stays centred on the unzoomed screen point underneath.
+    expect(pose.target.x + pose.target.width / 2).toBeCloseTo(48 + 1_824 * 0.25, 6)
+    expect(pose.target.y + pose.target.height / 2).toBeCloseTo(27 + 1_026 * 0.25, 6)
+    // Following uses a 1x1 target (matching Rust loupe.rs) so edge points never double-clamp.
+    expect(pose.target.width).toBe(1)
+    expect(pose.target.height).toBe(1)
+  })
 })
 
 describe("loupeSampleSquare", () => {

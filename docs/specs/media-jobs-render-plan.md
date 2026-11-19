@@ -578,10 +578,13 @@ adjacent silence, merged into one `ripple-delete-ranges` command.
 
 **Authoring and preview.**
 
-- _Canvas Layout → Effects:_ a Zoom clarity select (`off | auto | strong`) and a
-  Pro Motion blur block (cursor / zoom / pan shutter sliders, 0–100% where 100%
-  is a 180° shutter). Both write `canvas.zoomSharpening` / `canvas.motionBlur`
-  through the ordinary `update-canvas` command.
+- _Canvas Layout → Effects & Focus panel:_ a Zoom clarity select (`off | auto | strong`)
+  and a Pro Motion blur block with cinema shutter presets (`Subtle 90°`,
+  `Natural 180°`, `Cinematic 270°`, `Dynamic 360°`), a proportional Strength
+  slider, a collapsible per-source Channel mix (cursor / zoom / pan where 50%
+  is a 180° shutter and 100% is a 360° full-frame shutter), and a 1-click
+  Preview jump to the nearest motion frame. Both write `canvas.zoomSharpening` /
+  `canvas.motionBlur` through the ordinary `update-canvas` command.
 - _Zoom inspector → Presentation:_ a Zoom frame / Glass Loupe toggle plus lens
   shape, size, ring width and glass rim controls. The lens always rides the
   cursor — a canvas drag writes a `loupe.offset` nudge — and Reset lens
@@ -594,9 +597,12 @@ adjacent silence, merged into one `ripple-delete-ranges` command.
   `object-contain` box, and the visible A/B slot is preferred) through the same
   `diameter / scale` square the export samples, so the magnification can never
   drift from the lens geometry. Ring, glass highlight and shadow are drawn
-  above the canvas. Zoom/pan motion blur is approximated with a velocity-scaled
-  CSS blur on the screen surface — a preview hint only; the GPU export averages
-  real sub-frame crops.
+  above the canvas. Screen zoom/pan motion blur renders through
+  `ScreenMotionBlurOverlay` (a deterministic WebGL multi-tap shutter-strip
+  shader matching `composite.wgsl`, with Canvas2D fallback) so playback,
+  scrubbing, and paused frames all match export live; cursor motion blur
+  accumulates WASM-evaluated sub-frame poses linearly in premultiplied RGBA
+  inside `CursorMotionBlurCanvas`, matching Rust `exports/cursor.rs`.
 - _Audio panel → Filler words:_ the card maps the caption track's `sourceWords`
   through the same coverage mapping caption resync uses, lists candidates with
   context, and applies the accepted ones as one `ripple-delete-ranges`. It

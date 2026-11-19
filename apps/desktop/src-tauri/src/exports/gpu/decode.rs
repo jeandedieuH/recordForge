@@ -345,9 +345,11 @@ fn segment_filter(
     // picture already framed, which is what the background/radius composite
     // expects.
     let (content_x, content_y, content_w, content_h) = content;
+    // Centre the aspect-fitted picture inside the content rect when even-pixel
+    // rounding makes `iw < content_w` or `ih < content_h` (no-op when exact).
     filter.push_str(&format!(
         ",scale={content_w:.0}:{content_h:.0}:force_original_aspect_ratio=decrease:force_divisible_by=2:threads=auto,\
-pad={width}:{height}:{content_x:.0}:{content_y:.0}:color=black,fps={fps},setsar=1,\
+pad={width}:{height}:{content_x:.0}+({content_w:.0}-iw)/2:{content_y:.0}+({content_h:.0}-ih)/2:color=black,fps={fps},setsar=1,\
 tpad=stop_mode=clone:stop_duration={segment_duration},\
 tpad=stop_mode=add:stop_duration={segment_duration}:color=black,\
 trim=end_frame={frames},setpts=PTS-STARTPTS[{label}]"

@@ -352,8 +352,9 @@ pub(crate) fn effect_support(
                     downgrades.push(EffectDowngrade {
                         effect: "motion-blur".into(),
                         reason: format!(
-                            "Fast motion blurred with up to {} taps instead of the compositor's 16",
-                            super::camera::COMPAT_MAX_BLUR_TAPS
+                            "Fast motion blurred with up to {} taps instead of the compositor's {}",
+                            super::camera::COMPAT_MAX_BLUR_TAPS,
+                            super::camera::GPU_MAX_BLUR_TAPS,
                         ),
                     });
                 }
@@ -664,17 +665,8 @@ pub(crate) fn render_timeline_on_gpu(
     } else {
         1.0
     };
-    let plane = (
-        // NV12 + the compositor's plane creation need a 4x2 grid.
-        ((width as f64 * detail_scale).round() as u32) & !3,
-        ((height as f64 * detail_scale).round() as u32) & !1,
-    );
-    let content = (
-        frame.rect.0 * detail_scale,
-        frame.rect.1 * detail_scale,
-        frame.rect.2 * detail_scale,
-        frame.rect.3 * detail_scale,
-    );
+    let (plane, content) = detail_plane_layout(width, height, frame.rect, detail_scale);
+    let detail_active = plane != (width, height);
     let plate_runtimes = build_overlay_runtime(
         plan,
         project_id,
@@ -682,6 +674,7 @@ pub(crate) fn render_timeline_on_gpu(
         settings,
         canvas,
         &frame,
+        detail_active.then_some((content.2, content.3)),
         shared,
     )?
     .unwrap_or_default();
@@ -705,10 +698,11 @@ pub(crate) fn render_timeline_on_gpu(
         ));
     }
 
-    let mut compositor = compositor::Compositor::new(
+    let mut compositor = compositor::Compositor::new_with_source_rect(
         width,
         height,
         plane,
+        Some(content),
         &frame,
         &spec,
         detail.sharpening as f32,
@@ -928,15 +922,17 @@ pub(crate) fn render_timeline_on_gpu(
                             index,
                         )
                     });
-                    // The lens rides the rendered cursor tip, which only the
-                    // plate worker's `CursorRenderer` can map — send it along
-                    // with the planes at the frame's exact CFR timestamp.
-                    let cursor_point = if has_loupes {
-                        runtime
-                            .worker
-                            .cursor_canvas_point_at(super::cursor::frame_time_ms(index, fps))
+                    // The lens rides the rendered cursor tip (`cursor_point`)
+                    // while magnifying the unzoomed screen point beneath it
+                    // (`cursor_sample_point`) when a frame zoom overlaps.
+                    let (cursor_point, cursor_sample_point) = if has_loupes {
+                        let ts = super::cursor::frame_time_ms(index, fps);
+                        (
+                            runtime.worker.cursor_canvas_point_at(ts),
+                            runtime.worker.cursor_unzoomed_canvas_point_at(ts),
+                        )
                     } else {
-                        None
+                        (None, None)
                     };
                     if sender
                         .send(PlateFrames {
@@ -944,6 +940,7 @@ pub(crate) fn render_timeline_on_gpu(
                             items,
                             keys,
                             cursor_point,
+                            cursor_sample_point,
                         })
                         .is_err()
                     {
@@ -957,6 +954,7 @@ pub(crate) fn render_timeline_on_gpu(
         }
         drop(plate_senders);
 
+        let blur_params = camera::motion_blur_params(canvas);
         let mut main_result: Result<()> = Ok(());
         let mut emitted = 0u64;
         let mut sent_frames = 0u64;
@@ -998,6 +996,7 @@ pub(crate) fn render_timeline_on_gpu(
                 PlateFrames::default()
             };
             let cursor_point = planes.cursor_point;
+            let cursor_sample_point = planes.cursor_sample_point;
             let planes = (planes.cursor, planes.items, planes.keys);
 
             let mut camera_frames = Vec::new();
@@ -1067,61 +1066,87 @@ pub(crate) fn render_timeline_on_gpu(
             }
             let has_screen = !is_gap_at(plan, output_ms);
             // Glass Loupe (#2): one lens per frame riding the cursor tip,
-            // above the screen. While a lens is visible the cursor itself is
-            // dropped below — the pointer stays hidden under the glass.
-            let loupe = has_loupes
+            // above the screen. While a lens follows the cursor the pointer
+            // hides under the glass (matching preview's `visible && following`).
+            let loupe_resolved = has_loupes
                 .then(|| {
-                    super::loupe::resolve_loupe_at(
+                    super::loupe::resolve_loupe_in_rect(
                         &plan.zoom_segments,
                         canvas,
                         output_ms,
+                        dest,
                         cursor_point,
+                        cursor_sample_point,
                     )
                 })
                 .flatten()
-                .filter(super::loupe::LoupePose::is_visible)
-                .map(|pose| {
-                    // The sample square is normalized against the rect the
-                    // screen is actually drawn into this frame — the layout
-                    // pose inside camera-layout windows, not the base rect.
-                    let rect = dest;
-                    let ring = super::parse_color_hex(&pose.settings.ring_color, 1.0);
-                    // Magnification = `scale`: the lens samples `diameter /
-                    // scale` and draws it across the lens, so a 2x loupe is
-                    // twice as large. The square stays inside the frame.
-                    let target = super::loupe::loupe_sample_square(&pose, rect);
-                    compositor::LoupeFrame {
-                        center: (pose.center.0 as f32, pose.center.1 as f32),
-                        radius: pose.radius as f32,
-                        corner_radius: pose.corner_radius as f32,
-                        target: [
-                            ((target.0 - rect.0) / rect.2.max(1.0)) as f32,
-                            ((target.1 - rect.1) / rect.3.max(1.0)) as f32,
-                            (target.2 / rect.2.max(1.0)) as f32,
-                            (target.3 / rect.3.max(1.0)) as f32,
-                        ],
-                        ring_width: pose.settings.ring_width as f32,
-                        ring_opacity: pose.settings.ring_opacity as f32,
-                        ring_color: [ring.red(), ring.green(), ring.blue()],
-                        presence: pose.presence as f32,
-                        shadow_blur: pose.settings.shadow_blur as f32,
-                        shadow_opacity: pose.settings.shadow_opacity as f32,
-                        glass: pose.settings.glass,
-                    }
-                });
-            // The lens rides the cursor tip, so while a lens is visible the
-            // pointer hides under the glass: drop the cursor plane. The items
-            // and keys planes are unaffected.
-            let cursor_plane = if loupe.is_some() { None } else { planes.0 };
+                .filter(super::loupe::LoupePose::is_visible);
+            let loupe_following = loupe_resolved.as_ref().is_some_and(|pose| pose.following);
+            let loupe = loupe_resolved.map(|pose| {
+                // The sample square is normalized against the rect the
+                // screen is actually drawn into this frame — the layout
+                // pose inside camera-layout windows, not the base rect.
+                let rect = dest;
+                let ring = super::parse_color_hex(&pose.settings.ring_color, 1.0);
+                // Magnification = `scale`: the lens samples `diameter /
+                // scale` and draws it across the lens, so a 2x loupe is
+                // twice as large. The square stays inside the frame.
+                let target = super::loupe::loupe_sample_square(&pose, rect);
+                compositor::LoupeFrame {
+                    center: (pose.center.0 as f32, pose.center.1 as f32),
+                    radius: pose.radius as f32,
+                    corner_radius: pose.corner_radius as f32,
+                    target: [
+                        ((target.0 - rect.0) / rect.2.max(1.0)) as f32,
+                        ((target.1 - rect.1) / rect.3.max(1.0)) as f32,
+                        (target.2 / rect.2.max(1.0)) as f32,
+                        (target.3 / rect.3.max(1.0)) as f32,
+                    ],
+                    ring_width: pose.settings.ring_width as f32,
+                    ring_opacity: pose.settings.ring_opacity as f32,
+                    ring_color: [ring.red(), ring.green(), ring.blue()],
+                    presence: pose.presence as f32,
+                    shadow_blur: pose.settings.shadow_blur as f32,
+                    shadow_opacity: pose.settings.shadow_opacity as f32,
+                    glass: pose.settings.glass,
+                }
+            });
+            // Drop the cursor plane only while a lens is actually riding it;
+            // a parked lens leaves the cursor visible, matching preview.
+            let cursor_plane = if loupe_following { None } else { planes.0 };
             let has_layers = cursor_plane.is_some()
                 || planes.1.is_some()
                 || planes.2.is_some()
                 || !camera_frames.is_empty();
+            // Motion blur (#1): compute the continuous shutter strip BEFORE the
+            // bypass check so transition boundary frames where `t` is identity
+            // while `t ± half` enters/exits a zoom still render with blur.
+            // Cursor blur rides the shared Rust rasterizer, so it costs nothing here.
+            let blur = has_screen
+                .then(|| {
+                    blur_params.and_then(|params| {
+                        camera::evaluate_motion_blur_strip(
+                            &plan.zoom_segments,
+                            canvas,
+                            &params,
+                            output_ms,
+                            dest.2,
+                            dest.3,
+                        )
+                        .map(|strip| compositor::CropStrip {
+                            start: strip.start,
+                            end: strip.end,
+                            taps: strip.taps,
+                        })
+                    })
+                })
+                .flatten();
             // Identity-zoom frames never reach a shader unless a layer, mask,
-            // canvas treatment or lens needs one.
-            let bypass = detail_scale == 1.0
+            // canvas treatment, motion blur or lens needs one.
+            let bypass = !detail_active
                 && has_screen
                 && camera::zoom_transform_is_identity(&state, width, height)
+                && blur.is_none()
                 && frame.is_plain(width, height)
                 && !has_layers
                 && masks.is_empty()
@@ -1135,14 +1160,6 @@ pub(crate) fn render_timeline_on_gpu(
             } else {
                 composed_frames += 1;
                 compositor::Frame::Compose(compositor::Nv12Frame { data: decoded })
-            };
-            // Motion blur (#1): zoom/pan shutters sample the crop at the
-            // shutter's start and end. Cursor blur rides the shared Rust
-            // rasterizer, so it costs nothing here.
-            let blur = if bypass {
-                None
-            } else {
-                motion_blur_strip(&plan.zoom_segments, canvas, output_ms, content)
             };
             let request = compositor::FrameRequest {
                 crop: if bypass {
@@ -1307,9 +1324,11 @@ struct PlateFrames {
     cursor: Option<compositor::PlaneFrame>,
     items: Option<compositor::PlaneFrame>,
     keys: Option<compositor::PlaneFrame>,
-    /// The cursor tip's canvas position at this frame — `None` unless the plan
-    /// has loupes (the lens rides it) or the cursor is not drawn.
+    /// Displayed cursor tip's canvas position (zoomed) — drives lens placement.
     cursor_point: Option<(f64, f64)>,
+    /// Unzoomed cursor tip's canvas position on the fitted screen — drives what
+    /// the Glass Loupe magnifies when a frame zoom overlaps it.
+    cursor_sample_point: Option<(f64, f64)>,
 }
 
 /// One generated-plate worker: per-frame raster state plus the immutable rects
@@ -1406,6 +1425,7 @@ impl Drop for CameraRuntime {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_overlay_runtime(
     plan: &RenderPlan,
     project_id: &str,
@@ -1413,6 +1433,7 @@ fn build_overlay_runtime(
     settings: &ExportSettings,
     canvas: &super::cursor::RenderCanvas,
     frame: &compositor::CanvasFrame,
+    detail_content_size: Option<(f64, f64)>,
     shared: &CompositionShared,
 ) -> Result<Option<Vec<OverlayRuntime>>> {
     let has_cursor = plan
@@ -1432,7 +1453,7 @@ fn build_overlay_runtime(
         return Ok(None);
     }
     let screen_windows = cursor_screen_windows(plan, frame);
-    let renderers = super::build_cursor_renderers(
+    let mut renderers = super::build_cursor_renderers(
         plan,
         project_id,
         asset_paths,
@@ -1441,6 +1462,11 @@ fn build_overlay_runtime(
         screen_windows,
         shared,
     )?;
+    if let Some((detail_w, detail_h)) = detail_content_size {
+        for (_, _, renderer) in &mut renderers {
+            renderer.set_zoom_input_size(detail_w, detail_h);
+        }
+    }
     let frame_count = plan
         .duration_ms
         .saturating_mul(canvas.fps.max(1) as u64)
@@ -2094,95 +2120,39 @@ fn zoom_crop(
     }
 }
 
-/// Zoom/pan motion blur (#1): the crops at the shutter's start and end with the
-/// zoom and pan sliders weighting the size and centre components separately,
-/// plus the tap count the swept distance needs. `None` when the plan has no
-/// blur, the frame does not move, or the sweep is under a pixel.
-fn motion_blur_strip(
-    zoom_segments: &[super::RenderPlanZoomSegment],
-    canvas: &super::cursor::RenderCanvas,
-    output_ms: f64,
-    content: (f64, f64, f64, f64),
-) -> Option<compositor::CropStrip> {
-    let blur = canvas
-        .motion_blur
-        .as_ref()
-        .filter(|blur| blur.is_active())?;
-    let shutter = blur.zoom.max(blur.pan).clamp(0.0, 1.0);
-    if shutter <= 0.0 {
-        return None;
+/// Maximum single-axis dimension for the GPU zoom detail plane (stays within
+/// the guaranteed WebGPU 8192×8192 texture limit on every adapter).
+const MAX_DETAIL_PLANE_DIM: u32 = 8192;
+
+/// Compute the NV12-aligned decoded plane size (`plane`, multiple of 4×2) and
+/// the exact even-snapped picture rect (`content`) inside it so FFmpeg's
+/// `scale`/`pad`, `zoom_crop`, and `composite.wgsl` (`source_rect`) agree to
+/// the pixel and `pad` can never receive a target smaller than the scaled content.
+fn detail_plane_layout(
+    canvas_width: u32,
+    canvas_height: u32,
+    frame_rect: (f64, f64, f64, f64),
+    detail_scale: f64,
+) -> ((u32, u32), (f64, f64, f64, f64)) {
+    if detail_scale <= 1.0 + 1e-6 {
+        return ((canvas_width, canvas_height), frame_rect);
     }
-    let frame_ms = 1000.0 / canvas.fps.max(1) as f64;
-    let half = frame_ms * shutter / 2.0;
-    let before = camera::evaluate_zoom_transform(
-        zoom_segments,
-        canvas.width,
-        canvas.height,
-        canvas.padding,
-        (output_ms - half).max(0.0),
-    );
-    let after = camera::evaluate_zoom_transform(
-        zoom_segments,
-        canvas.width,
-        canvas.height,
-        canvas.padding,
-        output_ms + half,
-    );
-    let before_crop = zoom_crop(&before, canvas.width, canvas.height, content);
-    let after_crop = zoom_crop(&after, canvas.width, canvas.height, content);
-
-    let zoom_weight = blur.zoom.clamp(0.0, 1.0);
-    let pan_weight = blur.pan.clamp(0.0, 1.0);
-    let width_before = before_crop.width as f64;
-    let width_after = width_before + (after_crop.width as f64 - width_before) * zoom_weight;
-    let centre_before = (
-        before_crop.x as f64 + before_crop.width as f64 / 2.0,
-        before_crop.y as f64 + before_crop.height as f64 / 2.0,
-    );
-    let centre_after = (
-        centre_before.0
-            + (after_crop.x as f64 + after_crop.width as f64 / 2.0 - centre_before.0) * pan_weight,
-        centre_before.1
-            + (after_crop.y as f64 + after_crop.height as f64 / 2.0 - centre_before.1) * pan_weight,
-    );
-
-    let content_w = content.2.max(2.0);
-    let content_h = content.3.max(2.0);
-    let even = |value: f64| ((value.round() as u32) & !1).max(2);
-    let snapped = |width: f64, centre: (f64, f64)| -> compositor::Crop {
-        let w = even(width.min(content_w));
-        let aspect = content_h / content_w;
-        let h = even(w as f64 * aspect).min(even(content_h));
-        let x = (centre.0 - w as f64 / 2.0)
-            .round()
-            .clamp(0.0, (content_w - w as f64).max(0.0));
-        let y = (centre.1 - h as f64 / 2.0)
-            .round()
-            .clamp(0.0, (content_h - h as f64).max(0.0));
-        compositor::Crop {
-            x: x as u32,
-            y: y as u32,
-            width: w,
-            height: h,
-        }
-    };
-    let start = snapped(width_before, centre_before);
-    let end = snapped(width_after, centre_after);
-
-    // Tap count follows the swept pixel distance: two pixels per tap, capped
-    // so a fast flick cannot make one frame arbitrarily expensive.
-    let sweep = (end.width as f64 - start.width as f64).abs().max(
-        ((end.x as f64 + end.width as f64 / 2.0 - start.x as f64 - start.width as f64 / 2.0)
-            .powi(2)
-            + (end.y as f64 + end.height as f64 / 2.0
-                - start.y as f64
-                - start.height as f64 / 2.0)
-                .powi(2))
-        .sqrt(),
-    );
-    let taps = ((sweep / 2.0).ceil() as u32).clamp(1, 16);
-    // A tap count of one would resample the same crop: keep the sharp path.
-    (taps > 1).then_some(compositor::CropStrip { start, end, taps })
+    let max_scale_x = MAX_DETAIL_PLANE_DIM as f64 / canvas_width.max(1) as f64;
+    let max_scale_y = MAX_DETAIL_PLANE_DIM as f64 / canvas_height.max(1) as f64;
+    let scale = detail_scale.min(max_scale_x).min(max_scale_y).max(1.0);
+    if scale <= 1.0 + 1e-6 {
+        return ((canvas_width, canvas_height), frame_rect);
+    }
+    let cx = ((frame_rect.0 * scale).round().max(0.0) as u32) & !1;
+    let cy = ((frame_rect.1 * scale).round().max(0.0) as u32) & !1;
+    let cw = (((frame_rect.2 * scale).round().max(2.0) as u32) & !1).max(2);
+    let ch = (((frame_rect.3 * scale).round().max(2.0) as u32) & !1).max(2);
+    let pw = (((canvas_width as f64 * scale).ceil() as u32).max(cx + cw) + 3) & !3;
+    let ph = (((canvas_height as f64 * scale).ceil() as u32).max(cy + ch) + 1) & !1;
+    (
+        (pw.max(4), ph.max(2)),
+        (cx as f64, cy as f64, cw as f64, ch as f64),
+    )
 }
 
 /// Short, path-free error for the GPU path.
@@ -3613,5 +3583,47 @@ mod tests {
             assert_eq!(crop.height % 2, 0);
             previous = crop.width;
         }
+    }
+
+    #[test]
+    fn detail_plane_layout_rounds_up_to_nv12_grid_and_caps_texture_dim() {
+        // 1) Regression: padding == 0 with detail_scale = 2150 / 1920 produces
+        //    even content.width = 2150 (% 4 == 2). Plane must round UP to 2152
+        //    (>= content.2), NEVER down to 2148 which crashed FFmpeg `pad`.
+        let (plane, content) =
+            detail_plane_layout(1920, 1080, (0.0, 0.0, 1920.0, 1080.0), 2150.0 / 1920.0);
+        assert_eq!(plane.0 % 4, 0);
+        assert_eq!(plane.1 % 2, 0);
+        assert!(
+            plane.0 as f64 >= content.0 + content.2,
+            "plane width {} < content right {}",
+            plane.0,
+            content.0 + content.2
+        );
+        assert!(
+            plane.1 as f64 >= content.1 + content.3,
+            "plane height {} < content bottom {}",
+            plane.1,
+            content.1 + content.3
+        );
+        assert_eq!(plane.0, 2152);
+        assert_eq!(content.2, 2150.0);
+
+        // 2) Padded canvas: content origin and size stay even and inside plane.
+        let (padded_plane, padded_content) =
+            detail_plane_layout(1920, 1080, (48.0, 27.0, 1824.0, 1026.0), 1.5);
+        assert_eq!(padded_plane.0 % 4, 0);
+        assert_eq!(padded_plane.1 % 2, 0);
+        assert!(padded_plane.0 as f64 >= padded_content.0 + padded_content.2);
+        assert!(padded_plane.1 as f64 >= padded_content.1 + padded_content.3);
+
+        // 3) Extreme zoom on a 4K portrait canvas must stay within the 8192px
+        //    WebGPU texture limit while preserving content <= plane.
+        let (capped_plane, capped_content) =
+            detail_plane_layout(2160, 3840, (0.0, 0.0, 2160.0, 3840.0), 4.0);
+        assert!(capped_plane.0 <= MAX_DETAIL_PLANE_DIM);
+        assert!(capped_plane.1 <= MAX_DETAIL_PLANE_DIM);
+        assert!(capped_plane.0 as f64 >= capped_content.0 + capped_content.2);
+        assert!(capped_plane.1 as f64 >= capped_content.1 + capped_content.3);
     }
 }

@@ -37,6 +37,21 @@ export class WasmCursorEngine {
         }
     }
     /**
+     * Per-frame shutter samples without JSON. Returns flat
+     * `[x0, y0, x1, y1, ...]` using the settings stored by `set_settings`.
+     * @param {number} time_ms
+     * @param {number} frame_duration_ms
+     * @param {number} shutter
+     * @param {number} samples
+     * @returns {Float64Array}
+     */
+    evaluate_motion_samples_packed(time_ms, frame_duration_ms, shutter, samples) {
+        const ret = wasm.wasmcursorengine_evaluate_motion_samples_packed(this.__wbg_ptr, time_ms, frame_duration_ms, shutter, samples);
+        var v1 = getArrayF64FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 8, 8);
+        return v1;
+    }
+    /**
      * Per-frame evaluation without JSON. Returns the flat f64 layout
      * documented on `CursorEngine::evaluate_packed`.
      * @param {number} time_ms

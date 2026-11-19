@@ -155,7 +155,9 @@ pub(crate) fn analyze_zoom_detail(
     if frame_count == 0 || zoom_segments.is_empty() || content.0 == 0 || content.1 == 0 {
         return empty(1.0);
     }
-    let ratio = source.0 as f64 / content.0 as f64;
+    // Use the limiting fit axis so portrait/narrow high-res sources inside wide
+    // canvases also report their true available source pixels per content pixel.
+    let ratio = (source.0 as f64 / content.0 as f64).max(source.1 as f64 / content.1 as f64);
     if ratio <= DETAIL_MIN_RATIO {
         // The canvas already carries full source detail: nothing to sample.
         return empty(ratio);
@@ -211,11 +213,14 @@ pub(crate) fn analyze_zoom_detail(
         return empty(ratio);
     }
 
-    // Sample at the resolution the widest zoom can actually use, never above
-    // the source, and keep both axes on an even grid for NV12.
+    // Sample at the resolution the widest zoom can actually use, keeping both
+    // axes on an even grid for NV12 and preserving `content`'s aspect ratio.
+    // Because `factor <= ratio = 1 / fit`, the aspect-fitted source picture
+    // inside `(width, height)` never exceeds `(source.0, source.1)`, even when
+    // source and canvas aspect ratios differ (e.g. 16:9 source in 9:16 canvas).
     let factor = max_scale.min(ratio);
-    let width = even_clamp(content.0 as f64 * factor, source.0);
-    let height = even_clamp(content.1 as f64 * factor, source.1);
+    let width = even_round(content.0 as f64 * factor);
+    let height = even_round(content.1 as f64 * factor);
     let needed = width > content.0 && height > content.1;
 
     ZoomDetailPlan {
@@ -238,9 +243,8 @@ pub(crate) fn analyze_zoom_detail(
     }
 }
 
-fn even_clamp(value: f64, limit: u32) -> u32 {
-    let snapped = ((value.round() as u32) & !1).max(2);
-    snapped.min(limit.max(2) & !1)
+fn even_round(value: f64) -> u32 {
+    ((value.round() as u32) & !1).max(2)
 }
 
 #[cfg(test)]
@@ -361,5 +365,54 @@ mod tests {
             (rcas_strength(1.2, 1.0, "strong") - ((0.2_f64 / 0.35) * 2.0).min(1.0)).abs() < 1e-9
         );
         assert_eq!(rcas_strength(1.5, 2.0, "auto"), 0.0);
+    }
+
+    #[test]
+    fn mismatched_aspect_high_res_sources_still_activate_detail_plane() {
+        // 1) Portrait 1080x2400 recording in a 1920x1080 landscape canvas:
+        //    vertical ratio = 2400 / 1080 = 2.222 -> 2x zoom gets a 3840x2160 plane.
+        let portrait_in_landscape = analyze_zoom_detail(
+            &[zoom(0, 2_000, 2.0)],
+            &canvas(30),
+            (1920, 1080),
+            (1080, 2400),
+            0,
+            60,
+        );
+        assert!(portrait_in_landscape.needed);
+        assert!((portrait_in_landscape.resolution_ratio - 2400.0 / 1080.0).abs() < 1e-6);
+        assert_eq!(
+            (portrait_in_landscape.width, portrait_in_landscape.height),
+            (3840, 2160)
+        );
+        // m (2.0) <= r (2.222), so no post-upscale sharpening is needed.
+        assert_eq!(portrait_in_landscape.sharpening, 0.0);
+
+        // 2) Landscape 2560x1440 recording in a 1080x1920 (9:16) portrait canvas:
+        //    horizontal ratio = 2560 / 1080 = 2.370 -> 2x zoom gets a 2160x3840 plane.
+        let mut portrait_canvas = canvas(30);
+        portrait_canvas.width = 1080;
+        portrait_canvas.height = 1920;
+        let mut portrait_zoom = zoom(0, 2_000, 2.0);
+        portrait_zoom.target = RenderCropFloat {
+            x: 270.0,
+            y: 480.0,
+            width: 540.0,
+            height: 960.0,
+        };
+        let landscape_in_portrait = analyze_zoom_detail(
+            &[portrait_zoom],
+            &portrait_canvas,
+            (1080, 1920),
+            (2560, 1440),
+            0,
+            60,
+        );
+        assert!(landscape_in_portrait.needed);
+        assert!((landscape_in_portrait.resolution_ratio - 2560.0 / 1080.0).abs() < 1e-6);
+        assert_eq!(
+            (landscape_in_portrait.width, landscape_in_portrait.height),
+            (2160, 3840)
+        );
     }
 }

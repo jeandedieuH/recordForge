@@ -47,6 +47,7 @@ import {
   cameraCutoutSchema,
   cameraFaceTrackingSchema,
 } from "@recordforge/contracts"
+import { canonicalizeZoomTarget } from "@recordforge/cursor-core"
 import { canvasSizeForAspectRatio, clampZoomTarget, getManualZoomSegments } from "./composition"
 import { buildCameraSilenceLayouts } from "./camera-silence"
 import { partitionAudioEnvelope } from "./audio-envelope"
@@ -3979,6 +3980,68 @@ const SMART_LAYOUT_VIDEO_POSITION_Y: Record<CanvasAspectRatio, number> = {
   "5:4": 0.05,
   "4:5": 0.1,
 }
+/**
+ * Rescale zoom targets and loupe offsets/centres proportionally when canvas
+ * dimensions change (resolution tier or aspect ratio switch), preserving each
+ * segment's normalized focal position and magnification instead of pinning old
+ * pixel rects to the top-left of a larger canvas.
+ */
+function reconcileZoomSegmentsForCanvas(
+  state: TimelineState,
+  previousCanvas: TimelineCanvas,
+): TimelineState {
+  const segments = state.zoomSegments
+  if (!segments || segments.length === 0) return state
+  if (
+    previousCanvas.width === state.canvas.width &&
+    previousCanvas.height === state.canvas.height
+  ) {
+    return state
+  }
+  const oldW = Math.max(1, previousCanvas.width)
+  const oldH = Math.max(1, previousCanvas.height)
+  const scaleX = state.canvas.width / oldW
+  const scaleY = state.canvas.height / oldH
+
+  const nextSegments = segments.map((segment) => {
+    const scaledTarget = {
+      x: segment.target.x * scaleX,
+      y: segment.target.y * scaleY,
+      width: segment.target.width * scaleX,
+      height: segment.target.height * scaleY,
+    }
+    const target = canonicalizeZoomTarget(scaledTarget, state.canvas, segment.scale)
+    const loupe = segment.loupe
+      ? {
+          ...segment.loupe,
+          ...(segment.loupe.center
+            ? {
+                center: {
+                  x: segment.loupe.center.x * scaleX,
+                  y: segment.loupe.center.y * scaleY,
+                },
+              }
+            : {}),
+          ...(segment.loupe.offset
+            ? {
+                offset: {
+                  x: segment.loupe.offset.x * scaleX,
+                  y: segment.loupe.offset.y * scaleY,
+                },
+              }
+            : {}),
+        }
+      : undefined
+    return {
+      ...segment,
+      target,
+      ...(loupe ? { loupe } : {}),
+    }
+  })
+
+  return { ...state, zoomSegments: nextSegments }
+}
+
 function applyUpdateCanvas(
   state: TimelineState,
   command: UpdateCanvasCommand,
@@ -4025,13 +4088,15 @@ function applyUpdateCanvas(
 
   // ADR 023 phase 4: camera frames are resolution-independent, so a canvas
   // change rebuilds `origin: "auto"` frames for the new ratio and re-mirrors
-  // every clip's transform — pinned placements keep their fractions.
+  // every clip's transform — pinned placements keep their fractions. Zoom
+  // segments rescale proportionally so targets stay registered on the canvas.
+  const updated = reconcileZoomSegmentsForCanvas(
+    { ...state, canvas: nextCanvas, updatedAt: now() },
+    state.canvas,
+  )
   return {
     ok: true,
-    value: reconcileCameraFramesForCanvas(
-      { ...state, canvas: nextCanvas, updatedAt: now() },
-      state.canvas,
-    ),
+    value: reconcileCameraFramesForCanvas(updated, state.canvas),
   }
 }
 

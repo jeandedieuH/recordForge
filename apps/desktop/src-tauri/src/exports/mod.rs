@@ -3650,15 +3650,25 @@ fn render_composition_window(
         && screen_y.abs() < 0.5;
 
     let base_label = "canvas_base";
-    // Zoom clarity (#3) on the compatibility renderer: a mild luma sharpening
-    // pass after the zoom stage, but only when the source actually carries more
-    // detail than the fitted plane (`r > 1.02`) — otherwise the zoom is a plain
-    // upscale and both renderers stay identical. The GPU path uses the
-    // RCAS-style pass instead; ADR 020 reports the difference as
-    // `zoom-sharpening`.
-    let zoom_has_detail =
-        screen_source.is_some_and(|(source_w, _)| source_w as f64 / screen_w.max(1.0) > 1.02);
-    let zoom_sharpening = if zoom_has_detail {
+    // Zoom clarity (#3) on the compatibility renderer: gate `unsharp` on the
+    // exact same `analyze_zoom_detail` criterion as the GPU compositor (`m > r`
+    // and `r > 1.02`, mode != "off"), and pass it into `push_zoom_stage` so
+    // only zoomed, non-motion-blurred pieces are sharpened — identity frames in
+    // a zoomed chunk keep their untouched pixels like GPU.
+    let zoom_detail_plan = screen_source.map(|source| {
+        zoom_detail::analyze_zoom_detail(
+            &plan.zoom_segments,
+            canvas,
+            (
+                screen_w.round().max(1.0) as u32,
+                screen_h.round().max(1.0) as u32,
+            ),
+            source,
+            window.first_frame,
+            window.frame_count,
+        )
+    });
+    let zoom_sharpening = if zoom_detail_plan.is_some_and(|detail| detail.sharpening > 0.0) {
         compat_zoom_sharpening(canvas)
     } else {
         None
@@ -3673,15 +3683,10 @@ fn render_composition_window(
         filters.push(format!(
             "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},tpad=stop_mode=add:stop_duration={plan_duration}:color=black,trim=duration={plan_duration},setpts=PTS-STARTPTS{abs_pts},format=yuv420p[zoom_src]"
         ));
-        let zoom_label = if zoom_sharpening.is_some() {
-            "zoom_sharp"
-        } else {
-            base_label
-        };
         push_zoom_stage(
             &mut filters,
             "[zoom_src]",
-            zoom_label,
+            base_label,
             plan,
             canvas,
             window.first_frame,
@@ -3689,25 +3694,18 @@ fn render_composition_window(
             canvas.width as f64,
             canvas.height as f64,
             &abs_pts,
+            zoom_sharpening.as_deref(),
         );
-        if let Some(sharpening) = &zoom_sharpening {
-            filters.push(format!("[{zoom_label}]{sharpening}[{base_label}]"));
-        }
     } else if can_pad_canvas && has_zoom {
         let canvas_w = canvas.width;
         let canvas_h = canvas.height;
         filters.push(format!(
             "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},tpad=stop_mode=add:stop_duration={plan_duration}:color=black,trim=duration={plan_duration},setpts=PTS-STARTPTS{abs_pts},format=yuv420p[zoom_src]"
         ));
-        let zoom_label = if zoom_sharpening.is_some() {
-            "zoom_sharp"
-        } else {
-            "zoom_fitted"
-        };
         push_zoom_stage(
             &mut filters,
             "[zoom_src]",
-            zoom_label,
+            "zoom_fitted",
             plan,
             canvas,
             window.first_frame,
@@ -3715,10 +3713,8 @@ fn render_composition_window(
             screen_w,
             screen_h,
             &abs_pts,
+            zoom_sharpening.as_deref(),
         );
-        if let Some(sharpening) = &zoom_sharpening {
-            filters.push(format!("[{zoom_label}]{sharpening}[zoom_fitted]"));
-        }
         filters.push(format!(
             "[zoom_fitted]pad={canvas_w}:{canvas_h}:{screen_x:.0}:{screen_y:.0}:color={background},setsar=1[{base_label}]"
         ));
@@ -3767,15 +3763,10 @@ fn render_composition_window(
             filters.push(format!(
                 "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},tpad=stop_mode=add:stop_duration={plan_duration}:color=black,trim=duration={plan_duration},setpts=PTS-STARTPTS{abs_pts},format=yuv420p[zoom_src]"
             ));
-            let zoom_label = if zoom_sharpening.is_some() {
-                "zoom_sharp"
-            } else {
-                screen_base
-            };
             push_zoom_stage(
                 &mut filters,
                 "[zoom_src]",
-                zoom_label,
+                screen_base,
                 plan,
                 canvas,
                 window.first_frame,
@@ -3783,10 +3774,8 @@ fn render_composition_window(
                 screen_w,
                 screen_h,
                 &abs_pts,
+                zoom_sharpening.as_deref(),
             );
-            if let Some(sharpening) = &zoom_sharpening {
-                filters.push(format!("[{zoom_label}]{sharpening}[{screen_base}]"));
-            }
         } else {
             // A zoom-free chunk inside a zoomed timeline still carries the
             // same-size swscale pass identity `zoompan` performed, so its
@@ -3997,7 +3986,7 @@ fn render_composition_window(
         asset_paths,
         canvas,
         (screen_x, screen_y, screen_w, screen_h),
-        cursor_screen_windows,
+        cursor_screen_windows.clone(),
         shared,
     )?;
     // Renderers whose window never intersects this pass can never produce a
@@ -4066,6 +4055,7 @@ fn render_composition_window(
             canvas,
             &cursor_renderers,
             (screen_x, screen_y, screen_w, screen_h),
+            cursor_screen_windows.as_deref().unwrap_or(&[]),
             loupe_origin,
             loupe_plate,
             window.first_frame,
@@ -7200,19 +7190,29 @@ fn push_zoom_stage(
     screen_w: f64,
     screen_h: f64,
     abs_pts: &str,
+    sharpening: Option<&str>,
 ) {
     // Zoom/pan motion blur (M2 #1) rides the same crop expressions: each tap
     // is a `zoompan` branch sampling the shutter at a shifted `it`, then `mix`
     // averages them. `zoom`/`cx`/`cy` stay unwrapped so a tap can blend the
     // trajectory before the top-left clamp.
     let blur = camera::motion_blur_params(canvas);
-    let (z_expr, cx_expr, cy_expr) =
-        camera::build_zoompan_crop_expressions(plan, canvas, screen_w, screen_h);
+    let independent_centers = blur.is_some_and(|params| params.needs_independent_centers());
+    let (z_expr, cx_expr, cy_expr) = camera::build_zoompan_crop_expressions_with_options(
+        plan,
+        canvas,
+        screen_w,
+        screen_h,
+        independent_centers,
+    );
     let (x_expr, y_expr) = camera::wrap_zoompan_xy(&cx_expr, &cy_expr);
     let zoompan = format!(
         "zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d=1:s={screen_w:.0}x{screen_h:.0}:fps={},setsar=1",
         canvas.fps
     );
+    let sharp_suffix = sharpening
+        .map(|filter| format!(",{filter}"))
+        .unwrap_or_default();
     // zoompan emits 0-based output PTS, so a shifted pass must restore the
     // absolute timeline for downstream composites.
     let reabs = if abs_pts.is_empty() {
@@ -7263,7 +7263,9 @@ fn push_zoom_stage(
                 output_label,
             );
         } else {
-            filters.push(format!("{input_label}{zoompan}{reabs}[{output_label}]"));
+            filters.push(format!(
+                "{input_label}{zoompan}{sharp_suffix}{reabs}[{output_label}]"
+            ));
         }
         return;
     };
@@ -7272,7 +7274,7 @@ fn push_zoom_stage(
     if let [piece] = pieces.as_slice() {
         if let camera::ZoomPieceKind::Hold { x, y, w, h } = piece.kind {
             filters.push(format!(
-                "{input_label}crop={w}:{h}:{x}:{y},scale={screen_w:.0}:{screen_h:.0}:flags=bicubic:threads=auto,setsar=1[{output_label}]"
+                "{input_label}crop={w}:{h}:{x}:{y},scale={screen_w:.0}:{screen_h:.0}:flags=bicubic:threads=auto{sharp_suffix},setsar=1[{output_label}]"
             ));
             return;
         }
@@ -7305,6 +7307,7 @@ fn push_zoom_stage(
             _ => None,
         };
         if let Some((params, transition_taps)) = transition_blur {
+            // Skip sharpening on motion-blurred branches (mirrors GPU shader).
             push_blur_tap_chain(
                 filters,
                 &format!("zb{index}"),
@@ -7322,14 +7325,16 @@ fn push_zoom_stage(
             continue;
         }
         let body = match piece.kind {
+            // Identity frames stay unsharpened so unzoomed regions in a zoomed
+            // chunk match unzoomed chunks and the GPU compositor bit-for-bit.
             camera::ZoomPieceKind::Identity => format!(
                 "trim=start_frame={start}:end_frame={end},setpts=PTS-STARTPTS,setsar=1"
             ),
             camera::ZoomPieceKind::Hold { x, y, w, h } => format!(
-                "trim=start_frame={start}:end_frame={end},crop={w}:{h}:{x}:{y},scale={screen_w:.0}:{screen_h:.0}:flags=bicubic:threads=auto,setsar=1,setpts=PTS-STARTPTS"
+                "trim=start_frame={start}:end_frame={end},crop={w}:{h}:{x}:{y},scale={screen_w:.0}:{screen_h:.0}:flags=bicubic:threads=auto{sharp_suffix},setsar=1,setpts=PTS-STARTPTS"
             ),
             camera::ZoomPieceKind::Transition => {
-                format!("trim=start_frame={start}:end_frame={end},{zoompan}")
+                format!("trim=start_frame={start}:end_frame={end},{zoompan}{sharp_suffix}")
             }
         };
         filters.push(format!("[zs{index}]{body}[{label}]"));
@@ -7393,8 +7398,13 @@ fn push_blur_tap_chain(
     for tap in 0..taps {
         mix_inputs.push_str(&format!("[{tag}_t{tap}]"));
     }
-    // Uniform weights — the GPU strip uses a flat box filter too.
-    let weights = vec!["1"; taps as usize].join(" ");
+    // Tapered shutter weights match the GPU shader (`0.45 + 0.55 * sin(PI * t)`)
+    // and avoid hard box-filter double edges; `mix` normalizes weights when
+    // `scale` is left at its default (0).
+    let weights = (0..taps)
+        .map(|tap| format!("{:.4}", camera::motion_blur_tap_weight(tap, taps)))
+        .collect::<Vec<_>>()
+        .join(" ");
     filters.push(format!(
         "{mix_inputs}mix=inputs={taps}:weights='{weights}':duration=first{tail}[{output_label}]"
     ));
@@ -7995,6 +8005,17 @@ impl OverlayWorkerState {
                 output_ms >= *start_ms as f64 && output_ms < *end_ms as f64
             })
             .and_then(|(_, _, renderer)| renderer.cursor_canvas_point(output_ms))
+    }
+
+    /// Unzoomed fitted-screen cursor position at `output_ms`, used by Glass
+    /// Loupe so overlapping frame zooms still magnify the pixels under the pointer.
+    fn cursor_unzoomed_canvas_point_at(&self, output_ms: f64) -> Option<(f64, f64)> {
+        self.renderers
+            .iter()
+            .find(|(start_ms, end_ms, _)| {
+                output_ms >= *start_ms as f64 && output_ms < *end_ms as f64
+            })
+            .and_then(|(_, _, renderer)| renderer.cursor_unzoomed_canvas_point(output_ms))
     }
 
     /// Render the logical frame planes for `frame_index`, reusing the cached
@@ -12927,6 +12948,7 @@ mod tests {
             1_920.0,
             1_080.0,
             "",
+            None,
         );
         let graph = filters.join(";\n");
         assert!(graph.contains("split=3"), "{graph}");
@@ -12988,6 +13010,7 @@ mod tests {
             1_920.0,
             1_080.0,
             "",
+            None,
         );
         let graph = filters.join(";\n");
         assert!(graph.contains("zoompan="), "{graph}");
@@ -13041,6 +13064,7 @@ mod tests {
             1_920.0,
             1_080.0,
             "+4.000000/TB",
+            None,
         );
         let graph = filters.join(";\n");
         assert!(graph.contains("crop=960:540:480:270"), "{graph}");

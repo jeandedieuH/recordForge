@@ -10,8 +10,9 @@ import { Crosshair, Lock, MousePointer, Move, Unlock, ZoomIn } from "lucide-reac
 import {
   loupeOffsetAfterDrag,
   loupeSizeAfterResize,
-  loupeSurfaceScale,
   resolveLoupeSettings,
+  zoomPointToScreenRect,
+  type CanvasRect,
 } from "@recordforge/editor-core"
 
 /**
@@ -30,7 +31,13 @@ export interface ZoomCanvasOverlayProps {
   containerHeight: number
   offsetX?: number
   offsetY?: number
+  /** Uniform CSS-px-per-canvas-px ratio used by canvas-space handles (loupe). */
+  canvasScale?: number
+  /** Fitted screen video rect on the canvas, in canvas pixels. */
+  screenRect?: CanvasRect
   cursorPointAtPlayhead?: { x: number; y: number } | null
+  /** Displayed cursor tip in canvas pixels (after any active frame zoom). */
+  displayCursorPoint?: { x: number; y: number } | null
   /**
    * Framing mode: the screen renders unzoomed so the frame rect is accurate.
    * The overlay dims everything outside the frame to mark the crop.
@@ -77,7 +84,10 @@ export function ZoomCanvasOverlay({
   containerHeight,
   offsetX = 0,
   offsetY = 0,
+  canvasScale,
+  screenRect,
   cursorPointAtPlayhead,
+  displayCursorPoint,
   dimOutsideFrame = false,
   onUpdateTarget,
   onUpdateSegment,
@@ -164,6 +174,16 @@ export function ZoomCanvasOverlay({
           const clampedDelta = Math.min(deltaCanvasX, initial.width - 100)
           newWidth = initial.width - clampedDelta
           newX = initial.x + clampedDelta
+        } else if (state.handle === "bottom") {
+          const minHeight = 100 / canvasAspect
+          const nextHeight = Math.max(minHeight, initial.height + deltaCanvasY)
+          newWidth = nextHeight * canvasAspect
+          newX = initial.x + (initial.width - newWidth) / 2
+        } else if (state.handle === "top") {
+          const minHeight = 100 / canvasAspect
+          const nextHeight = Math.max(minHeight, initial.height - deltaCanvasY)
+          newWidth = nextHeight * canvasAspect
+          newX = initial.x + (initial.width - newWidth) / 2
         }
 
         // Lock aspect ratio
@@ -219,16 +239,22 @@ export function ZoomCanvasOverlay({
   // frame-target chrome (dim, crop handles, HUD) would be lying. Drag the lens
   // itself instead.
   if (segment.style === "loupe") {
+    const resolvedCanvasScale = Math.max(0.0001, canvasScale ?? scaleX)
+    const resolvedScreenRect = screenRect ?? {
+      x: offsetX / resolvedCanvasScale,
+      y: offsetY / resolvedCanvasScale,
+      width: containerWidth / resolvedCanvasScale,
+      height: containerHeight / resolvedCanvasScale,
+    }
     return (
       <LensHandle
         segment={segment}
         canvasWidth={canvasWidth}
         canvasHeight={canvasHeight}
-        containerWidth={containerWidth}
-        containerHeight={containerHeight}
-        offsetX={offsetX}
-        offsetY={offsetY}
+        canvasScale={resolvedCanvasScale}
+        screenRect={resolvedScreenRect}
         cursorPoint={cursorPointAtPlayhead}
+        displayCursorPoint={displayCursorPoint}
         onUpdate={onUpdateSegment}
       />
     )
@@ -553,12 +579,12 @@ interface LensHandleProps {
   segment: ManualZoomSegment
   canvasWidth: number
   canvasHeight: number
-  containerWidth: number
-  containerHeight: number
-  offsetX: number
-  offsetY: number
-  /** Cursor tip in canvas coords — the lens rides it, exactly like the pose. */
+  canvasScale: number
+  screenRect: CanvasRect
+  /** Cursor tip in zoom space — fallback when `displayCursorPoint` is absent. */
   cursorPoint?: { x: number; y: number } | null
+  /** Displayed cursor tip in canvas coords (after any active frame zoom). */
+  displayCursorPoint?: { x: number; y: number } | null
   onUpdate?: ZoomCanvasOverlayProps["onUpdateSegment"]
 }
 
@@ -579,38 +605,54 @@ interface LensGesture {
  * Direct manipulation for a Glass Loupe: the lens always rides the cursor, so
  * dragging the lens writes a nudge onto `loupe.offset` (the pose's centre is
  * cursor point plus offset) and dragging its corner handle resizes it
- * (`loupe.size`). The focal point stays on the cursor; only the lens moves.
+ * (`loupe.size`). Positioned in uniform canvas space (`canvasScale`) so the
+ * handle aligns 1:1 with `LoupeOverlay` on 9:16, padded, and split canvases.
  */
 function LensHandle({
   segment,
   canvasWidth,
   canvasHeight,
-  containerWidth,
-  containerHeight,
-  offsetX,
-  offsetY,
+  canvasScale,
+  screenRect,
   cursorPoint,
+  displayCursorPoint,
   onUpdate,
 }: LensHandleProps) {
   const gestureRef = useRef<LensGesture | null>(null)
   const settings = resolveLoupeSettings(segment.loupe)
   const shortEdge = Math.max(1, Math.min(canvasWidth, canvasHeight))
-  const surfaceScale = loupeSurfaceScale(containerWidth, containerHeight, canvasWidth, canvasHeight)
-  const cssPerCanvasX = surfaceScale.x
-  const cssPerCanvasY = surfaceScale.y
+  const surfaceScale = { x: canvasScale, y: canvasScale }
   const diameter = settings.size * shortEdge
-  // Same fallback chain `resolveLoupeAt` applies: cursor point, then
-  // `loupe.center`, then the canonical target's centre.
-  const base = cursorPoint ??
-    settings.center ?? {
-      x: segment.target.x + segment.target.width / 2,
-      y: segment.target.y + segment.target.height / 2,
-    }
-  const centreX = base.x + (settings.offset?.x ?? 0)
-  const centreY = base.y + (settings.offset?.y ?? 0)
-  const sizePx = Math.max(24, diameter * cssPerCanvasX)
-  const left = offsetX + centreX * cssPerCanvasX - sizePx / 2
-  const top = offsetY + centreY * cssPerCanvasY - sizePx / 2
+  const radius = diameter / 2
+  const canvasSize = { width: canvasWidth, height: canvasHeight }
+  // Same fallback chain `resolveLoupeAt` applies in canvas pixels: displayed
+  // cursor tip, then unzoomed cursor mapped to screenRect, then parked
+  // `loupe.center`, then the canonical target centre mapped to screenRect.
+  const base =
+    displayCursorPoint ??
+    (cursorPoint ? zoomPointToScreenRect(cursorPoint, canvasSize, screenRect) : null) ??
+    settings.center ??
+    zoomPointToScreenRect(
+      {
+        x: segment.target.x + segment.target.width / 2,
+        y: segment.target.y + segment.target.height / 2,
+      },
+      canvasSize,
+      screenRect,
+    )
+  const centreX = Math.min(
+    Math.max(radius, canvasWidth - radius),
+    Math.max(radius, base.x + (settings.offset?.x ?? 0)),
+  )
+  const centreY = Math.min(
+    Math.max(radius, canvasHeight - radius),
+    Math.max(radius, base.y + (settings.offset?.y ?? 0)),
+  )
+  const sizePx = Math.max(24, diameter * canvasScale)
+  const left = centreX * canvasScale - sizePx / 2
+  const top = centreY * canvasScale - sizePx / 2
+  const borderRadiusPx =
+    settings.shape === "circle" ? sizePx / 2 : (settings.cornerRadius * sizePx) / 2
   const locked = Boolean(segment.locked)
 
   function begin(event: React.PointerEvent<HTMLElement>, mode: "move" | "resize") {
@@ -686,7 +728,7 @@ function LensHandle({
         role="presentation"
         aria-label="Glass Loupe lens"
         className={cn(
-          "absolute rounded-full border-2 border-dashed border-primary/80 bg-primary/5",
+          "absolute border-2 border-dashed border-primary/80 bg-primary/5",
           locked ? "cursor-default" : "cursor-move",
         )}
         style={{
@@ -694,6 +736,7 @@ function LensHandle({
           top: `${top}px`,
           width: `${sizePx}px`,
           height: `${sizePx}px`,
+          borderRadius: `${borderRadiusPx}px`,
           pointerEvents: locked ? "none" : "auto",
           touchAction: "none",
         }}

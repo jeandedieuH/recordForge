@@ -1,10 +1,5 @@
 import { useCallback, useEffect, useRef } from "react"
-import {
-  loupeCornerRadius,
-  loupeSampleSquare,
-  loupeSurfaceScale,
-  type LoupePose,
-} from "@recordforge/editor-core"
+import { loupeCornerRadius, loupeSampleSquare, type LoupePose } from "@recordforge/editor-core"
 import type { PlaybackVideoBounds } from "./playback-overlays"
 
 export interface LoupeOverlayProps {
@@ -31,18 +26,15 @@ function pickVideo(surface: HTMLDivElement | null): HTMLVideoElement | null {
 /**
  * Draw one lens frame: the unzoomed <video> sampled through the same
  * `diameter / scale` square the export's `loupe_sample_square` resolves,
- * clipped by the lens shape. Canvas coords map proportionally onto the screen
- * box — the zoom-space convention every preview overlay shares — and the
- * picture rect inside the element's `object-contain` box is the "content"
- * the sample clamps against, mirroring `frame.rect` in the export.
+ * clipped by the lens shape. Both the lens geometry and the picture rect are
+ * expressed in canvas pixels scaled uniformly by `canvasScale` so the lens
+ * stays a true circle/square across 9:16, 1:1, padded, and side-by-side layouts.
  */
 function drawLoupe(
   canvas: HTMLCanvasElement,
   surface: HTMLDivElement | null,
   pose: LoupePose,
   videoBounds: PlaybackVideoBounds,
-  canvasWidth: number,
-  canvasHeight: number,
 ): void {
   const ctx = canvas.getContext("2d")
   if (!ctx) return
@@ -52,9 +44,10 @@ function drawLoupe(
     return
   }
 
-  const scale = loupeSurfaceScale(videoBounds.width, videoBounds.height, canvasWidth, canvasHeight)
+  const canvasScale = Math.max(0.0001, videoBounds.canvasScale ?? videoBounds.scale)
 
-  // Letterbox-aware picture rect inside the element's object-contain box.
+  // Letterbox-aware picture rect inside the element's object-contain box,
+  // converted into canvas pixels so it matches `frame.rect` / `dest` in export.
   const elementWidth = video.clientWidth || videoBounds.width
   const elementHeight = video.clientHeight || videoBounds.height
   const fit = Math.min(elementWidth / video.videoWidth, elementHeight / video.videoHeight)
@@ -64,64 +57,76 @@ function drawLoupe(
   const pictureY = (elementHeight - pictureHeight) / 2
 
   const content = {
-    x: pictureX / scale.x,
-    y: pictureY / scale.y,
-    width: pictureWidth / scale.x,
-    height: pictureHeight / scale.y,
+    x: (videoBounds.left + pictureX) / canvasScale,
+    y: (videoBounds.top + pictureY) / canvasScale,
+    width: pictureWidth / canvasScale,
+    height: pictureHeight / canvasScale,
   }
   const sample = loupeSampleSquare(pose, content)
 
-  const sourceX = ((sample.x * scale.x - pictureX) / pictureWidth) * video.videoWidth
-  const sourceY = ((sample.y * scale.y - pictureY) / pictureHeight) * video.videoHeight
-  const sourceWidth = ((sample.width * scale.x) / pictureWidth) * video.videoWidth
-  const sourceHeight = ((sample.height * scale.y) / pictureHeight) * video.videoHeight
+  const sourceX = ((sample.x - content.x) / Math.max(1e-6, content.width)) * video.videoWidth
+  const sourceY = ((sample.y - content.y) / Math.max(1e-6, content.height)) * video.videoHeight
+  const sourceWidth = (sample.width / Math.max(1e-6, content.width)) * video.videoWidth
+  const sourceHeight = (sample.height / Math.max(1e-6, content.height)) * video.videoHeight
 
-  const lensWidth = Math.max(1, pose.rect.width * scale.x)
-  const lensHeight = Math.max(1, pose.rect.height * scale.y)
+  const lensSize = Math.max(1, pose.rect.width * canvasScale)
   const ratio = Math.min(2, window.devicePixelRatio || 1)
-  const backingWidth = Math.max(1, Math.round(lensWidth * ratio))
-  const backingHeight = Math.max(1, Math.round(lensHeight * ratio))
-  if (canvas.width !== backingWidth || canvas.height !== backingHeight) {
-    canvas.width = backingWidth
-    canvas.height = backingHeight
+  const backingSize = Math.max(1, Math.round(lensSize * ratio))
+  if (canvas.width !== backingSize || canvas.height !== backingSize) {
+    canvas.width = backingSize
+    canvas.height = backingSize
   }
   ctx.setTransform(ratio, 0, 0, ratio, 0, 0)
-  ctx.clearRect(0, 0, lensWidth, lensHeight)
+  ctx.clearRect(0, 0, lensSize, lensSize)
 
   const lensPath = new Path2D()
   if (pose.settings.shape === "circle") {
-    lensPath.arc(lensWidth / 2, lensHeight / 2, lensWidth / 2, 0, Math.PI * 2)
+    lensPath.arc(lensSize / 2, lensSize / 2, lensSize / 2, 0, Math.PI * 2)
   } else {
-    lensPath.roundRect(0, 0, lensWidth, lensHeight, loupeCornerRadius(pose) * scale.x)
+    lensPath.roundRect(0, 0, lensSize, lensSize, loupeCornerRadius(pose) * canvasScale)
   }
 
   ctx.save()
   ctx.clip(lensPath)
   ctx.imageSmoothingEnabled = true
   ctx.imageSmoothingQuality = "high"
-  ctx.drawImage(video, sourceX, sourceY, sourceWidth, sourceHeight, 0, 0, lensWidth, lensHeight)
+  ctx.drawImage(video, sourceX, sourceY, sourceWidth, sourceHeight, 0, 0, lensSize, lensSize)
 
-  // Glass rim brightening approximates the shader's smoothstep(0.82, 1)
-  // radial ramp; the edge refraction pull stays GPU-only.
+  // Glass rim brightening mirrors the GPU shader's `smoothstep(0.82, 1.0, rim)`
+  // along the actual lens perimeter (radial gradient for circles; stepped inner
+  // strokes along `lensPath` for rounded-rect so all four edges and corners glow
+  // evenly instead of leaving bright triangular corners).
   if (pose.settings.glass) {
-    const rimRadius = Math.max(lensWidth, lensHeight) / 2
-    const rim = ctx.createRadialGradient(
-      lensWidth / 2,
-      lensHeight / 2,
-      rimRadius * 0.82,
-      lensWidth / 2,
-      lensHeight / 2,
-      rimRadius,
-    )
-    rim.addColorStop(0, "rgba(255,255,255,0)")
-    rim.addColorStop(1, "rgba(255,255,255,0.35)")
-    ctx.fillStyle = rim
-    ctx.fillRect(0, 0, lensWidth, lensHeight)
+    const rimRadius = lensSize / 2
+    if (pose.settings.shape === "circle") {
+      const rim = ctx.createRadialGradient(
+        rimRadius,
+        rimRadius,
+        rimRadius * 0.82,
+        rimRadius,
+        rimRadius,
+        rimRadius,
+      )
+      rim.addColorStop(0, "rgba(255,255,255,0)")
+      rim.addColorStop(1, "rgba(255,255,255,0.35)")
+      ctx.fillStyle = rim
+      ctx.fillRect(0, 0, lensSize, lensSize)
+    } else {
+      const bandWidth = Math.max(1, rimRadius * 0.18)
+      const steps = 6
+      for (let i = 0; i < steps; i++) {
+        const frac = (i + 1) / steps
+        // Under the clip, stroke width 2*w paints `w` inward from the perimeter.
+        ctx.strokeStyle = `rgba(255,255,255,${(0.35 / steps) * (1 - (frac - 1 / steps) * 0.4)})`
+        ctx.lineWidth = bandWidth * frac * 2
+        ctx.stroke(lensPath)
+      }
+    }
   }
 
   // Ring: an annulus just inside the lens edge. Stroking the edge path at
   // double width under the lens clip leaves exactly `ringWidth` inside.
-  const ringCss = pose.settings.ringWidth * scale.x
+  const ringCss = pose.settings.ringWidth * canvasScale
   if (ringCss > 0.01 && pose.settings.ringOpacity > 0) {
     ctx.globalAlpha = pose.settings.ringOpacity
     ctx.strokeStyle = pose.settings.ringColor
@@ -143,16 +148,16 @@ export function LoupeOverlay({
   pose,
   surfaceRef,
   videoBounds,
-  canvasWidth,
-  canvasHeight,
+  canvasWidth: _canvasWidth,
+  canvasHeight: _canvasHeight,
 }: LoupeOverlayProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current
     if (!canvas || !pose?.visible) return
-    drawLoupe(canvas, surfaceRef.current, pose, videoBounds, canvasWidth, canvasHeight)
-  }, [pose, surfaceRef, canvasWidth, canvasHeight, videoBounds])
+    drawLoupe(canvas, surfaceRef.current, pose, videoBounds)
+  }, [pose, surfaceRef, videoBounds])
 
   // Latest draw in a ref: the listener effect stays mounted while every
   // playhead tick still redraws with fresh pose/geometry.
@@ -198,20 +203,20 @@ export function LoupeOverlay({
 
   if (!pose?.visible) return null
 
-  const scale = loupeSurfaceScale(videoBounds.width, videoBounds.height, canvasWidth, canvasHeight)
-  const shadowBlurCss = pose.settings.shadowBlur * scale.x
+  const canvasScale = Math.max(0.0001, videoBounds.canvasScale ?? videoBounds.scale)
+  const shadowBlurCss = pose.settings.shadowBlur * canvasScale
   const shadowed = shadowBlurCss > 0.01 && pose.settings.shadowOpacity > 0
 
   return (
     <canvas
       ref={canvasRef}
       aria-hidden
-      className="pointer-events-none absolute"
+      className="pointer-events-none absolute z-[6]"
       style={{
-        left: videoBounds.left + pose.rect.x * scale.x,
-        top: videoBounds.top + pose.rect.y * scale.y,
-        width: pose.rect.width * scale.x,
-        height: pose.rect.height * scale.y,
+        left: pose.rect.x * canvasScale,
+        top: pose.rect.y * canvasScale,
+        width: pose.rect.width * canvasScale,
+        height: pose.rect.height * canvasScale,
         opacity: pose.presence,
         // SDF drop shadow outside the lens, presence-scaled like the export.
         filter: shadowed

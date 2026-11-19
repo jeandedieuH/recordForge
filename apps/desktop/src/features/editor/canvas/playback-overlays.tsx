@@ -1,14 +1,23 @@
-import { useEffect, useMemo, useRef } from "react"
+import { useEffect, useMemo } from "react"
 import type { CursorTelemetryFile, ManualZoomSegment, TimelineState } from "@recordforge/contracts"
 import {
   createUpdateZoomSegmentCommand,
   findLoupeAtTime,
+  resolveCameraShots,
+  resolveCursorMotionBlurSamples,
   resolveLoupeAt,
   resolvePreviewComposition,
+  resolveScreenMotionBlurStrip,
   zoomTransformToCss,
 } from "@recordforge/editor-core"
-import { getCursorPointAtTimelineTime, type CursorEngine } from "@recordforge/cursor-core"
+import {
+  fitCursorPoint,
+  getCursorPointAtTimelineTime,
+  mapCursorPointThroughZoom,
+  type CursorEngine,
+} from "@recordforge/cursor-core"
 import { LoupeOverlay } from "./loupe-overlay"
+import { ScreenMotionBlurOverlay } from "./screen-motion-blur-overlay"
 import { CustomCursorOverlay } from "../cursor"
 import { ZoomCanvasOverlay } from "./zoom-canvas-overlay"
 import { usePlayheadMs } from "../timeline/use-playback-state"
@@ -19,6 +28,8 @@ export interface PlaybackVideoBounds {
   width: number
   height: number
   scale: number
+  /** CSS px per canvas px (falls back to `scale` for legacy callers). */
+  canvasScale?: number
 }
 
 interface PlaybackOverlaysProps {
@@ -77,21 +88,6 @@ export function PlaybackOverlays({
   // Imperative transform on the slot wrapper: neither <video> element carries a
   // transform in its React style, so writes here survive both parent re-renders
   // and the A/B slot swap at a cut.
-  //
-  // Motion blur preview (M2 #1) is approximated here: the export averages
-  // sub-frame crops on the GPU, which the webview cannot do per-frame, so a
-  // velocity-scaled CSS blur follows the zoom/pan motion. It is a preview hint
-  // only — the export applies the exact taps — and it disappears the moment the
-  // frame stops moving.
-  // Preview motion blur follows the canvas setting: off means no blur at all,
-  // and the zoom/pan shutters scale it, so the preview matches what the export
-  // will do (the export additionally blurs the cursor through the rasterizer).
-  const blurSetting = timeline.canvas.motionBlur
-  const previewShutter =
-    blurSetting?.enabled === true
-      ? Math.max(0, Math.min(1, Math.max(blurSetting.zoom ?? 0, blurSetting.pan ?? 0)))
-      : 0
-  const lastCropRef = useRef<{ timeMs: number; x: number; y: number; width: number } | null>(null)
   useEffect(() => {
     const surface = surfaceRef.current
     if (!surface) return
@@ -100,38 +96,112 @@ export function PlaybackOverlays({
     surface.style.transformOrigin = "0 0"
     surface.style.willChange = css ? "transform" : ""
 
-    const crop = composition?.screen.zoomTransform?.crop
-    const previous = lastCropRef.current
-    let blurPx = 0
-    if (crop && previous && !isZoomFraming && previewShutter > 0) {
-      const elapsed = Math.max(1, playheadMs - previous.timeMs)
-      const travelled = Math.hypot(crop.x - previous.x, crop.y - previous.y)
-      const scaled = Math.abs(crop.width - previous.width)
-      blurPx = Math.min(10, ((travelled + scaled) / elapsed) * 6) * previewShutter
-    }
-    lastCropRef.current = crop
-      ? { timeMs: playheadMs, x: crop.x, y: crop.y, width: crop.width }
-      : null
-    surface.style.filter = blurPx > 0.4 ? `blur(${blurPx.toFixed(2)}px)` : ""
-
     return () => {
       surface.style.transform = ""
       surface.style.willChange = ""
-      surface.style.filter = ""
     }
+  }, [cssZoomTransform, isZoomFraming, surfaceRef])
+
+  // Real-time GPU shutter-strip motion blur for zoom & pan: deterministic at
+  // any timestamp so paused frames, scrubbing, and playback all match export.
+  const blurSetting = timeline.canvas.motionBlur
+  const screenBlurEnabled = useMemo(() => {
+    if (!blurSetting?.enabled) return false
+    if ((blurSetting.zoom ?? 0) <= 0 && (blurSetting.pan ?? 0) <= 0) return false
+    return resolveCameraShots(timeline, cursorEngine).length > 0
+  }, [blurSetting, timeline, cursorEngine])
+
+  const screenMotionBlurStrip = useMemo(() => {
+    if (!screenBlurEnabled || isZoomFraming || !composition?.screen.active) return null
+    return resolveScreenMotionBlurStrip(
+      timeline,
+      playheadMs,
+      { width: videoBounds.width, height: videoBounds.height },
+      cursorEngine,
+    )
   }, [
-    composition?.screen.zoomTransform,
-    cssZoomTransform,
+    screenBlurEnabled,
     isZoomFraming,
+    composition?.screen.active,
+    timeline,
     playheadMs,
-    previewShutter,
-    surfaceRef,
+    videoBounds.width,
+    videoBounds.height,
+    cursorEngine,
   ])
+
+  const cursorMotionBlurSamples = useMemo(() => {
+    if (!blurSetting?.enabled || (blurSetting.cursor ?? 0) <= 0) return undefined
+    if (!composition?.cursor.active || !cursorEngine) return undefined
+    const samples = resolveCursorMotionBlurSamples(
+      timeline,
+      playheadMs,
+      cursorEngine,
+      { width: videoBounds.width, height: videoBounds.height },
+      { isZoomFraming },
+    )
+    return samples.length > 1 ? samples : undefined
+  }, [
+    blurSetting,
+    composition?.cursor.active,
+    cursorEngine,
+    timeline,
+    playheadMs,
+    videoBounds.width,
+    videoBounds.height,
+    isZoomFraming,
+  ])
+
+  const canvasScale = Math.max(0.0001, videoBounds.canvasScale ?? videoBounds.scale)
+  const screenRect = useMemo(
+    () => ({
+      x: videoBounds.left / canvasScale,
+      y: videoBounds.top / canvasScale,
+      width: videoBounds.width / canvasScale,
+      height: videoBounds.height / canvasScale,
+    }),
+    [videoBounds.left, videoBounds.top, videoBounds.width, videoBounds.height, canvasScale],
+  )
 
   const cursorPointAtPlayhead = useMemo(() => {
     if (composition?.cursor.zoomSpacePoint) return composition.cursor.zoomSpacePoint
     return getCursorPointAtTimelineTime(timeline, playheadMs, cursorTelemetry, cursorEngine)
   }, [composition?.cursor.zoomSpacePoint, timeline, playheadMs, cursorTelemetry, cursorEngine])
+
+  // Displayed cursor tip in canvas pixels (after any active frame zoom) so a
+  // Glass Loupe riding the cursor tracks the visible pointer while still
+  // magnifying the unzoomed screen point underneath it — matching export.
+  const displayCursorPoint = useMemo(() => {
+    if (!cursorPointAtPlayhead) return null
+    const activeZoom = isZoomFraming ? null : composition?.screen.zoomTransform
+    const localPoint =
+      composition?.cursor.frame && cursorTelemetry
+        ? fitCursorPoint(
+            { x: composition.cursor.frame.sourceX, y: composition.cursor.frame.sourceY },
+            cursorTelemetry,
+            screenRect.width,
+            screenRect.height,
+          )
+        : {
+            x: (cursorPointAtPlayhead.x / Math.max(1, timeline.canvas.width)) * screenRect.width,
+            y: (cursorPointAtPlayhead.y / Math.max(1, timeline.canvas.height)) * screenRect.height,
+          }
+    const mapped = activeZoom
+      ? mapCursorPointThroughZoom(localPoint, screenRect, timeline.canvas, activeZoom)
+      : localPoint
+    return {
+      x: screenRect.x + mapped.x,
+      y: screenRect.y + mapped.y,
+    }
+  }, [
+    cursorPointAtPlayhead,
+    isZoomFraming,
+    composition?.screen.zoomTransform,
+    composition?.cursor.frame,
+    cursorTelemetry,
+    screenRect,
+    timeline.canvas,
+  ])
 
   // Resolve the lens pose once so the overlay and the cursor-suppression
   // decision share it: while a loupe rides the cursor, the drawn pointer
@@ -139,12 +209,24 @@ export function PlaybackOverlays({
   const loupePose = useMemo(() => {
     const segment = findLoupeAtTime(timeline, playheadMs)
     return segment
-      ? resolveLoupeAt(segment, timeline, playheadMs, cursorEngine, cursorPointAtPlayhead)
+      ? resolveLoupeAt(segment, timeline, playheadMs, cursorEngine, cursorPointAtPlayhead, {
+          screenRect,
+          displayCursorPoint,
+        })
       : null
-  }, [timeline, playheadMs, cursorEngine, cursorPointAtPlayhead])
+  }, [timeline, playheadMs, cursorEngine, cursorPointAtPlayhead, screenRect, displayCursorPoint])
 
   return (
     <>
+      {/* Screen zoom/pan motion blur — sits directly above the screen video
+          (z-[2]) and below Glass Loupe (z-[6]) and cursor (z-10). */}
+      <ScreenMotionBlurOverlay
+        enabled={screenBlurEnabled && !isZoomFraming}
+        strip={screenMotionBlurStrip}
+        surfaceRef={surfaceRef}
+        videoBounds={videoBounds}
+        borderRadius={borderRadius}
+      />
       {/* Glass Loupe: the lens floats over the screen but under the cursor
           (z-10 below) — the export's screen → lens → cursor order. */}
       <LoupeOverlay
@@ -170,6 +252,7 @@ export function PlaybackOverlays({
           offsetY={videoBounds.top}
           borderRadius={borderRadius}
           zoomTransform={isZoomFraming ? undefined : composition?.screen.zoomTransform}
+          motionBlurSamples={cursorMotionBlurSamples}
         />
       ) : null}
 
@@ -182,7 +265,10 @@ export function PlaybackOverlays({
           containerHeight={videoBounds.height}
           offsetX={videoBounds.left}
           offsetY={videoBounds.top}
+          canvasScale={canvasScale}
+          screenRect={screenRect}
           cursorPointAtPlayhead={cursorPointAtPlayhead}
+          displayCursorPoint={displayCursorPoint}
           dimOutsideFrame={isZoomFraming}
           onUpdateTarget={(target, options) =>
             onUpdateZoomTarget(selectedZoomSegment.id, { target }, options)

@@ -8,6 +8,7 @@ import {
   createDeleteZoomSegmentsCommand,
   createRegenerateZoomSuggestionsCommand,
   createSplitZoomSegmentCommand,
+  createUpdateCanvasCommand,
   createUpdateSmartZoomSettingsCommand,
   createUpdateZoomSegmentCommand,
   generateSmartZoomSuggestions,
@@ -37,6 +38,7 @@ import { usePlayheadMs } from "../timeline/use-playback-state"
 import { SmartZoomCard } from "./focus/smart-zoom-card"
 import { ReviewSuggestionsCard } from "./focus/review-suggestions-card"
 import { ZoomSegmentCard } from "./focus/zoom-segment-card"
+import { MotionBlurControls } from "./layout/motion-blur-controls"
 
 function formatTimecode(ms: number): string {
   const totalSeconds = Math.floor(ms / 1000)
@@ -254,6 +256,15 @@ export function FocusPanel() {
           onAccept={acceptSuggestions}
           onReject={rejectSuggestions}
           onSeek={seek}
+        />
+      ) : null}
+
+      {/* Quick Motion Blur toggle & shutter presets right alongside zoom editing */}
+      {timeline ? (
+        <MotionBlurControls
+          variant="compact"
+          canvas={timeline.canvas}
+          onChange={(updates) => execute(createUpdateCanvasCommand(updates))}
         />
       ) : null}
 

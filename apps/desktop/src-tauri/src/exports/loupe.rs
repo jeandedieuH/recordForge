@@ -91,16 +91,45 @@ fn loupe_progress(segment: &RenderPlanZoomSegment, output_ms: f64) -> f64 {
 
 /// Lens pose at one output timestamp, or `None` when no loupe covers it.
 ///
-/// `cursor_point` is the recorded cursor tip's position in canvas coordinates.
-/// The lens always rides it: the magnified `target` centres on the tip and the
-/// lens centre is the tip plus `settings.offset`. Without a point the lens
-/// parks on `settings.center` or the segment target's centre — the same
-/// fallback chain `resolveLoupeAt` applies.
+/// Convenience wrapper over [`resolve_loupe_in_rect`] for full-canvas callers
+/// where the fitted screen fills `[0..canvas.width] × [0..canvas.height]` and
+/// no frame zoom separates the displayed cursor from the unzoomed screen point.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn resolve_loupe_at(
     zoom_segments: &[RenderPlanZoomSegment],
     canvas: &RenderCanvas,
     output_ms: f64,
     cursor_point: Option<(f64, f64)>,
+) -> Option<LoupePose> {
+    resolve_loupe_in_rect(
+        zoom_segments,
+        canvas,
+        output_ms,
+        (0.0, 0.0, canvas.width as f64, canvas.height as f64),
+        cursor_point,
+        cursor_point,
+    )
+}
+
+/// Lens pose at one output timestamp against the active fitted `screen_rect`
+/// (in canvas pixels).
+///
+/// - When following the cursor (`cursor_display_point` or `cursor_sample_point`
+///   is `Some`), the lens centre rides `cursor_display_point + offset` (so it
+///   tracks the visible pointer even when a frame zoom overlaps it) while the
+///   magnified `target` centres on `cursor_sample_point` (the unzoomed pointer
+///   position inside `screen_rect`).
+/// - When parked (no cursor point), the segment's zoom-space target maps onto
+///   `screen_rect` for magnification, and the lens parks on `settings.center`
+///   (already canvas px) or that mapped target centre — matching TypeScript
+///   `resolveLoupeAt` across 16:9, 9:16, padded, and side-by-side layouts.
+pub(crate) fn resolve_loupe_in_rect(
+    zoom_segments: &[RenderPlanZoomSegment],
+    canvas: &RenderCanvas,
+    output_ms: f64,
+    screen_rect: (f64, f64, f64, f64),
+    cursor_display_point: Option<(f64, f64)>,
+    cursor_sample_point: Option<(f64, f64)>,
 ) -> Option<LoupePose> {
     let segment = loupe_segments(zoom_segments).into_iter().rfind(|segment| {
         output_ms >= segment.start_ms as f64 && output_ms < segment.end_ms as f64
@@ -115,31 +144,44 @@ pub(crate) fn resolve_loupe_at(
         * (MIN_PRESENCE_SCALE + (1.0 - MIN_PRESENCE_SCALE) * presence);
     let radius = (diameter / 2.0).max(1.0);
 
-    let following = cursor_point.is_some();
+    let following = cursor_display_point.is_some() || cursor_sample_point.is_some();
     // `loupe_sample_square` reads only the target centre, so a 1x1 rect keeps
-    // the sample centred exactly on the cursor tip — no crop-edge clamping
-    // can pull it off the point the lens sits on.
-    let (target, raw_center) = match cursor_point {
-        Some((px, py)) => (
+    // the sample centred exactly on the unzoomed cursor tip — no crop-edge
+    // clamping can pull it off the point the lens magnifies.
+    let (target, raw_center) = if following {
+        let sample = cursor_sample_point
+            .or(cursor_display_point)
+            .expect("following guarantees a point");
+        let display = cursor_display_point
+            .or(cursor_sample_point)
+            .expect("following guarantees a point");
+        (
             RenderCropFloat {
-                x: px - 0.5,
-                y: py - 0.5,
+                x: sample.0 - 0.5,
+                y: sample.1 - 0.5,
                 width: 1.0,
                 height: 1.0,
             },
-            (px, py),
-        ),
-        None => {
-            let target = clamped_zoom_target(canvas.width, canvas.height, canvas.padding, segment);
-            let centre = settings
-                .center
-                .map(|center| (center.x, center.y))
-                .unwrap_or((
-                    target.x + target.width / 2.0,
-                    target.y + target.height / 2.0,
-                ));
-            (target, centre)
-        }
+            display,
+        )
+    } else {
+        let canonical = clamped_zoom_target(canvas.width, canvas.height, canvas.padding, segment);
+        let sx = screen_rect.2 / canvas_w.max(1.0);
+        let sy = screen_rect.3 / canvas_h.max(1.0);
+        let target = RenderCropFloat {
+            x: screen_rect.0 + canonical.x * sx,
+            y: screen_rect.1 + canonical.y * sy,
+            width: canonical.width * sx,
+            height: canonical.height * sy,
+        };
+        let centre = settings
+            .center
+            .map(|center| (center.x, center.y))
+            .unwrap_or((
+                target.x + target.width / 2.0,
+                target.y + target.height / 2.0,
+            ));
+        (target, centre)
     };
 
     let offset = settings.offset.unwrap_or_default();
@@ -206,8 +248,11 @@ pub(crate) fn loupe_sample_square(
 /// plate size, per-frame `sendcmd` data, the overlay gating expression and the
 /// piecewise `T` expressions for the two `geq` plates.
 pub(crate) struct CompatLoupePlan {
-    /// Side of the square lens plate in canvas px (max diameter, even).
+    /// Side of the square lens disc plate in canvas px (max diameter, even).
     pub plate: u32,
+    /// Padding around `plate` on each side for the frame/shadow plate so drop
+    /// shadows fade smoothly instead of clipping against the lens box.
+    pub shadow_pad: u32,
     /// `overlay` `enable` expression: union of the loupe windows, in the
     /// absolute seconds the shifted main stream runs on.
     pub enable: String,
@@ -316,17 +361,19 @@ fn sdf_params(segment: &RenderPlanZoomSegment, canvas: &RenderCanvas) -> (String
     (r, corner)
 }
 
-/// Signed-distance expression (px, positive outside) of the active lens' SDF
-/// evaluated at plate coords (X, Y) and time `T`.
+/// Signed-distance expression (px, negative inside, positive outside) of the
+/// active lens' rounded-box SDF evaluated at plate coords (X, Y) and time `T`.
+/// Mirrors `lens_distance` in `composite.wgsl` exactly, including sharp squares
+/// (`corner_radius == 0`) via the interior `min(max(dx, dy), 0)` term.
 fn sdf_expr(segments: &[&RenderPlanZoomSegment], canvas: &RenderCanvas, plate: u32) -> String {
     let centre = compact(plate as f64 / 2.0);
     piecewise_expr(
         segments,
         |segment| {
             let (r, c) = sdf_params(segment, canvas);
-            format!(
-                "hypot(max(abs(X-{centre})-({r}-({c})),0),max(abs(Y-{centre})-({r}-({c})),0))-({c})"
-            )
+            let dx = format!("(abs(X-{centre})-({r}-({c})))");
+            let dy = format!("(abs(Y-{centre})-({r}-({c})))");
+            format!("(hypot(max({dx},0),max({dy},0))+min(max({dx},{dy}),0)-({c}))")
         },
         // Far outside so every alpha term evaluates to 0 off-window.
         "4096",
@@ -334,18 +381,27 @@ fn sdf_expr(segments: &[&RenderPlanZoomSegment], canvas: &RenderCanvas, plate: u
 }
 
 fn color_channel_expr(segments: &[&RenderPlanZoomSegment], channel: usize, d: &str) -> String {
-    // Colour zones keyed on `d`: outside the ring band the only painted pixels
-    // are the black drop shadow; inside the band the ring colour; inside the
-    // lens the white glass rim/veil.
+    // Colour zones keyed on `d` (negative inside, 0 at edge, positive outside):
+    // outside the AA outer edge (`d > 0.5`) only the black drop shadow paints;
+    // within `[0, ring_width]` inward from the edge the ring colour paints
+    // (tiny_skia 0..1 channels scaled to 0..255 for FFmpeg `geq`); deeper
+    // inside the white glass rim highlight paints.
     piecewise_expr(
         segments,
         |segment| {
             let settings = segment.loupe.clone().unwrap_or_default();
-            let half_ring = compact(settings.ring_width.max(0.0) / 2.0);
+            if settings.ring_width <= 0.0 {
+                return format!("if(gt({d},0.5),0,255)");
+            }
+            let ring_w = compact(settings.ring_width.max(0.0) + 0.5);
             let ring = super::parse_color_hex(&settings.ring_color, 1.0);
-            let rgb = [ring.red() as f64, ring.green() as f64, ring.blue() as f64][channel];
+            let rgb = [
+                (ring.red() as f64 * 255.0).round(),
+                (ring.green() as f64 * 255.0).round(),
+                (ring.blue() as f64 * 255.0).round(),
+            ][channel];
             format!(
-                "if(gt({d},{half_ring}),0,if(gt({d},-{half_ring}),{},255))",
+                "if(gt({d},0.5),0,if(gt({d},-{ring_w}),{},255))",
                 compact(rgb)
             )
         },
@@ -361,6 +417,7 @@ pub(crate) fn prepare_compat_loupe(
     canvas: &RenderCanvas,
     renderers: &[(u64, u64, super::cursor::CursorRenderer)],
     content: (f64, f64, f64, f64),
+    screen_windows: &[super::cursor::ScreenRectWindow],
     plate_origin: (f64, f64),
     plate_dims: (u32, u32),
     first_frame: u64,
@@ -383,8 +440,9 @@ pub(crate) fn prepare_compat_loupe(
         return None;
     }
 
-    // Plate: the largest full-size diameter in the window, even-rounded. Every
-    // smaller lens draws centred inside the same plate.
+    // Disc plate: the largest full-size diameter in the window, even-rounded,
+    // capped to the canvas short edge (NOT `plate_dims`, which can be shorter
+    // than the canvas short edge on 9:16 portrait canvases).
     let plate = segments
         .iter()
         .map(|segment| {
@@ -394,7 +452,23 @@ pub(crate) fn prepare_compat_loupe(
         .fold(0.0f64, f64::max);
     let plate = (((plate.ceil() as u32) + 1) & !1)
         .max(2)
-        .min(plate_dims.0.min(plate_dims.1).max(2));
+        .min((canvas.width.min(canvas.height) & !1).max(2));
+
+    // Frame plate margin so the SDF drop shadow extends smoothly outside the
+    // lens without clipping into a hard rectangle (capped at 64 px for geq speed).
+    let max_shadow = segments
+        .iter()
+        .map(|segment| {
+            let settings = segment.loupe.clone().unwrap_or_default();
+            if settings.shadow_opacity > 0.001 {
+                settings.shadow_blur.clamp(0.0, 200.0)
+            } else {
+                0.0
+            }
+        })
+        .fold(0.0f64, f64::max);
+    let shadow_pad = (((max_shadow * 2.0).ceil() as u32 + 1) & !1).min(64);
+    let frame_plate = plate + shadow_pad * 2;
 
     // Per-frame commands: the sample crop tracks the resolved target point and
     // both overlays ride the lens centre.
@@ -405,23 +479,44 @@ pub(crate) fn prepare_compat_loupe(
     for offset in 0..frame_count {
         let abs_frame = first_frame + offset;
         let output_ms = super::cursor::frame_time_ms(abs_frame, canvas.fps);
-        let cursor_point = renderers
+        let dest = screen_windows
+            .iter()
+            .find(|w| output_ms >= w.start_ms as f64 && output_ms < w.end_ms as f64)
+            .map(|w| w.rect)
+            .unwrap_or(content);
+        let active_renderer = renderers
             .iter()
             .find(|(start_ms, end_ms, _)| {
                 output_ms >= *start_ms as f64 && output_ms < *end_ms as f64
             })
-            .and_then(|(_, _, renderer)| renderer.cursor_canvas_point(output_ms));
-        let Some(pose) = resolve_loupe_at(&plan.zoom_segments, canvas, output_ms, cursor_point)
-            .filter(|pose| pose.is_visible())
-        else {
+            .map(|(_, _, renderer)| renderer);
+        let cursor_display =
+            active_renderer.and_then(|renderer| renderer.cursor_canvas_point(output_ms));
+        let cursor_sample =
+            active_renderer.and_then(|renderer| renderer.cursor_unzoomed_canvas_point(output_ms));
+        let Some(pose) = resolve_loupe_in_rect(
+            &plan.zoom_segments,
+            canvas,
+            output_ms,
+            dest,
+            cursor_display,
+            cursor_sample,
+        )
+        .filter(|pose| pose.is_visible()) else {
             continue;
         };
-        let sq = loupe_sample_square(&pose, content);
-        let side = (sq.2.round() as i32 / 2 * 2).max(2);
+        let sq = loupe_sample_square(&pose, dest);
+        // Map the sample square from `dest` (which may shrink in side-by-side
+        // camera layouts) back into `[loupe_src]`'s base fitted plate coords.
+        let src_x = (content.0 - plate_origin.0) + ((sq.0 - dest.0) / dest.2.max(1.0)) * content.2;
+        let src_y = (content.1 - plate_origin.1) + ((sq.1 - dest.1) / dest.3.max(1.0)) * content.3;
+        let src_side = (sq.2 / dest.2.max(1.0)) * content.2;
+        let max_side = (plate_dims.0.min(plate_dims.1) & !1).max(2) as i32;
+        let side = (src_side.round() as i32 / 2 * 2).clamp(2, max_side);
         let max_x = (plate_dims.0 as i32 - side).max(0);
         let max_y = (plate_dims.1 as i32 - side).max(0);
-        let crop_x = ((sq.0 - plate_origin.0).round() as i32 / 2 * 2).clamp(0, max_x);
-        let crop_y = ((sq.1 - plate_origin.1).round() as i32 / 2 * 2).clamp(0, max_y);
+        let crop_x = (src_x.round() as i32 / 2 * 2).clamp(0, max_x);
+        let crop_y = (src_y.round() as i32 / 2 * 2).clamp(0, max_y);
         let half_plate = plate as f64 / 2.0;
         let overlay_x = ((pose.center.0 - half_plate).round() as i32 / 2 * 2)
             .clamp(-(plate as i32), canvas.width as i32);
@@ -449,21 +544,21 @@ pub(crate) fn prepare_compat_loupe(
         }
         let overlay = (overlay_x, overlay_y);
         if previous_overlay != Some(overlay) {
+            let frame_x = overlay_x - shadow_pad as i32;
+            let frame_y = overlay_y - shadow_pad as i32;
             if previous_overlay
                 .map(|prev| prev.0 != overlay_x)
                 .unwrap_or(true)
             {
-                for target in ["overlay@loupe", "overlay@loupe_frame"] {
-                    sendcmd.push_str(&format!("{t:.6} {target} x {overlay_x};\n"));
-                }
+                sendcmd.push_str(&format!("{t:.6} overlay@loupe x {overlay_x};\n"));
+                sendcmd.push_str(&format!("{t:.6} overlay@loupe_frame x {frame_x};\n"));
             }
             if previous_overlay
                 .map(|prev| prev.1 != overlay_y)
                 .unwrap_or(true)
             {
-                for target in ["overlay@loupe", "overlay@loupe_frame"] {
-                    sendcmd.push_str(&format!("{t:.6} {target} y {overlay_y};\n"));
-                }
+                sendcmd.push_str(&format!("{t:.6} overlay@loupe y {overlay_y};\n"));
+                sendcmd.push_str(&format!("{t:.6} overlay@loupe_frame y {frame_y};\n"));
             }
             previous_overlay = Some(overlay);
         }
@@ -474,10 +569,12 @@ pub(crate) fn prepare_compat_loupe(
     };
 
     let presence = piecewise_expr(&segments, presence_expr, "0");
-    let d = sdf_expr(&segments, canvas, plate);
+    let d_disc = sdf_expr(&segments, canvas, plate);
+    let d_frame = sdf_expr(&segments, canvas, frame_plate);
 
-    // AA edge ≈1.5 px around the SDF boundary, faded by presence.
-    let mask_lum = format!("clip(0.5-({d})/1.5,0,1)*255*({presence})");
+    // AA edge ≈1 px around the SDF boundary (mirrors GPU `clamp(0.5 - sdf, 0, 1)`),
+    // faded by presence.
+    let mask_lum = format!("clip(0.5-({d_disc}),0,1)*255*({presence})");
 
     let ring_width = piecewise_expr(
         &segments,
@@ -546,20 +643,35 @@ pub(crate) fn prepare_compat_loupe(
         },
         "0",
     );
+    let radius_expr = piecewise_expr(&segments, |segment| sdf_params(segment, canvas).0, "1");
 
-    // Alpha = ring band (straddling the SDF edge) + shadow falloff outside +
-    // the glass rim and faint veil inside, everything faded by presence.
-    let frame_a = format!(
-        "255*({presence})*clip(\
-            clip((({ring_width})/2+0.75-abs({d}))/1.5,0,1)*({ring_opacity})\
-            +clip((({shadow_blur})-({d}))/({shadow_blur}),0,1)*clip(({d})/1.5,0,1)*({shadow_opacity})\
-            +({glass})*clip(-({d})/4,0,1)*clip((({d})+4)/4,0,1)*0.24\
-            +({glass})*lt({d},0)*0.05\
-        ,0,1)"
+    // Alpha mirrors `composite.wgsl`:
+    // - ring band strictly inside the lens edge (`depth = -d in [0, ring_width]`)
+    // - exponential SDF drop shadow outside the lens (`d > 0`)
+    // - glass rim brightening across the outer 18% inside the lens
+    // Everything fades with `presence`.
+    let inside = format!("clip(0.5-({d_frame}),0,1)");
+    let ring_band =
+        format!("gt({ring_width},0)*({inside})*clip(0.5+({ring_width})+({d_frame}),0,1)");
+    let pad_taper = if shadow_pad > 0 {
+        let pad = compact(shadow_pad as f64);
+        let taper = compact((shadow_pad as f64 * 0.35).max(1.0));
+        format!("*clip(({pad}-max({d_frame},0))/{taper},0,1)")
+    } else {
+        String::new()
+    };
+    let shadow_alpha = format!(
+        "min(exp(-max({d_frame},0)/({shadow_blur}))*({shadow_opacity})*(1-({inside})){pad_taper},0.85)"
     );
-    let frame_r = color_channel_expr(&segments, 0, &d);
-    let frame_g = color_channel_expr(&segments, 1, &d);
-    let frame_b = color_channel_expr(&segments, 2, &d);
+    let rim_band = format!("max(0.18*({radius_expr}),1)");
+    let glass_alpha =
+        format!("({glass})*({inside})*clip((({rim_band})+({d_frame}))/({rim_band}),0,1)*0.35");
+    let frame_a = format!(
+        "255*({presence})*clip(({ring_band})*({ring_opacity})+({shadow_alpha})+({glass_alpha}),0,1)"
+    );
+    let frame_r = color_channel_expr(&segments, 0, &d_frame);
+    let frame_g = color_channel_expr(&segments, 1, &d_frame);
+    let frame_b = color_channel_expr(&segments, 2, &d_frame);
 
     let enable = segments
         .iter()
@@ -586,6 +698,7 @@ pub(crate) fn prepare_compat_loupe(
 
     Some(CompatLoupePlan {
         plate,
+        shadow_pad,
         enable,
         cursor_suppression,
         sendcmd,
@@ -615,6 +728,9 @@ pub(crate) fn push_compat_loupe(
 ) -> String {
     let (side, crop_x, crop_y, overlay_x, overlay_y) = prepared.seed;
     let plate = prepared.plate;
+    let frame_plate = plate + prepared.shadow_pad * 2;
+    let frame_x = overlay_x - prepared.shadow_pad as i32;
+    let frame_y = overlay_y - prepared.shadow_pad as i32;
     // `T` in the geq plates and the overlay `enable` windows both run on the
     // absolute timeline — the generated streams need the same PTS shift the
     // main chain already has.
@@ -643,7 +759,7 @@ pub(crate) fn push_compat_loupe(
     ));
     filters.push("[loupe_sq][loupe_mask]alphamerge[loupe_disc]".to_string());
     filters.push(format!(
-        "color=c=black:s={plate}x{plate}:r={fps}:d={duration_s}{setpts},format=rgba,geq=r='{}':g='{}':b='{}':a='{}'[loupe_frame]",
+        "color=c=black:s={frame_plate}x{frame_plate}:r={fps}:d={duration_s}{setpts},format=rgba,geq=r='{}':g='{}':b='{}':a='{}'[loupe_frame]",
         prepared.frame_r, prepared.frame_g, prepared.frame_b, prepared.frame_a
     ));
     let enable = &prepared.enable;
@@ -651,7 +767,7 @@ pub(crate) fn push_compat_loupe(
         "[{current_label}][loupe_disc]overlay@loupe=x={overlay_x}:y={overlay_y}:eof_action=pass:format=auto:enable='{enable}'[with_loupe_disc]"
     ));
     filters.push(format!(
-        "[with_loupe_disc][loupe_frame]overlay@loupe_frame=x={overlay_x}:y={overlay_y}:eof_action=pass:format=auto:enable='{enable}'[with_loupe]"
+        "[with_loupe_disc][loupe_frame]overlay@loupe_frame=x={frame_x}:y={frame_y}:eof_action=pass:format=auto:enable='{enable}'[with_loupe]"
     ));
     "with_loupe".to_string()
 }
@@ -953,6 +1069,7 @@ mod tests {
             &canvas,
             &[],
             (0.0, 0.0, 1_920.0, 1_080.0),
+            &[],
             (0.0, 0.0),
             (1_920, 1_080),
             0,
@@ -965,6 +1082,7 @@ mod tests {
             &canvas,
             &[],
             (0.0, 0.0, 1_920.0, 1_080.0),
+            &[],
             (0.0, 0.0),
             (1_920, 1_080),
             30,
@@ -972,6 +1090,14 @@ mod tests {
         )
         .expect("a covered window prepares the lens");
         assert!(prepared.plate.is_multiple_of(2) && prepared.plate > 0);
+        // Ring colour must emit 0..255 (never tiny_skia's 0..1 float range).
+        assert!(
+            prepared.frame_r.contains("255"),
+            "expected white ring channel 255 in frame_r, got {}",
+            prepared.frame_r
+        );
+        // Shadow pad keeps the SDF drop shadow from clipping on the plate box.
+        assert!(prepared.shadow_pad > 0 && prepared.shadow_pad.is_multiple_of(2));
         // Parked pose (no cursor) seeds the declared crop/overlay options.
         let (side, crop_x, crop_y, overlay_x, overlay_y) = prepared.seed;
         assert!(side.is_multiple_of(2));
@@ -997,6 +1123,7 @@ mod tests {
             &canvas,
             &[],
             (0.0, 0.0, 1_920.0, 1_080.0),
+            &[],
             (0.0, 0.0),
             (1_920, 1_080),
             30,
@@ -1025,5 +1152,100 @@ mod tests {
         assert!(joined.contains("alphamerge"));
         // Both generated plates re-anchor onto the shifted timeline.
         assert!(joined.matches("setpts=PTS+2.000000/TB").count() >= 3);
+    }
+
+    #[test]
+    fn resolve_loupe_in_rect_maps_parked_target_and_separates_zoomed_cursor() {
+        // 9:16 portrait canvas with a centred 16:9 screen slot.
+        let mut portrait_canvas = canvas();
+        portrait_canvas.width = 1_080;
+        portrait_canvas.height = 1_920;
+        let screen_rect = (48.0, 688.0, 984.0, 554.0);
+
+        // Parked segment centred in zoom space (540, 960) = (0.5, 0.5).
+        let parked = vec![loupe(|segment| {
+            segment.target = RenderCropFloat {
+                x: 270.0,
+                y: 480.0,
+                width: 540.0,
+                height: 960.0,
+            };
+        })];
+        let pose =
+            resolve_loupe_in_rect(&parked, &portrait_canvas, 2_500.0, screen_rect, None, None)
+                .expect("parked pose");
+        assert!(!pose.following);
+        assert!((pose.center.0 - (48.0 + 984.0 / 2.0)).abs() < 1e-6);
+        assert!((pose.center.1 - (688.0 + 554.0 / 2.0)).abs() < 1e-6);
+
+        // Overlapping frame zoom: lens rides the visible zoomed cursor tip
+        // while magnifying the unzoomed screen point beneath it.
+        let following = vec![loupe(|segment| {
+            segment.loupe = Some(RenderLoupe {
+                offset: Some(RenderPoint { x: 20.0, y: -15.0 }),
+                ..RenderLoupe::default()
+            });
+        })];
+        let pose = resolve_loupe_in_rect(
+            &following,
+            &canvas(),
+            2_500.0,
+            (48.0, 27.0, 1_824.0, 1_026.0),
+            Some((1_200.0, 600.0)),
+            Some((400.0, 300.0)),
+        )
+        .expect("following pose");
+        assert!(pose.following);
+        assert!((pose.center.0 - 1_220.0).abs() < 1e-6);
+        assert!((pose.center.1 - 585.0).abs() < 1e-6);
+        assert!((pose.target.x + pose.target.width / 2.0 - 400.0).abs() < 1e-6);
+        assert!((pose.target.y + pose.target.height / 2.0 - 300.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn compat_loupe_guards_zero_ring_and_tracks_screen_windows() {
+        let segment = loupe(|segment| {
+            segment.loupe = Some(RenderLoupe {
+                ring_width: 0.0,
+                ..RenderLoupe::default()
+            });
+        });
+        let plan = plan_with(vec![segment]);
+        let canvas = canvas();
+        // Side-by-side window shifts the screen slot to the left half at t=2s.
+        let windows = vec![
+            super::super::cursor::ScreenRectWindow {
+                start_ms: 0,
+                end_ms: 2_000,
+                rect: (0.0, 0.0, 1_920.0, 1_080.0),
+            },
+            super::super::cursor::ScreenRectWindow {
+                start_ms: 2_000,
+                end_ms: 5_000,
+                rect: (48.0, 171.0, 1_312.0, 738.0),
+            },
+        ];
+        let prepared = prepare_compat_loupe(
+            &plan,
+            &canvas,
+            &[],
+            (0.0, 0.0, 1_920.0, 1_080.0),
+            &windows,
+            (0.0, 0.0),
+            (1_920, 1_080),
+            30,
+            90,
+        )
+        .expect("prepared loupe");
+        // Zero ring width skips the ring colour branch and gates ring_band on gt(0,0).
+        assert!(prepared.frame_a.contains("gt("));
+        assert!(prepared.frame_r.contains("if(gt("));
+        assert!(!prepared.frame_r.contains("if(gt(d,-0.5)"));
+        // Overlay moves at t=2s when the side-by-side screen window takes over.
+        assert!(
+            prepared.sendcmd.matches("overlay@loupe x").count() >= 2,
+            "expected overlay@loupe x to update across screen_windows: {}",
+            prepared.sendcmd
+        );
     }
 }

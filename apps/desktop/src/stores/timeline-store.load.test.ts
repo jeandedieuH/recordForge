@@ -99,6 +99,7 @@ function fakeEngine(
 ): CursorEngine & { dispose: ReturnType<typeof vi.fn> } {
   return {
     evaluate: vi.fn(),
+    evaluateMotionSamples: vi.fn(() => []),
     evaluateMotionPlan: vi.fn(),
     dispose: vi.fn(),
     telemetry,

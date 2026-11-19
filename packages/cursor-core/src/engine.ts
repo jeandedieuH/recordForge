@@ -260,6 +260,18 @@ function getEffectiveShapeId(event: PreparedEvent): string {
 
 export interface CursorEngine {
   evaluate: (timeMs: number, settings: CursorSettings) => CursorFrame
+  /**
+   * Sample cursor source positions across one shutter window centered at
+   * `timeMs`, mirroring Rust `CursorEngine::evaluate_motion_samples`.
+   * `shutter` is the fraction of `frameDurationMs` (`0.5` = 180°, `1.0` = 360°).
+   */
+  evaluateMotionSamples: (
+    timeMs: number,
+    frameDurationMs: number,
+    shutter: number,
+    samples: number,
+    settings: CursorSettings,
+  ) => CursorPoint[]
   evaluateMotionPlan: (
     timeMs: number,
     motionPlan: RenderPlanZoomMotionPlan,
@@ -291,6 +303,10 @@ export function createCursorEngine(
         velocityPxPerSec: 0,
         clickScale: 1,
       }),
+      evaluateMotionSamples: (_timeMs, _frameDurationMs, _shutter, samples) => {
+        const clamped = Math.max(1, Math.min(32, Math.trunc(samples)))
+        return Array.from({ length: clamped }, () => ({ x: 0, y: 0 }))
+      },
       evaluateMotionPlan: (timeMs, motionPlan) => evaluateCubicMotionPlan(motionPlan, timeMs),
       telemetry,
     }
@@ -897,8 +913,36 @@ export function createCursorEngine(
     }
   }
 
+  function evaluateMotionSamples(
+    timeMs: number,
+    frameDurationMs: number,
+    shutter: number,
+    samples: number,
+    settings: CursorSettings,
+  ): CursorPoint[] {
+    const sampleCount = Math.max(1, Math.min(32, Math.trunc(samples)))
+    if (!Number.isFinite(timeMs)) {
+      return Array.from({ length: sampleCount }, () => ({ x: 0, y: 0 }))
+    }
+    const half = (Math.max(0, frameDurationMs) * clamp(shutter, 0, 1)) / 2
+    const positions: CursorPoint[] = new Array(sampleCount)
+    for (let index = 0; index < sampleCount; index++) {
+      // Midpoint quadrature across the shutter window — mirrors Rust `evaluate_motion_samples`.
+      const progress = (index + 0.5) / sampleCount
+      const sampleMs = timeMs - half + 2 * half * progress
+      const eventIndex = findEventIndex(sampleMs)
+      const rawPoint = evaluateSplinePosition(eventIndex, sampleMs, settings)
+      positions[index] =
+        settings.clickPressAnimation !== false
+          ? applyClickMovement(sampleMs, settings, rawPoint)
+          : rawPoint
+    }
+    return positions
+  }
+
   return {
     evaluate,
+    evaluateMotionSamples,
     evaluateMotionPlan: (timeMs, motionPlan) => evaluateCubicMotionPlan(motionPlan, timeMs),
     telemetry,
   }

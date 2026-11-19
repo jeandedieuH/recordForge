@@ -151,6 +151,8 @@ interface VideoBounds {
   width: number
   height: number
   scale: number
+  /** CSS pixels per canvas pixel — stays uniform even in side-by-side slots. */
+  canvasScale: number
 }
 
 function isOverlayClip(clip: TimelineClip): clip is AnnotationClip | TextClip | ImageClip {
@@ -678,25 +680,28 @@ export function TimelineView({
       timeline?.canvas.aspectRatio === "16:9" ? 0.5 : (timeline?.canvas.videoPositionY ?? 0.5)
 
     const slot = screenSlotRef.current
-    const nextBounds = slot
-      ? // Split or layout-lane screen slot — same fit the export applies inside
-        // the resolver's slot rect.
-        fitScreenInSlot({
-          slot,
-          canvasWidth: width,
-          sourceWidth,
-          sourceHeight,
-          canvasScale,
-          positionY,
-        })
-      : fitScreenDefault({
-          canvas: { width, height, padding },
-          sourceWidth,
-          sourceHeight,
-          canvasScale,
-          canvasCssWidth: canvasRect.width,
-          positionY,
-        })
+    const nextBounds: VideoBounds = {
+      ...(slot
+        ? // Split or layout-lane screen slot — same fit the export applies inside
+          // the resolver's slot rect.
+          fitScreenInSlot({
+            slot,
+            canvasWidth: width,
+            sourceWidth,
+            sourceHeight,
+            canvasScale,
+            positionY,
+          })
+        : fitScreenDefault({
+            canvas: { width, height, padding },
+            sourceWidth,
+            sourceHeight,
+            canvasScale,
+            canvasCssWidth: canvasRect.width,
+            positionY,
+          })),
+      canvasScale,
+    }
     setVideoBounds((previous) => {
       if (
         previous &&
@@ -704,7 +709,8 @@ export function TimelineView({
         previous.top === nextBounds.top &&
         previous.width === nextBounds.width &&
         previous.height === nextBounds.height &&
-        previous.scale === nextBounds.scale
+        previous.scale === nextBounds.scale &&
+        previous.canvasScale === nextBounds.canvasScale
       ) {
         return previous
       }

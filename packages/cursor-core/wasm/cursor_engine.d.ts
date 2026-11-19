@@ -6,6 +6,11 @@ export class WasmCursorEngine {
     [Symbol.dispose](): void;
     evaluate_motion_plan(motion_plan_json: string, time_ms: number): string;
     /**
+     * Per-frame shutter samples without JSON. Returns flat
+     * `[x0, y0, x1, y1, ...]` using the settings stored by `set_settings`.
+     */
+    evaluate_motion_samples_packed(time_ms: number, frame_duration_ms: number, shutter: number, samples: number): Float64Array;
+    /**
      * Per-frame evaluation without JSON. Returns the flat f64 layout
      * documented on `CursorEngine::evaluate_packed`.
      */
@@ -30,6 +35,7 @@ export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_wasmcursorengine_free: (a: number, b: number) => void;
     readonly wasmcursorengine_evaluate_motion_plan: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly wasmcursorengine_evaluate_motion_samples_packed: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly wasmcursorengine_evaluate_packed: (a: number, b: number) => [number, number];
     readonly wasmcursorengine_fit: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number];
     readonly wasmcursorengine_new: (a: number, b: number, c: number, d: number) => [number, number, number];

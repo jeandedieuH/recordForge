@@ -1,5 +1,11 @@
 import { evaluateCubicMotionPlan } from "./engine"
-import type { CursorClickEffect, CursorEngine, CursorEngineOptions, CursorFrame } from "./engine"
+import type {
+  CursorClickEffect,
+  CursorEngine,
+  CursorEngineOptions,
+  CursorFrame,
+  CursorPoint,
+} from "./engine"
 import type {
   CursorSettings,
   CursorTelemetryFile,
@@ -90,17 +96,49 @@ export function wrapWasmCursorEngine(
   let disposed = false
   let lastSettingsJson: string | null = null
 
+  function syncSettings(settings: CursorSettings): void {
+    const settingsJson = JSON.stringify(settings)
+    if (settingsJson !== lastSettingsJson) {
+      instance.set_settings(settingsJson)
+      lastSettingsJson = settingsJson
+    }
+  }
+
   return {
     evaluate: (timeMs: number, settings: CursorSettings): CursorFrame => {
       // A disposed engine's heap pointer is freed; callers during teardown get
       // a hidden frame instead of a wasm null-pointer trap.
       if (disposed) return hiddenCursorFrame(timeMs)
-      const settingsJson = JSON.stringify(settings)
-      if (settingsJson !== lastSettingsJson) {
-        instance.set_settings(settingsJson)
-        lastSettingsJson = settingsJson
-      }
+      syncSettings(settings)
       return decodePackedCursorFrame(instance.evaluate_packed(timeMs), shapeIds)
+    },
+    evaluateMotionSamples: (
+      timeMs: number,
+      frameDurationMs: number,
+      shutter: number,
+      samples: number,
+      settings: CursorSettings,
+    ): CursorPoint[] => {
+      const sampleCount = Math.max(1, Math.min(32, Math.trunc(samples)))
+      if (disposed) {
+        return Array.from({ length: sampleCount }, () => ({ x: 0, y: 0 }))
+      }
+      syncSettings(settings)
+      const packed = instance.evaluate_motion_samples_packed(
+        timeMs,
+        frameDurationMs,
+        shutter,
+        sampleCount,
+      )
+      const count = Math.floor(packed.length / 2)
+      const points: CursorPoint[] = new Array(count)
+      for (let index = 0; index < count; index++) {
+        points[index] = {
+          x: packed[index * 2],
+          y: packed[index * 2 + 1],
+        }
+      }
+      return points
     },
     evaluateMotionPlan: (
       timeMs: number,

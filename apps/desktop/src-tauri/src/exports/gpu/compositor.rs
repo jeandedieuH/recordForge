@@ -296,13 +296,14 @@ struct FrameParams {
     loupe_style: [f32; 4],
 }
 
-/// Motion-blur shutter strip: the zoom crop at the start and end of the shutter
-/// window. The compositor averages the screen along the strip between them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Motion-blur shutter strip: continuous normalized `[x, y, w, h]` content-UV
+/// crops at the start and end of the shutter window. Keeping sub-pixel floats
+/// avoids even-pixel snapping jitter on smooth pans and slow ease ramps.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct CropStrip {
-    pub start: Crop,
-    pub end: Crop,
-    /// Tap count, already resolved from the swept pixel distance.
+    pub start: [f32; 4],
+    pub end: [f32; 4],
+    /// Tap count, already resolved from the output screen-pixel sweep distance.
     pub taps: u32,
 }
 
@@ -501,6 +502,10 @@ pub(super) struct Compositor {
     /// Decoded plane size: the canvas, or the zoom detail plane (#3).
     plane_width: u32,
     plane_height: u32,
+    /// Base canvas-space screen width (`frame.rect.2`), kept separate from
+    /// `params.source_rect` (which is in detail-plane pixels) so `radius_for`
+    /// never shrinks canvas corners when the detail plane is active.
+    base_rect_width: f64,
     src_y: wgpu::Texture,
     src_uv: wgpu::Texture,
     _stage: [wgpu::Texture; 2],
@@ -538,10 +543,26 @@ pub(super) struct Compositor {
 impl Compositor {
     /// Create a compositor at `width` × `height` for `frame`, reusing the
     /// process-wide device and pipelines when they are still healthy.
+    #[cfg(test)]
     pub(super) fn new(
         width: u32,
         height: u32,
         plane: (u32, u32),
+        frame: &CanvasFrame,
+        spec: &CompositorSpec,
+        sharpening: f32,
+    ) -> Result<Self> {
+        Self::new_with_source_rect(width, height, plane, None, frame, spec, sharpening)
+    }
+
+    /// Create a compositor with an explicit decoded `source_rect` inside
+    /// `plane` so the shader, `zoom_crop`, and the decode `scale`/`pad` graph
+    /// agree to the exact pixel even when `plane` rounds up for NV12 alignment.
+    pub(super) fn new_with_source_rect(
+        width: u32,
+        height: u32,
+        plane: (u32, u32),
+        source_rect_override: Option<(f64, f64, f64, f64)>,
         frame: &CanvasFrame,
         spec: &CompositorSpec,
         sharpening: f32,
@@ -655,14 +676,20 @@ impl Compositor {
                 1.0 - f32::from(full_plate),
             ],
             corner: [frame.radius as f32, 0.0, 0.0, 0.0],
-            // The decoded planes are `plane` px with the picture fitted at the
-            // same rect scaled by the plane/canvas ratio.
-            source_rect: [
-                (frame.rect.0 * plane_width as f64 / width as f64) as f32,
-                (frame.rect.1 * plane_height as f64 / height as f64) as f32,
-                (frame.rect.2.max(1.0) * plane_width as f64 / width as f64) as f32,
-                (frame.rect.3.max(1.0) * plane_height as f64 / height as f64) as f32,
-            ],
+            // The decoded planes are `plane` px with the picture fitted at
+            // `source_rect` (explicit detail-plane content rect when provided,
+            // or `frame.rect` scaled by plane/canvas for legacy callers).
+            source_rect: match source_rect_override {
+                Some((sx, sy, sw, sh)) => {
+                    [sx as f32, sy as f32, sw.max(1.0) as f32, sh.max(1.0) as f32]
+                }
+                None => [
+                    (frame.rect.0 * plane_width as f64 / width as f64) as f32,
+                    (frame.rect.1 * plane_height as f64 / height as f64) as f32,
+                    (frame.rect.2.max(1.0) * plane_width as f64 / width as f64) as f32,
+                    (frame.rect.3.max(1.0) * plane_height as f64 / height as f64) as f32,
+                ],
+            },
             border: border_params[0],
             border_from: border_params[1],
             border_to: border_params[2],
@@ -1161,6 +1188,7 @@ impl Compositor {
             height,
             plane_width,
             plane_height,
+            base_rect_width: frame.rect.2.max(1.0),
             src_y,
             src_uv,
             _stage: stage,
@@ -1345,20 +1373,12 @@ impl Compositor {
         self.params.detail[1] = request.sharpening.clamp(0.0, 1.0);
         // Timeline gaps (F2): the composite pass draws the background only.
         self.params.detail[3] = if request.has_screen { 1.0 } else { 0.0 };
-        // Motion blur (M2 #1): the shutter strip is expressed in the same
-        // content-pixel space as `crop`, so it normalizes identically.
-        let normalize = |crop: &Crop| -> [f32; 4] {
-            [
-                crop.x as f32 / full.2.max(1.0) as f32,
-                crop.y as f32 / full.3.max(1.0) as f32,
-                crop.width as f32 / full.2.max(1.0) as f32,
-                crop.height as f32 / full.3.max(1.0) as f32,
-            ]
-        };
+        // Motion blur (M2 #1): the shutter strip arrives already normalized in
+        // continuous content-UV space (`[x, y, w, h]`), avoiding 2px snapping.
         match request.blur {
             Some(strip) if strip.taps > 1 => {
-                self.params.blur_a = normalize(&strip.start);
-                self.params.blur_b = normalize(&strip.end);
+                self.params.blur_a = strip.start;
+                self.params.blur_b = strip.end;
                 self.params.detail[0] = strip.taps as f32;
             }
             _ => {
@@ -1525,12 +1545,13 @@ impl Compositor {
     }
 
     fn radius_for(&self, request: &FrameRequest, dest: (f64, f64, f64, f64)) -> u32 {
-        let full = self.full_rect();
         if request.radius == 0 {
             return 0;
         }
-        let scale = if full.2 > 0.0 {
-            (dest.2 / full.2).clamp(0.0, 1.0)
+        // Compare canvas-space `dest.2` against the base canvas-space screen
+        // width (NOT `source_rect.2`, which is scaled by the detail plane).
+        let scale = if self.base_rect_width > 0.0 {
+            (dest.2 / self.base_rect_width).clamp(0.0, 1.0)
         } else {
             1.0
         };
@@ -3703,5 +3724,177 @@ mod tests {
             nv12_len(width, height),
             "composed frames carry a full NV12 canvas"
         );
+    }
+
+    #[test]
+    fn detail_plane_preserves_full_canvas_border_radius() {
+        // Regression: `radius_for` used to scale `border_radius` by
+        // `dest.width / source_rect.width`, which halved the visible corner
+        // radius whenever a 2x zoom-clarity detail plane was active.
+        let (width, height) = (128, 64);
+        let frame = CanvasFrame {
+            rect: (16.0, 8.0, 96.0, 48.0),
+            radius: 16,
+            ..plain_frame(width, height)
+        };
+        let Some(mut base_comp) = compositor_for(width, height, frame.clone()) else {
+            return;
+        };
+        let detail_plane = (256, 128);
+        let detail_source_rect = (32.0, 16.0, 192.0, 96.0);
+        let Ok(mut detail_comp) = Compositor::new_with_source_rect(
+            width,
+            height,
+            detail_plane,
+            Some(detail_source_rect),
+            &frame,
+            &CompositorSpec::default(),
+            0.0,
+        ) else {
+            return;
+        };
+
+        let mut base_req = request(
+            width,
+            height,
+            Crop {
+                x: 0,
+                y: 0,
+                width: 96,
+                height: 48,
+            },
+        );
+        base_req.dest = frame.rect;
+        base_req.radius = 16;
+
+        let mut detail_req = request(
+            width,
+            height,
+            Crop {
+                x: 0,
+                y: 0,
+                width: 192,
+                height: 96,
+            },
+        );
+        detail_req.dest = frame.rect;
+        detail_req.radius = 16;
+
+        base_comp
+            .submit(Frame::Compose(flat_frame(width, height, 200)), base_req)
+            .expect("base submit");
+        detail_comp
+            .submit(
+                Frame::Compose(flat_frame(detail_plane.0, detail_plane.1, 200)),
+                detail_req,
+            )
+            .expect("detail submit");
+
+        let base_out = base_comp.drain().expect("base drain").remove(0);
+        let detail_out = detail_comp.drain().expect("detail drain").remove(0);
+
+        let luma =
+            |buf: &[u8], x: u32, y: u32| buf[y as usize * width as usize + x as usize] as i16;
+        // Pixel (19, 11) lies 3px inside the bounding box corner: with radius 16
+        // it is OUTSIDE the rounded corner (background <= 30); if radius were
+        // halved to 8, distance from (24,16) is sqrt(5^2+5^2)=7.07 < 8 (content ~200!).
+        assert!(
+            luma(&base_out, 19, 11) <= 30,
+            "1x corner should show background, got {}",
+            luma(&base_out, 19, 11)
+        );
+        assert!(
+            luma(&detail_out, 19, 11) <= 30,
+            "2x detail plane shrunk border_radius! corner luma = {}",
+            luma(&detail_out, 19, 11)
+        );
+        // Full luma plane must agree across every pixel.
+        let max_diff = base_out[..(width * height) as usize]
+            .iter()
+            .zip(detail_out[..(width * height) as usize].iter())
+            .map(|(a, b)| (*a as i16 - *b as i16).abs())
+            .max()
+            .unwrap_or(0);
+        assert!(
+            max_diff <= 2,
+            "1x vs 2x detail plane max luma diff {max_diff}"
+        );
+    }
+
+    #[test]
+    fn glass_loupe_paints_ring_at_outer_edge_not_center_and_hugs_rounded_rect() {
+        // Regression for two composite.wgsl bugs:
+        // 1) `border_band(lens_sdf, r - ring_w, r)` painted a solid white dot at
+        //    the centre of the lens with NO outer ring.
+        // 2) `radial = length(lens_local) / r` blew out rounded-rect corners
+        //    into bright triangles instead of hugging the rounded-rect rim.
+        let (width, height) = (160, 160);
+        let Some(mut comp) = compositor(width, height) else {
+            return;
+        };
+        let luma =
+            |buf: &[u8], x: u32, y: u32| buf[y as usize * width as usize + x as usize] as i16;
+
+        for (label, corner_radius) in [("circle", 40.0f32), ("rounded-rect", 10.0f32)] {
+            let mut req = request(
+                width,
+                height,
+                Crop {
+                    x: 0,
+                    y: 0,
+                    width,
+                    height,
+                },
+            );
+            req.loupe = Some(LoupeFrame {
+                center: (80.0, 80.0),
+                radius: 40.0,
+                corner_radius,
+                target: [0.25, 0.25, 0.5, 0.5],
+                ring_width: 6.0,
+                ring_opacity: 1.0,
+                ring_color: [1.0, 1.0, 1.0],
+                presence: 1.0,
+                shadow_blur: 12.0,
+                shadow_opacity: 0.4,
+                glass: true,
+            });
+            comp.submit(Frame::Compose(flat_frame(width, height, 40)), req)
+                .expect("loupe submit");
+            let out = comp.drain().expect("loupe drain").remove(0);
+
+            // 1) Lens centre must show the dark magnified source (~40), NEVER a white dot.
+            let center_y = luma(&out, 80, 80);
+            assert!(
+                (center_y - 40).abs() <= 8,
+                "{label}: lens centre should show dark source (~40), got {center_y}"
+            );
+
+            // 2) Outer ring band (3px inward from right edge x = 120 -> x = 117) must be bright white.
+            let ring_y = luma(&out, 117, 80);
+            assert!(
+                ring_y >= 200,
+                "{label}: outer ring should paint bright white (>=200), got {ring_y}"
+            );
+
+            // 3) Just inside the ring (10px inward -> x = 110), not bright ring.
+            let inner_edge_y = luma(&out, 110, 80);
+            assert!(
+                inner_edge_y < 120,
+                "{label}: interior past ring should stay dark (<120), got {inner_edge_y}"
+            );
+
+            // 4) On rounded-rect, an interior point on the diagonal (30px from
+            //    centre in both axes: x=110, y=110, 10px from both straight edges)
+            //    must NOT blow out to a bright white corner triangle (old `length/r`
+            //    gave radial = 42.4/40 > 1.0 -> full rim highlight!).
+            if label == "rounded-rect" {
+                let diag_inner = luma(&out, 108, 108);
+                assert!(
+                    (diag_inner - inner_edge_y).abs() <= 20,
+                    "rounded-rect corner blew out vs edge: diag={diag_inner}, edge={inner_edge_y}"
+                );
+            }
+        }
     }
 }

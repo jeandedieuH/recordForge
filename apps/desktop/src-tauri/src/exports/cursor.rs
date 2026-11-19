@@ -253,7 +253,18 @@ struct RasterCacheEntry {
     scale_bin: u32,
     phase_x: u8,
     phase_y: u8,
-    cursor: RasterizedCursor,
+    cursor: Arc<RasterizedCursor>,
+}
+
+/// One sub-frame pose along the cursor's shutter window, ready for linear
+/// premultiplied shutter accumulation.
+#[derive(Debug, Clone, Copy)]
+struct CursorMotionSample {
+    x: f64,
+    y: f64,
+    scale: f64,
+    /// Normalized shutter weight (`sum(weights) == 1.0`).
+    weight: f32,
 }
 
 const RASTER_CACHE_CAPACITY: usize = 256;
@@ -335,6 +346,12 @@ pub struct CursorRenderer {
     /// rounded primary screen rect, or the full canvas for fullscreen exports.
     zoompan_out_w: f64,
     zoompan_out_h: f64,
+    /// Pixel dimensions of the stream entering the zoom stage (`screen_w ×
+    /// screen_h` on compat and 1× GPU; detail-plane `content_w × content_h` on
+    /// GPU when zoom clarity is active). Used by `map_source_point` so the
+    /// integer crop matches the exact surface being zoomed.
+    zoom_input_w: f64,
+    zoom_input_h: f64,
     /// `settings.scale` clamped once; the per-frame scale multiplies it by the
     /// active window's fit scale so the cursor resizes with the video slot.
     cursor_scale_factor: f64,
@@ -356,6 +373,9 @@ pub struct CursorRenderer {
     /// Bounded LRU of rendered rasters keyed by (asset, scale bin, quarter-px
     /// phase). Insertion order doubles as recency order (back = newest).
     raster_cache: Vec<RasterCacheEntry>,
+    /// Reusable linear premultiplied RGBA accumulation buffer for cursor motion
+    /// blur so moving frames avoid per-frame heap allocations.
+    blur_accum: Vec<f32>,
 }
 
 impl CursorRenderer {
@@ -376,14 +396,24 @@ impl CursorRenderer {
         rect: (f64, f64, f64, f64),
         fit_scale: f64,
     ) -> (f64, f64, f64) {
-        let in_w = self.telemetry_source_w.max(1.0);
-        let in_h = self.telemetry_source_h.max(1.0);
+        let source_w = self.telemetry_source_w.max(1.0);
+        let source_h = self.telemetry_source_h.max(1.0);
 
         // No zoom activity: keep the aspect-fitted placement unchanged.
         if transform.scale <= 1.0001 && transform.progress < 1e-4 {
             let (x, y) = self.fit_source_point_in(source_x, source_y, clip);
             return (x, y, fit_scale);
         }
+
+        // First aspect-fit telemetry into the stream surface that actually
+        // enters the zoom stage (matching FFmpeg's `scale=...:decrease,pad=...`
+        // and GPU decode). Keeping the letterbox offset avoids a sudden jump
+        // when zoom starts on a source whose aspect differs from `screen_rect`.
+        let in_w = self.zoom_input_w.max(1.0);
+        let in_h = self.zoom_input_h.max(1.0);
+        let in_fit_scale = (in_w / source_w).min(in_h / source_h);
+        let in_offset_x = (in_w - source_w * in_fit_scale) / 2.0;
+        let in_offset_y = (in_h - source_h * in_fit_scale) / 2.0;
 
         let (ix, iy, iw, ih) = camera::zoompan_integer_crop(
             (
@@ -401,8 +431,8 @@ impl CursorRenderer {
             1,
             1,
         );
-        let px = source_x.clamp(0.0, in_w);
-        let py = source_y.clamp(0.0, in_h);
+        let px = (in_offset_x + source_x.clamp(0.0, source_w) * in_fit_scale).clamp(0.0, in_w);
+        let py = (in_offset_y + source_y.clamp(0.0, source_h) * in_fit_scale).clamp(0.0, in_h);
         let surface_x = ((px - ix as f64) + 0.5) * self.zoompan_out_w / iw.max(1) as f64 - 0.5;
         let surface_y = ((py - iy as f64) + 0.5) * self.zoompan_out_h / ih.max(1) as f64 - 0.5;
         // The base window draws the surface 1:1 at its float origin; layout
@@ -420,8 +450,15 @@ impl CursorRenderer {
         (
             rect.0 + surface_x * display_scale_x,
             rect.1 + surface_y * display_scale_y,
-            display_scale_x * self.zoompan_out_w / iw.max(1) as f64,
+            in_fit_scale * display_scale_x * self.zoompan_out_w / iw.max(1) as f64,
         )
+    }
+
+    /// Override the pixel dimensions of the stream entering the zoom stage
+    /// (used by the GPU compositor when a zoom-clarity detail plane is active).
+    pub(crate) fn set_zoom_input_size(&mut self, width: f64, height: f64) {
+        self.zoom_input_w = width.max(1.0);
+        self.zoom_input_h = height.max(1.0);
     }
 }
 
@@ -594,6 +631,8 @@ impl CursorRenderer {
             video_screen_rect,
             zoompan_out_w,
             zoompan_out_h,
+            zoom_input_w: zoompan_out_w,
+            zoom_input_h: zoompan_out_h,
             cursor_scale_factor,
             base_fit_scale,
             video_screen_windows,
@@ -601,6 +640,7 @@ impl CursorRenderer {
             shadow_pad_vb,
             tree_cache: HashMap::new(),
             raster_cache: Vec::new(),
+            blur_accum: Vec::new(),
         })
     }
 
@@ -642,9 +682,65 @@ impl CursorRenderer {
         }
     }
 
+    /// Evaluate the sub-frame zoom transform at normalized shutter coordinate
+    /// `u` (`-1..+1`) so cursor motion blur stays registered to a zooming or
+    /// panning screen underneath when zoom/pan blur is also active.
+    fn subframe_zoom_transform(
+        &self,
+        output_ms: f64,
+        base: &ZoomTransformState,
+        u: f64,
+    ) -> ZoomTransformState {
+        if self.zoom_segments.is_empty() || u.abs() < 1e-9 {
+            return *base;
+        }
+        let Some(blur) = self.motion_blur.as_ref().filter(|blur| blur.is_active()) else {
+            return *base;
+        };
+        let zoom_shutter = blur.zoom.clamp(0.0, 1.0);
+        let pan_shutter = blur.pan.clamp(0.0, 1.0);
+        if zoom_shutter <= 0.0 && pan_shutter <= 0.0 {
+            return *base;
+        }
+        let frame_ms = 1000.0 / self.fps.max(1) as f64;
+        let half_zoom_ms = frame_ms * zoom_shutter / 2.0;
+        let half_pan_ms = frame_ms * pan_shutter / 2.0;
+        if (half_zoom_ms - half_pan_ms).abs() < 1e-6 {
+            return self.resolve_zoom_transform_at((output_ms + u * half_zoom_ms).max(0.0));
+        }
+        let z_state = if half_zoom_ms > 0.0 {
+            self.resolve_zoom_transform_at((output_ms + u * half_zoom_ms).max(0.0))
+        } else {
+            *base
+        };
+        let p_state = if half_pan_ms > 0.0 {
+            self.resolve_zoom_transform_at((output_ms + u * half_pan_ms).max(0.0))
+        } else {
+            *base
+        };
+        let cw = self.canvas_width.max(1) as f64;
+        let ch = self.canvas_height.max(1) as f64;
+        let crop_w = z_state.crop_w.clamp(1.0, cw);
+        let crop_h = z_state.crop_h.clamp(1.0, ch);
+        let cx = p_state.crop_x + p_state.crop_w * 0.5;
+        let cy = p_state.crop_y + p_state.crop_h * 0.5;
+        let crop_x = (cx - crop_w * 0.5).clamp(0.0, (cw - crop_w).max(0.0));
+        let crop_y = (cy - crop_h * 0.5).clamp(0.0, (ch - crop_h).max(0.0));
+        ZoomTransformState {
+            progress: z_state.progress.max(p_state.progress),
+            scale: z_state.scale,
+            crop_x,
+            crop_y,
+            crop_w,
+            crop_h,
+        }
+    }
+
     /// Canvas poses the cursor sweeps through across its shutter window, oldest
-    /// first. An empty vec means the motion is sub-pixel, so the caller draws
-    /// the single sharp pose (no cost when nothing moves).
+    /// first, with normalized tapered shutter weights (`sum == 1.0`).
+    ///
+    /// An empty vec means the motion is sub-pixel, so the caller draws the
+    /// single sharp pose (zero cost when nothing moves).
     #[allow(clippy::too_many_arguments)]
     fn cursor_motion_poses(
         &self,
@@ -654,18 +750,53 @@ impl CursorRenderer {
         clip: ClipRect,
         rect: (f64, f64, f64, f64),
         fit_scale: f64,
-    ) -> Vec<(f64, f64)> {
-        /// Poses probed before the sample count is chosen.
-        const PROBE: usize = 6;
-        /// Cap on accumulated ghost copies: each copy is one cached-raster blit.
-        const MAX_SAMPLES: usize = 6;
-        /// Sweep below this many canvas pixels per sample is not worth a pass.
-        const MIN_STEP_PX: f64 = 1.5;
+        click_scale: f64,
+    ) -> Vec<CursorMotionSample> {
+        /// Midpoint probes used to measure the curved shutter arc length.
+        const PROBE: usize = 5;
+        /// Cap on accumulated shutter samples: 24 gives silky trails even on
+        /// fast across-screen flicks while reusing the bounded raster cache.
+        const MAX_SAMPLES: usize = 24;
+        /// Minimum total canvas sweep (px) before motion blur engages.
+        const MIN_SWEEP_PX: f64 = 1.0;
+        /// Target spacing between consecutive shutter poses (px).
+        const STEP_PX: f64 = 1.25;
 
         let Some(shutter) = self.cursor_blur_shutter() else {
             return Vec::new();
         };
         let frame_source_ms = 1000.0 / self.fps as f64 * self.source_ms_per_output_ms(output_ms);
+        let map_samples = |samples: &[(f64, f64)]| -> Vec<CursorMotionSample> {
+            let count = samples.len();
+            let raw_weights: Vec<f64> = (0..count)
+                .map(|index| camera::motion_blur_tap_weight(index as u32, count as u32))
+                .collect();
+            let weight_sum: f64 = raw_weights.iter().sum::<f64>().max(1e-9);
+            samples
+                .iter()
+                .enumerate()
+                .map(|(index, (source_x, source_y))| {
+                    let progress = (index as f64 + 0.5) / count.max(1) as f64;
+                    let u = -1.0 + 2.0 * progress;
+                    let sub_transform = self.subframe_zoom_transform(output_ms, transform, u);
+                    let (x, y, zoom_px_scale) = self.map_source_point(
+                        &sub_transform,
+                        *source_x,
+                        *source_y,
+                        clip,
+                        rect,
+                        fit_scale,
+                    );
+                    CursorMotionSample {
+                        x,
+                        y,
+                        scale: self.cursor_scale_factor * zoom_px_scale * click_scale,
+                        weight: (raw_weights[index] / weight_sum) as f32,
+                    }
+                })
+                .collect()
+        };
+
         let probe = self
             .engine
             .lock()
@@ -677,25 +808,18 @@ impl CursorRenderer {
                 PROBE,
                 &self.settings,
             );
-        let mapped = |samples: &[(f64, f64)]| {
-            samples
-                .iter()
-                .map(|(source_x, source_y)| {
-                    let (x, y, _) = self
-                        .map_source_point(transform, *source_x, *source_y, clip, rect, fit_scale);
-                    (x, y)
-                })
-                .collect::<Vec<_>>()
-        };
-        let probed = mapped(&probe);
-        let sweep: f64 = probed
+        let probed = map_samples(&probe);
+        // Midpoint samples span `(PROBE - 1) / PROBE` of the shutter width;
+        // scale up to estimate full shutter sweep.
+        let probed_arc: f64 = probed
             .windows(2)
-            .map(|pair| ((pair[1].0 - pair[0].0).powi(2) + (pair[1].1 - pair[0].1).powi(2)).sqrt())
+            .map(|pair| ((pair[1].x - pair[0].x).powi(2) + (pair[1].y - pair[0].y).powi(2)).sqrt())
             .sum();
-        if sweep < MIN_STEP_PX {
+        let sweep = probed_arc * (PROBE as f64 / (PROBE - 1) as f64);
+        if sweep < MIN_SWEEP_PX {
             return Vec::new();
         }
-        let samples = ((sweep / MIN_STEP_PX).ceil() as usize).clamp(2, MAX_SAMPLES);
+        let samples = ((sweep / STEP_PX).ceil() as usize).clamp(3, MAX_SAMPLES);
         if samples == PROBE {
             return probed;
         }
@@ -710,7 +834,7 @@ impl CursorRenderer {
                 samples,
                 &self.settings,
             );
-        mapped(&resampled)
+        map_samples(&resampled)
     }
 
     /// Resolve the effective asset id for a cursor frame, honoring the user's
@@ -859,11 +983,18 @@ impl CursorRenderer {
         // Apply the idle fade opacity computed by the canonical engine. The
         // cached asset is rendered at full opacity and modulated per-frame.
         let glyph_scale = effective_cursor_scale * cursor_frame.click_scale;
-        // Cursor motion blur (M2 #1): accumulate equally-weighted ghost poses
-        // across the shutter. Sub-pixel movement returns an empty track, so a
-        // still cursor costs exactly one blit and an unblurred plan costs none.
-        let poses =
-            self.cursor_motion_poses(output_ms, source_time_ms, &transform, clip, rect, fit_scale);
+        // Cursor motion blur: integrate weighted shutter poses linearly in
+        // premultiplied RGBA so overlapping regions keep 100% core opacity
+        // instead of washing out under repeated Porter-Duff blits.
+        let poses = self.cursor_motion_poses(
+            output_ms,
+            source_time_ms,
+            &transform,
+            clip,
+            rect,
+            fit_scale,
+            cursor_frame.click_scale,
+        );
         if poses.is_empty() {
             self.draw_cursor(
                 &mut target,
@@ -875,18 +1006,13 @@ impl CursorRenderer {
                 &clip,
             );
         } else {
-            let weight = cursor_frame.opacity / poses.len() as f64;
-            for (pose_x, pose_y) in poses {
-                self.draw_cursor(
-                    &mut target,
-                    pose_x,
-                    pose_y,
-                    weight,
-                    &shape_id,
-                    glyph_scale,
-                    &clip,
-                );
-            }
+            self.draw_cursor_motion_blur(
+                &mut target,
+                &poses,
+                cursor_frame.opacity,
+                &shape_id,
+                &clip,
+            );
         }
     }
 
@@ -949,6 +1075,28 @@ impl CursorRenderer {
             fit_scale,
         );
         Some((x, y))
+    }
+
+    /// Unzoomed canvas position of the cursor tip on the fitted screen at
+    /// `output_ms`, or `None` when the cursor is hidden. Used by Glass Loupe
+    /// when a frame zoom overlaps the lens so the lens samples the actual
+    /// unzoomed screen region beneath the cursor while floating over the
+    /// zoomed pointer tip (`cursor_canvas_point`).
+    pub(crate) fn cursor_unzoomed_canvas_point(&self, output_ms: f64) -> Option<(f64, f64)> {
+        if !self.settings.enabled || !output_ms.is_finite() || output_ms < 0.0 {
+            return None;
+        }
+        let source_time_ms = source_time_for_output(&self.segments, output_ms)?;
+        let cursor_frame = self
+            .engine
+            .lock()
+            .expect("cursor engine")
+            .evaluate(source_time_ms, &self.settings);
+        if !cursor_frame.visible {
+            return None;
+        }
+        let (clip, _, _) = self.screen_entry_at(output_ms);
+        Some(self.fit_source_point_in(cursor_frame.source_x, cursor_frame.source_y, clip))
     }
 
     /// Focus-spotlight dim: the screen area outside a feathered hole around the
@@ -1124,17 +1272,18 @@ impl CursorRenderer {
         let mut x1 = x0 + geometry.width as f64;
         let mut y1 = y0 + geometry.height as f64;
 
-        // Blurred ghosts sweep beyond the sharp pose; widen the plate so the
-        // blur is never clipped at the tile edge.
-        for (pose_x, pose_y) in
-            self.cursor_motion_poses(output_ms, source_time_ms, &transform, clip, rect, fit_scale)
-        {
-            let ghost = self.cursor_draw_geometry(
-                &shape_id,
-                pose_x,
-                pose_y,
-                effective_cursor_scale * cursor_frame.click_scale,
-            );
+        // Blurred shutter poses sweep beyond the sharp pose; widen the plate so
+        // the blur trail is never clipped at the tile edge.
+        for pose in self.cursor_motion_poses(
+            output_ms,
+            source_time_ms,
+            &transform,
+            clip,
+            rect,
+            fit_scale,
+            cursor_frame.click_scale,
+        ) {
+            let ghost = self.cursor_draw_geometry(&shape_id, pose.x, pose.y, pose.scale);
             x0 = x0.min(ghost.x0 as f64);
             y0 = y0.min(ghost.y0 as f64);
             x1 = x1.max(ghost.x0 as f64 + ghost.width as f64);
@@ -1211,6 +1360,131 @@ impl CursorRenderer {
         );
     }
 
+    /// Integrate a sequence of weighted shutter poses linearly in premultiplied
+    /// RGBA and composite the resulting motion-blurred cursor ONCE onto `target`.
+    ///
+    /// Why linear premultiplied accumulation instead of repeated Porter-Duff
+    /// `source-over` blits with `alpha / N`: Porter-Duff compounds transmission
+    /// `(1 - 1/N)^N -> 1/e`, erasing ~35% of the cursor's core opacity even
+    /// where all poses overlap. Linear integration conserves energy (`sum(w) = 1`)
+    /// so overlapping pixels stay 100% opaque and trailing edges feather smoothly.
+    fn draw_cursor_motion_blur(
+        &mut self,
+        target: &mut DrawTarget,
+        poses: &[CursorMotionSample],
+        opacity: f64,
+        shape_id: &str,
+        clip: &ClipRect,
+    ) {
+        let opacity = opacity.clamp(0.0, 1.0) as f32;
+        if opacity <= 0.0 || poses.is_empty() {
+            return;
+        }
+        let asset = cursor_engine::assets::resolve_cursor_asset_or_default(shape_id);
+        let mut resolved: Vec<(Arc<RasterizedCursor>, i32, i32, f32)> =
+            Vec::with_capacity(poses.len());
+        let mut min_x = i32::MAX;
+        let mut min_y = i32::MAX;
+        let mut max_x = i32::MIN;
+        let mut max_y = i32::MIN;
+
+        for pose in poses {
+            let geometry = self.cursor_draw_geometry(shape_id, pose.x, pose.y, pose.scale);
+            let cursor_index = match self.raster_index(
+                asset,
+                geometry.scale_bin,
+                geometry.phase_x,
+                geometry.phase_y,
+            ) {
+                Ok(index) => index,
+                Err(error) => {
+                    tracing::warn!(%error, asset_id = %asset.id, "failed to rasterize cursor asset for motion blur");
+                    return;
+                }
+            };
+            let raster = Arc::clone(&self.raster_cache[cursor_index].cursor);
+            min_x = min_x.min(geometry.x0);
+            min_y = min_y.min(geometry.y0);
+            max_x = max_x.max(geometry.x0 + raster.width as i32);
+            max_y = max_y.max(geometry.y0 + raster.height as i32);
+            resolved.push((raster, geometry.x0, geometry.y0, pose.weight));
+        }
+
+        // Clamp the accumulation buffer to the visible intersection of the
+        // canvas, the screen clip rect, and the current tile target.
+        let clip_x0 = (clip.x as i32).max(0).max(target.origin_x);
+        let clip_y0 = (clip.y as i32).max(0).max(target.origin_y);
+        let clip_x1 = ((clip.x + clip.w) as i32)
+            .min(self.canvas_width as i32)
+            .min(target.origin_x + target.stride_w as i32);
+        let clip_y1 = ((clip.y + clip.h) as i32)
+            .min(self.canvas_height as i32)
+            .min(target.origin_y + target.height as i32);
+
+        let bx0 = min_x.max(clip_x0);
+        let by0 = min_y.max(clip_y0);
+        let bx1 = max_x.min(clip_x1);
+        let by1 = max_y.min(clip_y1);
+        if bx0 >= bx1 || by0 >= by1 {
+            return;
+        }
+        let bw = (bx1 - bx0) as usize;
+        let bh = (by1 - by0) as usize;
+        let required = bw * bh * 4;
+        self.blur_accum.clear();
+        self.blur_accum.resize(required, 0.0);
+
+        for (raster, x0, y0, weight) in &resolved {
+            let rw = raster.width as i32;
+            let rh = raster.height as i32;
+            let sx0 = (bx0 - *x0).max(0);
+            let sy0 = (by0 - *y0).max(0);
+            let sx1 = (bx1 - *x0).min(rw);
+            let sy1 = (by1 - *y0).min(rh);
+            if sx0 >= sx1 || sy0 >= sy1 {
+                continue;
+            }
+            for sy in sy0..sy1 {
+                let dst_y = (*y0 + sy - by0) as usize;
+                let src_row = sy as usize * raster.width as usize;
+                let dst_row = dst_y * bw;
+                for sx in sx0..sx1 {
+                    let src_idx = (src_row + sx as usize) * 4;
+                    let src_alpha = raster.data[src_idx + 3];
+                    if src_alpha == 0 {
+                        continue;
+                    }
+                    let wa = (src_alpha as f32 / 255.0) * *weight;
+                    let dst_idx = (dst_row + (*x0 + sx - bx0) as usize) * 4;
+                    self.blur_accum[dst_idx] += raster.data[src_idx] as f32 * wa;
+                    self.blur_accum[dst_idx + 1] += raster.data[src_idx + 1] as f32 * wa;
+                    self.blur_accum[dst_idx + 2] += raster.data[src_idx + 2] as f32 * wa;
+                    self.blur_accum[dst_idx + 3] += wa;
+                }
+            }
+        }
+
+        for row in 0..bh {
+            let fy = by0 + row as i32;
+            let row_offset = row * bw;
+            for col in 0..bw {
+                let idx = (row_offset + col) * 4;
+                let accum_a = self.blur_accum[idx + 3];
+                if accum_a <= 1e-4 {
+                    continue;
+                }
+                let inv_a = 1.0 / accum_a;
+                let color = Rgba {
+                    red: (self.blur_accum[idx] * inv_a).clamp(0.0, 255.0).round() as u8,
+                    green: (self.blur_accum[idx + 1] * inv_a).clamp(0.0, 255.0).round() as u8,
+                    blue: (self.blur_accum[idx + 2] * inv_a).clamp(0.0, 255.0).round() as u8,
+                    alpha: (accum_a * opacity).clamp(0.0, 1.0),
+                };
+                blend_pixel(target, bx0 + col as i32, fy, color, clip);
+            }
+        }
+    }
+
     /// Fetch (or render and cache) the quarter-phase raster for an asset at a
     /// scale bin, returning its index in the LRU. Hits move to the back;
     /// misses evict the front once past `RASTER_CACHE_CAPACITY`.
@@ -1232,7 +1506,7 @@ impl CursorRenderer {
             return Ok(self.raster_cache.len() - 1);
         }
 
-        let cursor = self.render_cursor_raster(asset, scale_bin, phase_x, phase_y)?;
+        let cursor = Arc::new(self.render_cursor_raster(asset, scale_bin, phase_x, phase_y)?);
         self.raster_cache.push(RasterCacheEntry {
             asset_id: asset.id.clone(),
             scale_bin,
@@ -2793,14 +3067,15 @@ mod tests {
         .expect("valid cursor renderer");
 
         // In the 3-phase lifecycle, 500ms is in the sustained hold phase.
-        // Canvas 200x200 (padding 20) -> screen rect (20,20,160,160); source
-        // 100x100. Target (0,0,200,200) at scale 2 -> crop (50,50,100,100),
-        // zoom = 2 -> integer crop: w = 100/2 = 50, dx = 50-25 = 25 -> snap
-        // to 24. Source (60,60) -> ((60-24)+0.5)*160/50 - 0.5 = 116.3 ->
-        // canvas 20 + 116.3 = 136.3.
+        // Canvas 200x200 (padding 20) -> fitted screen rect (20,20,160,160);
+        // source 100x100 is pre-scaled to 160x160 before zoompan (matching
+        // exports/mod.rs & gpu/decode.rs). Target (0,0,200,200) at scale 2 ->
+        // crop (50,50,100,100), zoom = 2 -> integer crop on 160x160: w = 80,
+        // dx = 40 (even). Source (60,60) -> px = 96 -> ((96-40)+0.5)*160/80
+        // - 0.5 = 112.5 -> canvas 20 + 112.5 = 132.5.
         let (x, y) = renderer.map_source_at(500.0, 60.0, 60.0);
-        assert!((x - 136.3).abs() < 0.1, "expected 136.3, got {x}");
-        assert!((y - 136.3).abs() < 0.1, "expected 136.3, got {y}");
+        assert!((x - 132.5).abs() < 0.1, "expected 132.5, got {x}");
+        assert!((y - 132.5).abs() < 0.1, "expected 132.5, got {y}");
 
         // After the segment ends the cursor uses the aspect-fit path:
         // 20 + 60 * 1.6 = 116.0.
@@ -3524,11 +3799,11 @@ mod tests {
                 scale_bin: 1,
                 phase_x: 0,
                 phase_y: 0,
-                cursor: RasterizedCursor {
+                cursor: Arc::new(RasterizedCursor {
                     width: 1,
                     height: 1,
                     data: vec![0; 4],
-                },
+                }),
             });
         }
         renderer
@@ -3654,7 +3929,7 @@ mod tests {
             width: src_w,
             height: src_h,
         });
-        let renderer = CursorRenderer::new_with_zoom(
+        let mut renderer = CursorRenderer::new_with_zoom(
             CursorSettings::default(),
             telemetry,
             &segments(),
@@ -3669,6 +3944,9 @@ mod tests {
             None,
         )
         .expect("registration renderer");
+        // This synthetic filter feeds raw `src_w x src_h` straight into zoompan
+        // (matching a 2x GPU detail plane rather than a pre-scaled 1x stream).
+        renderer.set_zoom_input_size(src_w, src_h);
 
         let mut max_error = 0.0f64;
         for frame_index in [3usize, 12, 24, 36, 48] {
@@ -3737,5 +4015,264 @@ mod tests {
             keystrokes: Vec::new(),
             keystroke_platform: "unknown".into(),
         }
+    }
+
+    #[test]
+    fn cursor_motion_blur_preserves_core_opacity_and_expands_bounds() {
+        // Fast horizontal sweep across 200px in 200ms (1000 px/s) at 30 fps
+        // with a 360° cursor shutter (~33px sweep per frame).
+        let events: Vec<cursor_engine::CursorEvent> = (0..=20)
+            .map(|i| {
+                let x = 100.0 + i as f64 * 20.0;
+                cursor_engine::CursorEvent {
+                    t_ms: i * 20,
+                    source_x: Some(x),
+                    source_y: Some(200.0),
+                    x,
+                    y: 200.0,
+                    visible: true,
+                    button_event: Some("none".into()),
+                    ..Default::default()
+                }
+            })
+            .collect();
+        let telemetry = CursorTelemetryFile {
+            schema_version: 2,
+            asset_id: "src".into(),
+            recording_id: "blur-test".into(),
+            source_width: 640.0,
+            source_height: 480.0,
+            sample_rate_hz: 50.0,
+            capture_bounds: Some(cursor_engine::CursorCaptureBounds {
+                x: 0.0,
+                y: 0.0,
+                width: 640.0,
+                height: 480.0,
+            }),
+            coordinate_transform: cursor_engine::CursorCoordinateTransform::default(),
+            topology: None,
+            shapes: Vec::new(),
+            click_window_ms: 350,
+            health: cursor_engine::CursorTelemetryHealth::Healthy,
+            event_count: events.len() as u64,
+            index: Vec::new(),
+            event_file: "cursor_events.bin".into(),
+            timebase: cursor_engine::CursorTelemetryTimebase::default(),
+            events,
+        }
+        .normalize();
+
+        let seg = RenderSegment {
+            asset_id: "src".into(),
+            stream_index: None,
+            volume: None,
+            fade_in_ms: None,
+            fade_out_ms: None,
+            volume_keyframes: None,
+            audio_filter: None,
+            speed: 1.0,
+            source_in_ms: 0,
+            source_out_ms: 400,
+            output_start_ms: 0,
+            output_end_ms: 400,
+            source_width: None,
+            source_height: None,
+        };
+        let settings = CursorSettings {
+            smooth_movement: false,
+            scale: 1.5,
+            shadow_opacity: 0.0,
+            ..CursorSettings::default()
+        };
+        let canvas_blur = RenderCanvas {
+            width: 640,
+            height: 480,
+            fps: 30,
+            motion_blur: Some(RenderMotionBlur {
+                enabled: true,
+                cursor: 1.0,
+                zoom: 0.0,
+                pan: 0.0,
+            }),
+            ..Default::default()
+        };
+        let mut renderer_blur = CursorRenderer::new_with_zoom(
+            settings.clone(),
+            telemetry.clone(),
+            std::slice::from_ref(&seg),
+            &[],
+            &canvas_blur,
+            Some((0.0, 0.0, 640.0, 480.0)),
+            None,
+        )
+        .unwrap();
+
+        let canvas_sharp = RenderCanvas {
+            width: 640,
+            height: 480,
+            fps: 30,
+            motion_blur: None,
+            ..Default::default()
+        };
+        let renderer_sharp = CursorRenderer::new_with_zoom(
+            settings,
+            telemetry,
+            &[seg],
+            &[],
+            &canvas_sharp,
+            Some((0.0, 0.0, 640.0, 480.0)),
+            None,
+        )
+        .unwrap();
+
+        // Bounds expand horizontally compared to the sharp cursor.
+        let sharp_bounds = renderer_sharp.frame_bounds(200.0).unwrap();
+        let blur_bounds = renderer_blur.frame_bounds(200.0).unwrap();
+        assert!(
+            (blur_bounds.2 - blur_bounds.0) > (sharp_bounds.2 - sharp_bounds.0) + 15.0,
+            "motion blur bounds should widen across the shutter trail: {blur_bounds:?} vs {sharp_bounds:?}"
+        );
+
+        // Linear accumulation preserves full alpha (> 250) when samples overlap
+        // identically (zero Porter-Duff wash-out).
+        let mut frame = vec![0u8; 640 * 480 * 4];
+        let clip = ClipRect {
+            x: 0,
+            y: 0,
+            w: 640,
+            h: 480,
+            border_radius: 0,
+        };
+        let overlapping: Vec<CursorMotionSample> = (0..12)
+            .map(|_| CursorMotionSample {
+                x: 200.0,
+                y: 200.0,
+                scale: 1.5,
+                weight: 1.0 / 12.0,
+            })
+            .collect();
+        {
+            let mut target = DrawTarget::full_canvas(&mut frame, 640, 480);
+            renderer_blur.draw_cursor_motion_blur(&mut target, &overlapping, 1.0, "arrow", &clip);
+        }
+        let max_alpha = frame
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|px| px[3])
+            .max()
+            .unwrap_or(0);
+        assert_eq!(
+            max_alpha, 255,
+            "overlapping motion-blur samples must keep 100% opaque core (no Porter-Duff wash-out)"
+        );
+    }
+
+    #[test]
+    fn cursor_zoom_mapping_stays_continuous_across_aspect_mismatched_source() {
+        // 16:10 (1600x1000) source fitted into a 16:9 (1920x1080) canvas has
+        // horizontal pillarboxes: fit = 1.08, fitted = 1728x1080, offset_x = 96.
+        let zoom = RenderPlanZoomSegment {
+            style: None,
+            loupe: None,
+            id: "zoom-mismatch".into(),
+            start_ms: 0,
+            end_ms: 1_000,
+            target: RenderCropFloat {
+                x: 480.0,
+                y: 270.0,
+                width: 960.0,
+                height: 540.0,
+            },
+            scale: 2.0,
+            easing: "linear".into(),
+            transition_in_ms: 500,
+            transition_out_ms: 0,
+            enabled: true,
+            mode: "manual".into(),
+            source: "manual".into(),
+            preset: "product-demo".into(),
+            follow_deadzone_percent: None,
+            follow_smoothing_alpha: None,
+            label: None,
+            from_target: None,
+            from_scale: None,
+            keyframes: None,
+            motion_plan: None,
+        };
+        let mut telemetry = make_v2_telemetry();
+        telemetry.source_width = 1600.0;
+        telemetry.source_height = 1000.0;
+        telemetry.capture_bounds = Some(cursor_engine::CursorCaptureBounds {
+            x: 0.0,
+            y: 0.0,
+            width: 1600.0,
+            height: 1000.0,
+        });
+        telemetry.events = vec![
+            cursor_engine::CursorEvent {
+                t_ms: 0,
+                source_x: Some(200.0),
+                source_y: Some(500.0),
+                x: 200.0,
+                y: 500.0,
+                visible: true,
+                ..Default::default()
+            },
+            cursor_engine::CursorEvent {
+                t_ms: 1_000,
+                source_x: Some(200.0),
+                source_y: Some(500.0),
+                x: 200.0,
+                y: 500.0,
+                visible: true,
+                ..Default::default()
+            },
+        ];
+        let telemetry = telemetry.normalize();
+
+        let renderer = CursorRenderer::new_with_zoom(
+            CursorSettings {
+                smooth_movement: false,
+                ..CursorSettings::default()
+            },
+            telemetry,
+            &segments(),
+            &[zoom],
+            &RenderCanvas {
+                width: 1920,
+                height: 1080,
+                fps: 60,
+                ..Default::default()
+            },
+            Some((0.0, 0.0, 1920.0, 1080.0)),
+            None,
+        )
+        .expect("renderer");
+
+        // At t = 0ms (scale = 1.0) vs t = 1ms (scale = 1.0014), cursor must not
+        // teleport across the 96px pillarbox offset.
+        let (x0, y0) = renderer.map_source_at(0.0, 200.0, 500.0);
+        let (x1, y1) = renderer.map_source_at(1.0, 200.0, 500.0);
+        assert!(
+            (x0 - (96.0 + 200.0 * 1.08)).abs() < 0.01,
+            "unzoomed pillarboxed x should be 312.0, got {x0}"
+        );
+        assert!(
+            (x1 - x0).abs() < 2.0 && (y1 - y0).abs() < 2.0,
+            "cursor teleported on zoom onset: ({x0}, {y0}) -> ({x1}, {y1})"
+        );
+
+        // During hold (t = 700ms, 2x zoom centred on canvas), unzoomed canvas
+        // point still returns the unzoomed screen position (312, 540) for Glass
+        // Loupe sampling while the zoomed cursor point moves outward.
+        let unzoomed = renderer.cursor_unzoomed_canvas_point(700.0).unwrap();
+        let zoomed = renderer.cursor_canvas_point(700.0).unwrap();
+        assert!((unzoomed.0 - 312.0).abs() < 0.5, "unzoomed {unzoomed:?}");
+        assert!((unzoomed.1 - 540.0).abs() < 0.5, "unzoomed {unzoomed:?}");
+        assert!(
+            (zoomed.0 - unzoomed.0).abs() > 100.0,
+            "zoomed cursor should shift under 2x frame zoom: {zoomed:?} vs {unzoomed:?}"
+        );
     }
 }

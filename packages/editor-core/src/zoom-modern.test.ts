@@ -10,6 +10,7 @@ import {
   createAddZoomSegmentCommand,
   createDeleteZoomSegmentsCommand,
   createEngine,
+  createUpdateCanvasCommand,
   createUpdateZoomSegmentCommand,
   executeCommand,
   getManualZoomSegments,
@@ -659,6 +660,93 @@ describe("Modern Zoom System", () => {
 
       // Failed preconditions must leave state untouched.
       expect(getManualZoomSegments(initial)).toHaveLength(1)
+    })
+
+    it("rescales zoom targets and loupe geometry when canvas dimensions change and restores on undo", () => {
+      const initial = makeState()
+      initial.zoomSegments = [
+        {
+          id: "zoom-frame",
+          startMs: 1_000,
+          durationMs: 2_000,
+          target: { x: 480, y: 270, width: 960, height: 540 }, // center (0.5, 0.5), 2x
+          scale: 2,
+          easing: "smooth",
+          enabled: true,
+          locked: false,
+          mode: "manual",
+        },
+        {
+          id: "zoom-loupe",
+          startMs: 4_000,
+          durationMs: 2_000,
+          target: { x: 960, y: 540, width: 960, height: 540 }, // bottom-right quadrant, 2x
+          scale: 2,
+          easing: "smooth",
+          enabled: true,
+          locked: false,
+          mode: "manual",
+          style: "loupe",
+          loupe: {
+            shape: "circle",
+            size: 0.34,
+            cornerRadius: 0.24,
+            ringWidth: 6,
+            ringColor: "#ffffff",
+            ringOpacity: 0.9,
+            glass: true,
+            shadowBlur: 32,
+            shadowOpacity: 0.35,
+            followCursor: false,
+            center: { x: 480, y: 270 },
+            offset: { x: 40, y: -20 },
+          },
+        },
+      ]
+
+      // 1920x1080 -> 3840x2160 (2x uniform resolution bump)
+      const engine = createEngine(initial)
+      const upscaled = executeCommand(
+        engine,
+        createUpdateCanvasCommand({ width: 3_840, height: 2_160 }),
+      )
+      expect(upscaled.ok).toBe(true)
+      if (!upscaled.ok) return
+
+      const [upFrame, upLoupe] = getManualZoomSegments(upscaled.value.history.present)
+      expect(upFrame.scale).toBe(2)
+      expect(upFrame.target.width).toBeCloseTo(1_920, 4)
+      expect(upFrame.target.height).toBeCloseTo(1_080, 4)
+      expect(upFrame.target.x).toBeCloseTo(960, 4)
+      expect(upFrame.target.y).toBeCloseTo(540, 4)
+      expect(upLoupe.loupe?.center).toEqual({ x: 960, y: 540 })
+      expect(upLoupe.loupe?.offset).toEqual({ x: 80, y: -40 })
+
+      // 3840x2160 -> 1080x1920 (aspect switch to 9:16 portrait)
+      const portrait = executeCommand(
+        upscaled.value,
+        createUpdateCanvasCommand({ aspectRatio: "9:16", width: 1_080, height: 1_920 }),
+      )
+      expect(portrait.ok).toBe(true)
+      if (!portrait.ok) return
+
+      const [pFrame, pLoupe] = getManualZoomSegments(portrait.value.history.present)
+      expect(pFrame.scale).toBe(2)
+      expect(pFrame.target.width).toBeCloseTo(540, 4)
+      expect(pFrame.target.height).toBeCloseTo(960, 4)
+      expect(pFrame.target.x).toBeCloseTo(270, 4)
+      expect(pFrame.target.y).toBeCloseTo(480, 4)
+      expect(pLoupe.loupe?.center?.x).toBeCloseTo(270, 4)
+      expect(pLoupe.loupe?.center?.y).toBeCloseTo(480, 4)
+
+      // Two undos restore the exact original 1080p zoom segments.
+      const back1 = undoCommand(portrait.value)
+      expect(back1.ok).toBe(true)
+      if (!back1.ok) return
+      const back0 = undoCommand(back1.value)
+      expect(back0.ok).toBe(true)
+      if (!back0.ok) return
+      expect(getManualZoomSegments(back0.value.history.present)).toEqual(initial.zoomSegments)
     })
   })
 

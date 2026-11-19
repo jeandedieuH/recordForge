@@ -5,11 +5,7 @@ import type {
   ZoomTarget,
 } from "@recordforge/contracts"
 import { loupeSettingsSchema } from "@recordforge/contracts"
-import {
-  canonicalizeZoomTarget,
-  zoomTargetForCursorPoint,
-  type CursorEngine,
-} from "@recordforge/cursor-core"
+import { canonicalizeZoomTarget, type CursorEngine } from "@recordforge/cursor-core"
 import { resolveZoomTransform, type CanvasRect } from "./composition"
 
 /**
@@ -91,15 +87,49 @@ export function findLoupeAtTime(state: TimelineState, timeMs: number): ManualZoo
   )
 }
 
+export interface ResolveLoupeOptions {
+  /**
+   * Fitted screen video rect on the canvas, in canvas pixels. Defaults to the
+   * full canvas (`{ x: 0, y: 0, width, height }`) so unpadded 16:9 callers keep
+   * identity coordinates while padded, non-16:9, and side-by-side layouts map
+   * zoom-space points onto the actual rendered screen area.
+   */
+  screenRect?: CanvasRect | null
+  /**
+   * Displayed cursor tip in canvas pixels (after any active frame zoom). When
+   * provided while the lens follows the cursor, the lens sits over this visible
+   * pointer while still magnifying the unzoomed screen point underneath it.
+   */
+  displayCursorPoint?: { x: number; y: number } | null
+}
+
+/**
+ * Map a zoom-space point (`[0..canvas.width] × [0..canvas.height]`) onto the
+ * fitted screen rect in canvas pixels. Identity when the screen fills the canvas.
+ */
+export function zoomPointToScreenRect(
+  point: { x: number; y: number },
+  canvas: { width: number; height: number },
+  screenRect: CanvasRect,
+): { x: number; y: number } {
+  const canvasW = Math.max(1, canvas.width)
+  const canvasH = Math.max(1, canvas.height)
+  return {
+    x: screenRect.x + (point.x / canvasW) * screenRect.width,
+    y: screenRect.y + (point.y / canvasH) * screenRect.height,
+  }
+}
+
 /**
  * Resolve the lens pose for one loupe segment at a timeline time.
  *
  * The lens always rides the cursor tip: `cursorPoint` is the recorded pointer's
- * position in canvas coordinates (the zoom-space point the cursor overlay
- * already resolves). When it is provided, the magnified `target` centres on it
- * and the lens centre is the point plus `settings.offset`; without one the lens
- * parks on `settings.center` or the target centre. The frame underneath keeps
- * its current zoom — the lens only grows in and out with the segment's easing.
+ * unzoomed position in zoom space (`[0..canvas.width] × [0..canvas.height]`).
+ * When provided, the magnified `target` centres on the pointer inside
+ * `screenRect` and the lens centre rides `displayCursorPoint` (or the unzoomed
+ * screen point when no frame zoom is active) plus `settings.offset`. Without a
+ * cursor point the lens magnifies the segment target mapped into `screenRect`
+ * and parks on `settings.center` (already canvas px) or that target centre.
  */
 export function resolveLoupeAt(
   segment: ManualZoomSegment,
@@ -109,26 +139,56 @@ export function resolveLoupeAt(
   // now, not a follow-camera plan evaluated through the engine.
   _cursorEngine?: CursorEngine | null,
   cursorPoint?: { x: number; y: number } | null,
+  options?: ResolveLoupeOptions,
 ): LoupePose {
   const canvas = { width: state.canvas.width, height: state.canvas.height }
+  const screenRect: CanvasRect = options?.screenRect ?? {
+    x: 0,
+    y: 0,
+    width: canvas.width,
+    height: canvas.height,
+  }
   const settings = resolveLoupeSettings(segment.loupe)
   const transform = resolveZoomTransform(segment, timeMs, state.canvas)
   const presence = clamp(transform.progress, 0, 1)
 
   const following = cursorPoint != null
-  const target = following
-    ? zoomTargetForCursorPoint(
-        cursorPoint,
-        { width: canvas.width, height: canvas.height, padding: 0 },
-        Math.max(1.05, segment.scale),
-      )
-    : canonicalizeZoomTarget(segment.target, state.canvas, segment.scale)
+  let target: ZoomTarget
+  let rawCenter: { x: number; y: number }
 
-  const centre = cursorPoint ??
-    settings.center ?? {
-      x: target.x + target.width / 2,
-      y: target.y + target.height / 2,
+  if (following) {
+    // Mirror `exports/loupe.rs`: a 1x1 target centred on the unzoomed screen
+    // point lets `loupeSampleSquare` clamp the actual `diameter/scale` square
+    // against `screenRect` without double-clamping near edges.
+    const sampleCenter = zoomPointToScreenRect(cursorPoint, canvas, screenRect)
+    target = {
+      x: sampleCenter.x - 0.5,
+      y: sampleCenter.y - 0.5,
+      width: 1,
+      height: 1,
     }
+    rawCenter = options?.displayCursorPoint ?? sampleCenter
+  } else {
+    const canonical = canonicalizeZoomTarget(segment.target, state.canvas, segment.scale)
+    const sampleCenter = zoomPointToScreenRect(
+      {
+        x: canonical.x + canonical.width / 2,
+        y: canonical.y + canonical.height / 2,
+      },
+      canvas,
+      screenRect,
+    )
+    const scaleX = screenRect.width / Math.max(1, canvas.width)
+    const scaleY = screenRect.height / Math.max(1, canvas.height)
+    target = {
+      x: screenRect.x + canonical.x * scaleX,
+      y: screenRect.y + canonical.y * scaleY,
+      width: canonical.width * scaleX,
+      height: canonical.height * scaleY,
+    }
+    rawCenter = settings.center ?? sampleCenter
+  }
+
   const offset = settings.offset ?? { x: 0, y: 0 }
   const diameter =
     settings.size *
@@ -136,8 +196,8 @@ export function resolveLoupeAt(
     (LENS_MIN_PRESENCE_SCALE + (1 - LENS_MIN_PRESENCE_SCALE) * presence)
   const radius = diameter / 2
   const center = {
-    x: clamp(centre.x + offset.x, radius, Math.max(radius, canvas.width - radius)),
-    y: clamp(centre.y + offset.y, radius, Math.max(radius, canvas.height - radius)),
+    x: clamp(rawCenter.x + offset.x, radius, Math.max(radius, canvas.width - radius)),
+    y: clamp(rawCenter.y + offset.y, radius, Math.max(radius, canvas.height - radius)),
   }
 
   return {

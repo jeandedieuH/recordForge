@@ -237,6 +237,22 @@ fn sample_screen(crop: vec4<f32>, content_uv: vec2<f32>) -> vec4<f32> {
     return vec4<f32>(read_y(uv), read_uv(uv), 0.0);
 }
 
+// Hardware bilinear screen sample used by motion-blur shutter taps. Clamps UV
+// to the interior texel centres of `source_rect` so padded canvases never
+// bleed canvas padding into the edges of the blurred screen.
+fn sample_screen_linear(crop: vec4<f32>, content_uv: vec2<f32>) -> vec4<f32> {
+    let uv = plane_uv(crop, content_uv);
+    let y_half = vec2<f32>(0.5, 0.5) / frame.plane_size.xy;
+    let uv_half = vec2<f32>(1.0, 1.0) / frame.plane_size.xy;
+    let rect_min = frame.source_rect.xy / frame.plane_size.xy;
+    let rect_max = (frame.source_rect.xy + frame.source_rect.zw) / frame.plane_size.xy;
+    let y_uv = clamp(uv, rect_min + y_half, max(rect_min + y_half, rect_max - y_half));
+    let c_uv = clamp(uv, rect_min + uv_half, max(rect_min + uv_half, rect_max - uv_half));
+    let y_byte = textureSampleLevel(src_y, src_sampler, y_uv, 0.0).r * 255.0;
+    let uv_byte = textureSampleLevel(src_uv, src_sampler, c_uv, 0.0).rg * 255.0;
+    return vec4<f32>(y_byte, uv_byte, 0.0);
+}
+
 // Signed distance to a rounded square lens of half-size `half` and corner
 // radius `corner` (all px). `corner == half` is a circle.
 fn lens_distance(point: vec2<f32>, half: f32, corner: f32) -> f32 {
@@ -292,19 +308,22 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var uv_byte: vec2<f32>;
     let taps = max(1u, u32(frame.detail.x + 0.5));
     if (taps > 1u) {
-        // Motion blur (M2 #1): average the screen along the crop strip the
-        // shutter sweeps between `blur_a` and `blur_b`. Averaging in Y/UV keeps
-        // the sharpening pass below on one luma plane.
+        // Motion blur (M2 #1): integrate the screen along the continuous
+        // shutter strip between `blur_a` and `blur_b` with tapered shutter
+        // weights and hardware bilinear fetches.
         var y_sum = 0.0;
         var uv_sum = vec2<f32>(0.0, 0.0);
+        var w_sum = 0.0;
         for (var tap = 0u; tap < taps; tap++) {
             let t = (f32(tap) + 0.5) / f32(taps);
-            let sample = sample_screen(mix(frame.blur_a, frame.blur_b, t), content_uv);
-            y_sum += sample.x;
-            uv_sum += sample.yz;
+            let w = 0.45 + 0.55 * sin(t * 3.14159265);
+            let sample = sample_screen_linear(mix(frame.blur_a, frame.blur_b, t), content_uv);
+            y_sum += sample.x * w;
+            uv_sum += sample.yz * w;
+            w_sum += w;
         }
-        y_byte = y_sum / f32(taps);
-        uv_byte = uv_sum / f32(taps);
+        y_byte = y_sum / w_sum;
+        uv_byte = uv_sum / w_sum;
     } else if (identity) {
         y_byte = textureLoad(src_y, vec2<i32>(canvas_px), 0).r * 255.0;
         let uv_dims = vec2<i32>(textureDimensions(src_uv));
@@ -315,7 +334,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         uv_byte = sample.yz;
     }
 
-    y_byte = sharpen_luma(y_byte, plane_uv(frame.crop, content_uv), frame.detail.y);
+    // Skip RCAS sharpening while motion blur is active: comparing blurred luma
+    // against unblurred single-instant neighbours creates dark/bright halos.
+    if (taps <= 1u) {
+        y_byte = sharpen_luma(y_byte, plane_uv(frame.crop, content_uv), frame.detail.y);
+    }
     let screen = yuv_to_rgb(y_byte, uv_byte);
     var color = mix(bg, screen, coverage);
 
@@ -375,7 +398,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
                 vec2<f32>(0.0, 0.0),
                 vec2<f32>(1.0, 1.0),
             );
-            let radial = length(lens_local) / max(lens_radius, 1.0);
+            // SDF-based normalized rim distance: equals `length(lens_local)/r`
+            // on circles and hugs all four edges + rounded corners evenly on
+            // rounded-rect lenses (avoiding bright corner triangles).
+            let radial = clamp(1.0 + lens_sdf / max(lens_radius, 1.0), 0.0, 1.0);
             let rim = smoothstep(0.82, 1.0, radial);
             let glass = frame.loupe_style.w > 0.5;
             // Rim refraction: pull the sample slightly inward near the edge so
@@ -393,9 +419,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             color = mix(color, lens_color, inside * present);
         }
 
-        // Ring: an anti-aliased annulus just inside the lens edge.
+        // Ring: an anti-aliased annulus just inside the lens edge (`depth` in
+        // `[0, ring_width]` inward from `lens_sdf == 0`, matching canvas border).
         if (frame.loupe_ring.x > 0.0 && present > 0.0) {
-            let band = border_band(lens_sdf, lens_radius - frame.loupe_ring.x, lens_radius);
+            let ring_width = min(frame.loupe_ring.x, lens_radius);
+            let band = border_band(lens_sdf, 0.0, ring_width);
             let ring_color = vec3<f32>(
                 frame.loupe_ring.z,
                 frame.loupe_ring.w,

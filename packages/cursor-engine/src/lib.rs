@@ -1207,14 +1207,14 @@ impl CursorEngine {
         packed
     }
 
-    /// Cursor positions across one shutter window, for motion blur (M2 #1).
+    /// Cursor positions across one shutter window, for motion blur.
     ///
-    /// `shutter` is the shutter fraction of a frame interval (`1.0` = a 180°
-    /// shutter covering the whole `frame_duration_ms`), and the samples are the
-    /// evenly spaced poses the cursor sweeps through while the frame is open.
-    /// Positions come from the same spline the single-time evaluation uses, so
-    /// a blurred cursor sits exactly on the path the sharp one would take —
-    /// including across telemetry segment boundaries.
+    /// `shutter` is the shutter fraction of a frame interval (`0.5` = a 180°
+    /// cinema shutter covering half of `frame_duration_ms`, `1.0` = a 360°
+    /// full-frame shutter). Samples use midpoint quadrature across
+    /// `[time_ms - half, time_ms + half]` along the exact same smoothed spline
+    /// and click-dwell path as `evaluate`, so a blurred cursor tracks the
+    /// sharp pose without phase shift.
     pub fn evaluate_motion_samples(
         &self,
         time_ms: f64,
@@ -1230,18 +1230,39 @@ impl CursorEngine {
         let half = (frame_duration_ms.max(0.0) * shutter.clamp(0.0, 1.0)) / 2.0;
         let mut positions = Vec::with_capacity(count);
         for index in 0..count {
-            // Centre the samples in their sub-intervals so a single sample is
-            // exactly `time_ms`.
-            let progress = if count == 1 {
-                0.5
-            } else {
-                index as f64 / (count - 1) as f64
-            };
+            // Midpoint rule across the shutter window: symmetric around
+            // `time_ms`, exact `time_ms` when `count == 1`, and free of
+            // endpoint bias.
+            let progress = (index as f64 + 0.5) / count as f64;
             let sample_ms = time_ms - half + 2.0 * half * progress;
             let event_index = self.find_event_index(sample_ms);
-            positions.push(self.evaluate_spline_position(event_index, sample_ms, settings));
+            let (mut x, mut y) = self.evaluate_spline_position(event_index, sample_ms, settings);
+            if settings.click_press_animation {
+                self.apply_click_movement(sample_ms, settings, &mut x, &mut y);
+            }
+            positions.push((x, y));
         }
         positions
+    }
+
+    /// Flat `[x0, y0, x1, y1, ...]` layout of `evaluate_motion_samples` for
+    /// zero-JSON WASM transport.
+    pub fn evaluate_motion_samples_packed(
+        &self,
+        time_ms: f64,
+        frame_duration_ms: f64,
+        shutter: f64,
+        samples: usize,
+        settings: &CursorSettings,
+    ) -> Vec<f64> {
+        let points =
+            self.evaluate_motion_samples(time_ms, frame_duration_ms, shutter, samples, settings);
+        let mut packed = Vec::with_capacity(points.len() * 2);
+        for (x, y) in points {
+            packed.push(x);
+            packed.push(y);
+        }
+        packed
     }
 
     fn ensure_smoothed_positions(&self, seg_start: usize, seg_end: usize, alpha: f64) {
@@ -1733,6 +1754,25 @@ mod wasm {
         #[wasm_bindgen]
         pub fn evaluate_packed(&self, time_ms: f64) -> Vec<f64> {
             self.inner.evaluate_packed(time_ms, &self.settings)
+        }
+
+        /// Per-frame shutter samples without JSON. Returns flat
+        /// `[x0, y0, x1, y1, ...]` using the settings stored by `set_settings`.
+        #[wasm_bindgen]
+        pub fn evaluate_motion_samples_packed(
+            &self,
+            time_ms: f64,
+            frame_duration_ms: f64,
+            shutter: f64,
+            samples: usize,
+        ) -> Vec<f64> {
+            self.inner.evaluate_motion_samples_packed(
+                time_ms,
+                frame_duration_ms,
+                shutter,
+                samples,
+                &self.settings,
+            )
         }
 
         #[wasm_bindgen]
@@ -3060,5 +3100,51 @@ mod tests {
             resolve_cursor_asset_or_default("shape-up-arrow").id,
             "shape-up-arrow"
         );
+    }
+
+    #[test]
+    fn evaluate_motion_samples_is_symmetric_and_packed_matches() {
+        let events: Vec<CursorEvent> = (0..=10)
+            .map(|i| {
+                let x = i as f64 * 100.0;
+                CursorEvent {
+                    t_ms: i * 100,
+                    x,
+                    y: 200.0,
+                    visible: true,
+                    ..Default::default()
+                }
+            })
+            .collect();
+        let engine =
+            CursorEngine::new(make_telemetry(events), CursorEngineOptions::default()).unwrap();
+        let settings = CursorSettings {
+            smooth_movement: false,
+            ..CursorSettings::default()
+        };
+
+        // Single sample hits the exact center timestamp.
+        let single = engine.evaluate_motion_samples(500.0, 100.0, 0.5, 1, &settings);
+        assert_eq!(single.len(), 1);
+        assert!((single[0].0 - 500.0).abs() < 1e-6);
+        assert!((single[0].1 - 200.0).abs() < 1e-6);
+
+        // Midpoint quadrature on [475, 525] with 4 samples sits at 481.25, 493.75, 506.25, 518.75.
+        let four = engine.evaluate_motion_samples(500.0, 100.0, 0.5, 4, &settings);
+        assert_eq!(four.len(), 4);
+        assert!((four[0].0 - 481.25).abs() < 1e-6);
+        assert!((four[1].0 - 493.75).abs() < 1e-6);
+        assert!((four[2].0 - 506.25).abs() < 1e-6);
+        assert!((four[3].0 - 518.75).abs() < 1e-6);
+        // Symmetric around the center time.
+        let mean_x: f64 = four.iter().map(|(x, _)| *x).sum::<f64>() / four.len() as f64;
+        assert!((mean_x - 500.0).abs() < 1e-6);
+
+        let packed = engine.evaluate_motion_samples_packed(500.0, 100.0, 0.5, 4, &settings);
+        assert_eq!(packed.len(), 8);
+        for (idx, (x, y)) in four.iter().enumerate() {
+            assert_eq!(packed[idx * 2], *x);
+            assert_eq!(packed[idx * 2 + 1], *y);
+        }
     }
 }

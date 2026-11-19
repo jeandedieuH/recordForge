@@ -59,8 +59,8 @@ renders an honest, documented approximation.
 | --- | --- | --- | --- |
 | Zoom detail plane (source-resolution crop) | Exact: the screen chain decodes at the plan's detail resolution (`D = content × min(m, r)`, never above the source) and the composite pass samples the real source pixels | Holds exact; animated transitions sample the post-scale stream | `zoom-detail` when a transition is post-scale |
 | Zoom sharpening (RCAS-style) | Exact | Mild luma `unsharp` | `zoom-sharpening` |
-| Motion blur — cursor | Exact (shared Rust rasterizer) | Exact (same rasterizer) | never |
-| Motion blur — zoom/pan | Exact (up to 16 shader taps) | Averaged `zoompan`+`mix` taps, capped at 5 | `motion-blur` only when the sweep exceeds the tap cap |
+| Motion blur — cursor | Exact (shared Rust rasterizer, up to 24 linearly accumulated shutter poses) | Exact (same rasterizer) | never |
+| Motion blur — zoom/pan | Exact (up to 24 tapered bilinear shader taps along continuous shutter strip) | Tapered `zoompan`+`mix` taps with independent zoom/pan shutter timing, capped at 7 | `motion-blur` only when the output-screen sweep exceeds the tap cap |
 | Glass Loupe | Exact (analytic SDF lens, glass rim, SDF shadow) | Lens rebuilt from `crop`/`geq`/`sendcmd`/`overlay`; the glass rim is approximated | `loupe-glass` only when the glass rim is on |
 | Camera colour / LUT | Exact (camera decode chain) | Exact (same FFmpeg chain) | never |
 | Camera cutout matte + background modes | Exact (camera decode chain) | Exact (same FFmpeg chain) | never |
@@ -83,13 +83,17 @@ not ship.
   `(D / content)²`. The plan analysis (`.exports/zoom_detail.rs`) reports which
   frame ranges need it and the RCAS strength; a plan without zoom keeps today's
   plane size and bypass.
-- **Motion blur cost.** Cursor blur accumulates up to six equally weighted
-  ghost poses inside the shared rasterizer, chosen from the mapped sweep
-  distance (sub-pixel movement falls back to one pose). Zoom/pan blur is a
-  multi-tap average along the crop strip in the composite shader (up to 16
-  taps); the compatibility graph rebuilds the same sweep as shifted `zoompan`
-  branches averaged by `mix`, capped at five because each tap is a full crop
-  chain. A plan with blur off writes one tap and takes the existing single-sample
+- **Motion blur cost.** Cursor blur integrates up to 24 tapered shutter poses
+  linearly in premultiplied RGBA inside the shared rasterizer (preserving 100%
+  core opacity with zero Porter-Duff wash-out), synchronized with sub-frame zoom
+  transforms when zoom/pan blur is also active; sub-pixel movement falls back to
+  one pose. Zoom/pan blur uses independent symmetric half-windows (`0.5` = 180°
+  cinema shutter, `1.0` = 360° full-frame shutter) and integrates up to 24
+  tapered hardware bilinear taps along a continuous normalized crop strip in
+  `composite.wgsl` (skipping RCAS sharpening on blurred frames); the
+  compatibility graph rebuilds the same sweep as shifted `zoompan` branches
+  blended by tapered `mix` weights, capped at 7 and keeping blurred ramp frames
+  out of `Hold` pieces. A plan with blur off takes the existing single-sample
   path on both renderers, so the cost is zero.
 - **Glass Loupe compat.** The compatibility graph has no cheap "magnify a region
   inside a masked lens" equivalent that also follows the cursor, so it
