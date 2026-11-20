@@ -252,6 +252,7 @@ export function PlaybackOverlays({
           offsetY={videoBounds.top}
           borderRadius={borderRadius}
           zoomTransform={isZoomFraming ? undefined : composition?.screen.zoomTransform}
+          motionBlurEnabled={Boolean(blurSetting?.enabled && (blurSetting.cursor ?? 0) > 0)}
           motionBlurSamples={cursorMotionBlurSamples}
         />
       ) : null}

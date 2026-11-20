@@ -1,4 +1,4 @@
-import { useId, useMemo } from "react"
+import { useEffect, useId, useMemo } from "react"
 import {
   cursorSizeFactor,
   fitCursorPoint,
@@ -10,7 +10,7 @@ import {
 } from "@recordforge/cursor-core"
 import type { CursorSettings, CursorTelemetryFile } from "@recordforge/contracts"
 import type { CursorMotionBlurSample } from "@recordforge/editor-core"
-import { CursorMotionBlurCanvas } from "./cursor-motion-blur-canvas"
+import { CursorMotionBlurCanvas, preloadCursorMotionBitmap } from "./cursor-motion-blur-canvas"
 
 interface CustomCursorOverlayProps {
   /** Canonical cursor frame from the engine. */
@@ -27,6 +27,8 @@ interface CustomCursorOverlayProps {
   zoomTransform?: CursorZoomTransform | null
   /** Radius for clipping the overlay to the video screen. */
   borderRadius?: number | string
+  /** Whether cursor motion blur is enabled (triggers bitmap preloading when cursor rests). */
+  motionBlurEnabled?: boolean
   /** Optional shutter samples for linear premultiplied cursor motion blur. */
   motionBlurSamples?: readonly CursorMotionBlurSample[]
 }
@@ -52,6 +54,7 @@ export function CustomCursorOverlay({
   offsetY = 0,
   zoomTransform,
   borderRadius,
+  motionBlurEnabled = false,
   motionBlurSamples,
 }: CustomCursorOverlayProps) {
   const instanceId = useId()
@@ -140,17 +143,34 @@ export function CustomCursorOverlay({
     ],
   )
 
+  // Preload the supersampled raster while stationary so the first moving frame renders blurred without flashing sharp SVG.
+  const sizeFactor = cursorSizeFactor(cursorSettings, telemetry)
+  const unzoomedScale = (cursorSettings.scale ?? 1) * sizeFactor * (fitted.scale ?? 1)
+  const baseScale = unzoomedScale * (frame.clickScale ?? 1)
+  const cursorScale = baseScale * zoomed.scale
+  const isCursorVisible = cursorSettings.enabled && frame.visible && frame.opacity > 0
+  const hasMotionBlur = isCursorVisible && (motionBlurSamples?.length ?? 0) > 1
+  const dpr = typeof window !== "undefined" ? Math.min(2, window.devicePixelRatio || 1) : 1
+
+  useEffect(() => {
+    if (!motionBlurEnabled || !isCursorVisible || !containerWidth || !containerHeight) return
+    void preloadCursorMotionBitmap(asset, cursorMarkup, cursorSettings, unzoomedScale, dpr)
+  }, [
+    motionBlurEnabled,
+    isCursorVisible,
+    containerWidth,
+    containerHeight,
+    asset,
+    cursorMarkup,
+    cursorSettings,
+    unzoomedScale,
+    dpr,
+  ])
+
   if (!containerWidth || !containerHeight) return null
 
   const posX = zoomed.x
   const posY = zoomed.y
-  // DPI-consistent size factor (1 for legacy projects) — same math as export.
-  const sizeFactor = cursorSizeFactor(cursorSettings, telemetry)
-  const baseScale =
-    (cursorSettings.scale ?? 1) * sizeFactor * (fitted.scale ?? 1) * (frame.clickScale ?? 1)
-  const cursorScale = baseScale * zoomed.scale
-  const isCursorVisible = cursorSettings.enabled && frame.visible && frame.opacity > 0
-  const hasMotionBlur = isCursorVisible && (motionBlurSamples?.length ?? 0) > 1
 
   return (
     <div
@@ -315,7 +335,7 @@ export function CustomCursorOverlay({
                   cursorMarkup={cursorMarkup}
                   cursorSettings={cursorSettings}
                   baseScale={baseScale}
-                  centerScale={cursorScale}
+                  unzoomedScale={unzoomedScale}
                   opacity={frame.opacity}
                   samples={motionBlurSamples}
                   containerWidth={containerWidth}

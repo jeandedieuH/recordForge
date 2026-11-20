@@ -327,11 +327,11 @@ pub(crate) fn effect_support(
         }
 
         // Motion blur (M2 #1): each compat tap is a full `zoompan` + `scale`
-        // branch, so the graph caps at `COMPAT_MAX_BLUR_TAPS` while the
-        // compositor shader reaches 16. Report only when some frame's sweep
-        // would exceed the cap — a still or slow-moving plan renders
-        // identically. Tap counts evaluate on the content rect, the same
-        // space the zoom stage's fitted plate samples.
+        // branch, so the graph caps at `COMPAT_MAX_BLUR_TAPS` (9) while the
+        // compositor shader reaches `GPU_MAX_BLUR_TAPS` (32). Report only when
+        // some frame's sweep would exceed the cap — a still or slow-moving plan
+        // renders identically. Tap counts evaluate on the content rect, the
+        // same space the zoom stage's fitted plate samples.
         if let Some(canvas) = plan.canvas.as_ref() {
             if let Some(params) = super::camera::motion_blur_params(canvas) {
                 let content_w = (canvas.width as f64 - 2.0 * canvas.padding as f64).max(2.0);

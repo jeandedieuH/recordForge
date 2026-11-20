@@ -115,10 +115,11 @@ export const loupeSettingsSchema = z.object({
 export type LoupeSettings = z.infer<typeof loupeSettingsSchema>
 
 /**
- * Per-motion-source shutter fractions. A frame interval is
- * `1000 / canvas.fps` ms; `0.5` is a 180° cinema shutter (half a frame
- * interval), `1` blurs across the full frame interval (360° shutter), and `0`
- * disables blur for that source. Looks carry these too.
+ * Per-motion-source shutter strength fractions (`0..1`) scaled against a
+ * cinema-calibrated reference window of `max(1000 / canvas.fps, 60)` ms.
+ * At 24–120 fps, `0.25` is 15 ms (Subtle), `0.5` is 30 ms (Natural), `0.75` is
+ * 45 ms (Cinematic), `1` is 60 ms (Dynamic), and `0` disables blur for that
+ * source. Looks carry these too.
  */
 export const motionBlurSettingsSchema = z.object({
   enabled: z.boolean().default(false),

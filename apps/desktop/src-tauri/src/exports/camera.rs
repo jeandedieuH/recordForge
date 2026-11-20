@@ -348,6 +348,9 @@ pub(crate) fn window_needs_zoom(
         return false;
     }
     let fps = canvas.fps.max(1) as f64;
+    let half_max = motion_blur_params(canvas)
+        .map(|params| params.half_zoom_ms.max(params.half_pan_ms))
+        .unwrap_or(0.0);
     for frame in first_frame..first_frame.saturating_add(frame_count) {
         let output_ms = frame as f64 * 1000.0 / fps;
         let state = evaluate_zoom_transform(
@@ -359,6 +362,29 @@ pub(crate) fn window_needs_zoom(
         );
         if !zoom_transform_is_identity(&state, canvas.width, canvas.height) {
             return true;
+        }
+        // A boundary frame whose center timestamp is still identity can sweep
+        // into an adjacent zoom segment across its motion-blur shutter window.
+        if half_max > 0.0 {
+            let lo = evaluate_zoom_transform(
+                zoom_segments,
+                canvas.width,
+                canvas.height,
+                canvas.padding,
+                (output_ms - half_max).max(0.0),
+            );
+            let hi = evaluate_zoom_transform(
+                zoom_segments,
+                canvas.width,
+                canvas.height,
+                canvas.padding,
+                output_ms + half_max,
+            );
+            if !zoom_transform_is_identity(&lo, canvas.width, canvas.height)
+                || !zoom_transform_is_identity(&hi, canvas.width, canvas.height)
+            {
+                return true;
+            }
         }
     }
     false
@@ -1484,12 +1510,25 @@ pub(crate) fn shift_zoompan_time(expr: &str, offset_s: f64) -> String {
     out
 }
 
+/// Reference exposure duration (ms) at `1.0` slider strength.
+///
+/// Anchoring the shutter to a 60 ms ceiling for 24+ fps recordings keeps
+/// motion blur visually rich and consistent between 30 fps and 60 fps instead
+/// of halving exposure at higher capture/export frame rates, while slower
+/// outputs (e.g. 15 fps GIFs) still expand to a full frame interval.
+pub(crate) const MOTION_BLUR_REFERENCE_EXPOSURE_MS: f64 = 60.0;
+
+/// Full-strength (`1.0`) shutter exposure window in milliseconds for `fps`.
+pub(crate) fn motion_blur_shutter_base_ms(fps: u32) -> f64 {
+    (1000.0 / fps.max(1) as f64).max(MOTION_BLUR_REFERENCE_EXPOSURE_MS)
+}
+
 /// Shutter half-windows for zoom/pan motion blur shared by both renderers.
 ///
-/// `0.5` is a 180° cinema shutter (half a frame interval); `1.0` is a 360°
-/// full-frame shutter. Zoom and pan carry independent half-windows so setting
-/// either slider scales exposure linearly (never squared) and enabling one
-/// axis never time-shifts or distorts the other.
+/// `0.5` ("Natural") evaluates a 30 ms exposure (`±15 ms`) and `1.0`
+/// ("Dynamic") evaluates 60 ms (`±30 ms`) at 24+ fps. Zoom and pan carry
+/// independent half-windows so setting either slider scales exposure linearly
+/// and enabling one axis never time-shifts or distorts the other.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct MotionBlurParams {
     pub half_zoom_ms: f64,
@@ -1506,13 +1545,13 @@ impl MotionBlurParams {
 }
 
 /// GPU shader tap cap (hardware bilinear taps in `composite.wgsl` are cheap,
-/// so 24 taps eliminate stepping even on fast 4K zooms).
-pub(crate) const GPU_MAX_BLUR_TAPS: u32 = 24;
+/// so 32 taps eliminate stepping even on wide 60 ms 4K zooms).
+pub(crate) const GPU_MAX_BLUR_TAPS: u32 = 32;
 
 /// Compat cap on blur taps per branch: each tap is a `zoompan` + `scale`
-/// branch, and 7 tapered taps avoid visible 5-step strobe banding while
-/// staying well within interactive export budgets.
-pub(crate) const COMPAT_MAX_BLUR_TAPS: u32 = 7;
+/// branch, and 9 tapered taps keep wide cinema smears smooth without strobe
+/// banding while staying well within interactive export budgets.
+pub(crate) const COMPAT_MAX_BLUR_TAPS: u32 = 9;
 
 /// Minimum output-screen sweep (px) before motion blur engages. Keeps still
 /// frames and sub-pixel drift on the zero-cost sharp path.
@@ -1551,10 +1590,10 @@ pub(crate) fn motion_blur_params(canvas: &cursor::RenderCanvas) -> Option<Motion
     if zoom <= 0.0 && pan <= 0.0 {
         return None;
     }
-    let frame_ms = 1000.0 / canvas.fps.max(1) as f64;
+    let base_ms = motion_blur_shutter_base_ms(canvas.fps);
     Some(MotionBlurParams {
-        half_zoom_ms: frame_ms * zoom / 2.0,
-        half_pan_ms: frame_ms * pan / 2.0,
+        half_zoom_ms: base_ms * zoom / 2.0,
+        half_pan_ms: base_ms * pan / 2.0,
     })
 }
 
@@ -2849,6 +2888,64 @@ mod tests {
     }
 
     #[test]
+    fn window_needs_zoom_includes_motion_blur_boundary_frames() {
+        let segments = vec![zoom_segment(
+            "zoom",
+            4_000,
+            9_000,
+            RenderCropFloat {
+                x: 480.0,
+                y: 270.0,
+                width: 960.0,
+                height: 540.0,
+            },
+            1.5,
+            "linear",
+            450,
+            450,
+            None,
+        )];
+        // Chunk [0, 120) ends at frame 119 (t = 3966.67 ms): 33.33 ms before
+        // zoom_segment starts at 4000 ms. Without motion blur, it stays identity.
+        let canvas_sharp = blur_canvas(None);
+        assert!(!window_needs_zoom(&segments, &canvas_sharp, 0, 120));
+
+        // With zoom/pan motion blur at 1.0 (half_max = 30 ms -> +half lands at
+        // 3996.67 ms, still < 4000 ms), 119 is outside 30 ms, so check frame 119
+        // relative to a segment starting at 3990 ms where frame 119's shutter
+        // reaches 3996.67 ms into the zoom!
+        let boundary_segments = vec![zoom_segment(
+            "zoom",
+            3_990,
+            9_000,
+            RenderCropFloat {
+                x: 480.0,
+                y: 270.0,
+                width: 960.0,
+                height: 540.0,
+            },
+            1.5,
+            "linear",
+            450,
+            450,
+            None,
+        )];
+        assert!(!window_needs_zoom(
+            &boundary_segments,
+            &canvas_sharp,
+            0,
+            120
+        ));
+        let canvas_blur = blur_canvas(Some(cursor::RenderMotionBlur {
+            enabled: true,
+            cursor: 0.0,
+            zoom: 1.0,
+            pan: 1.0,
+        }));
+        assert!(window_needs_zoom(&boundary_segments, &canvas_blur, 0, 120));
+    }
+
+    #[test]
     fn zoom_region_frame_edges_clamp_and_dedupe() {
         let segments = vec![
             zoom_segment(
@@ -2937,11 +3034,24 @@ mod tests {
             pan: 0.8,
         }));
         let params = motion_blur_params(&canvas_with_blur).expect("active zoom/pan blur");
-        // Independent half-windows: 0.5 = 180° shutter (quarter frame each side),
-        // 0.8 = 288° shutter (0.4 frame each side) — never squared!
-        assert!((params.half_zoom_ms - 1000.0 / 30.0 * 0.25).abs() < 1e-9);
-        assert!((params.half_pan_ms - 1000.0 / 30.0 * 0.4).abs() < 1e-9);
+        // Cinema-calibrated half-windows: 60 ms reference base -> 0.5 = 15 ms,
+        // 0.8 = 24 ms — identical at 30 fps and 60 fps!
+        let base_30 = motion_blur_shutter_base_ms(30);
+        assert!((base_30 - 60.0).abs() < 1e-9);
+        assert!((params.half_zoom_ms - base_30 * 0.25).abs() < 1e-9);
+        assert!((params.half_pan_ms - base_30 * 0.4).abs() < 1e-9);
         assert!(params.needs_independent_centers());
+
+        let mut canvas_60 = canvas_with_blur.clone();
+        canvas_60.fps = 60;
+        let params_60 = motion_blur_params(&canvas_60).expect("active 60fps blur");
+        assert!((params_60.half_zoom_ms - params.half_zoom_ms).abs() < 1e-9);
+        assert!((params_60.half_pan_ms - params.half_pan_ms).abs() < 1e-9);
+
+        let mut canvas_15 = canvas_with_blur;
+        canvas_15.fps = 15;
+        let params_15 = motion_blur_params(&canvas_15).expect("active 15fps blur");
+        assert!((params_15.half_zoom_ms - (1000.0 / 15.0) * 0.25).abs() < 1e-9);
     }
 
     #[test]

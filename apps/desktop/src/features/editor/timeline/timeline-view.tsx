@@ -487,11 +487,8 @@ export function TimelineView({
   // Framing mode: while a zoom segment is selected the screen renders unzoomed
   // so the overlay frame matches what is on screen. "Preview zoom" opts back
   // into the real zoomed render without leaving edit mode.
-  const [zoomPreviewActive, setZoomPreviewActive] = useState(false)
-  const selectedZoomSegmentId = selectedZoomSegment?.id
-  useEffect(() => {
-    setZoomPreviewActive(false)
-  }, [selectedZoomSegmentId])
+  const zoomPreviewActive = useTimelineStore((state) => state.zoomPreviewActive)
+  const setZoomPreviewActive = useTimelineStore((state) => state.setZoomPreviewActive)
   const isZoomFraming = Boolean(selectedZoomSegment?.enabled) && !zoomPreviewActive
   const cursorClickTimesMs = useMemo(() => {
     if (!timeline) return []
@@ -2243,7 +2240,7 @@ export function TimelineView({
                     ? "bg-primary text-primary-foreground hover:bg-primary/90 hover:text-primary-foreground"
                     : "bg-background/80 text-muted-foreground hover:text-foreground",
                 )}
-                onClick={() => setZoomPreviewActive((active) => !active)}
+                onClick={() => setZoomPreviewActive(!zoomPreviewActive)}
               >
                 <ZoomIn className="size-4" aria-hidden />
               </IconButton>

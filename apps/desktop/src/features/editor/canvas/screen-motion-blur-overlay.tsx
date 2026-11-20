@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from "react"
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react"
 import { motionBlurTapWeight, type ScreenMotionBlurStrip } from "@recordforge/editor-core"
 import type { PlaybackVideoBounds } from "./playback-overlays"
 
@@ -14,6 +14,7 @@ export interface ScreenMotionBlurOverlayProps {
 }
 
 interface WebGlShutterPipeline {
+  canvas: HTMLCanvasElement
   gl: WebGLRenderingContext
   program: WebGLProgram
   buffer: WebGLBuffer
@@ -23,7 +24,13 @@ interface WebGlShutterPipeline {
   uBlurB: WebGLUniformLocation | null
   uTaps: WebGLUniformLocation | null
   uPicRect: WebGLUniformLocation | null
+  cleanup?: () => void
 }
+
+type RenderBackend = "webgl" | "canvas2d"
+
+const MAX_SHADER_TAPS = 32
+const MAX_WEBGL_ERRORS = 3
 
 const VERTEX_SHADER = `
 attribute vec2 a_pos;
@@ -49,7 +56,7 @@ uniform vec4 u_picRect;
 void main() {
   vec4 acc = vec4(0.0);
   float wSum = 0.0;
-  for (int i = 0; i < 24; i++) {
+  for (int i = 0; i < 32; i++) {
     if (i >= u_taps) break;
     float t = (float(i) + 0.5) / float(u_taps);
     float w = 0.45 + 0.55 * sin(t * 3.14159265);
@@ -71,7 +78,14 @@ void main() {
 function pickActiveVideo(surface: HTMLDivElement | null): HTMLVideoElement | null {
   if (!surface) return null
   const slots = Array.from(surface.querySelectorAll("video"))
-  return slots.find((slot) => slot.style.visibility === "visible") ?? slots[0] ?? null
+  const visible = slots.filter((slot) => slot.style.visibility === "visible")
+  return (
+    visible.find((slot) => slot.readyState >= 2 && slot.videoWidth > 0) ??
+    slots.find((slot) => slot.readyState >= 2 && slot.videoWidth > 0) ??
+    visible[0] ??
+    slots[0] ??
+    null
+  )
 }
 
 function compileShader(
@@ -90,24 +104,21 @@ function compileShader(
   return shader
 }
 
-function createPipeline(canvas: HTMLCanvasElement): WebGlShutterPipeline | null {
+function createPipeline(
+  canvas: HTMLCanvasElement,
+  onContextLost: () => void,
+): WebGlShutterPipeline | null {
+  // preserveDrawingBuffer keeps paused, scrubbed, and slider-tuned frames intact across repaints.
+  const contextOptions: WebGLContextAttributes = {
+    alpha: true,
+    antialias: false,
+    depth: false,
+    stencil: false,
+    preserveDrawingBuffer: true,
+    powerPreference: "high-performance",
+  }
   const gl =
-    canvas.getContext("webgl2", {
-      alpha: true,
-      antialias: false,
-      depth: false,
-      stencil: false,
-      preserveDrawingBuffer: false,
-      powerPreference: "high-performance",
-    }) ??
-    canvas.getContext("webgl", {
-      alpha: true,
-      antialias: false,
-      depth: false,
-      stencil: false,
-      preserveDrawingBuffer: false,
-      powerPreference: "high-performance",
-    })
+    canvas.getContext("webgl2", contextOptions) ?? canvas.getContext("webgl", contextOptions)
   if (!gl) return null
 
   const vs = compileShader(gl, gl.VERTEX_SHADER, VERTEX_SHADER)
@@ -158,7 +169,14 @@ function createPipeline(canvas: HTMLCanvasElement): WebGlShutterPipeline | null 
   gl.enableVertexAttribArray(posLoc)
   gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0)
 
+  const handleContextLost = (event: Event) => {
+    event.preventDefault()
+    onContextLost()
+  }
+  canvas.addEventListener("webglcontextlost", handleContextLost)
+
   return {
+    canvas,
     gl,
     program,
     buffer,
@@ -168,6 +186,7 @@ function createPipeline(canvas: HTMLCanvasElement): WebGlShutterPipeline | null 
     uBlurB: gl.getUniformLocation(program, "u_blurB"),
     uTaps: gl.getUniformLocation(program, "u_taps"),
     uPicRect: gl.getUniformLocation(program, "u_picRect"),
+    cleanup: () => canvas.removeEventListener("webglcontextlost", handleContextLost),
   }
 }
 
@@ -187,8 +206,10 @@ function normalizedPictureRect(
 }
 
 /**
- * Software Canvas2D fallback when WebGL is unavailable (e.g. restricted webview).
- * Caps at 7 tapered taps with additive `lighter` accumulation.
+ * Software Canvas2D fallback when WebGL is unavailable or fails video upload.
+ * Mounted on a fresh `<canvas key="canvas2d">` so WebGL context locks never block
+ * `getContext("2d")`, using exact cumulative `source-over` weighted blending and
+ * letterbox-aware source mapping.
  */
 function drawCanvas2dFallback(
   canvas: HTMLCanvasElement,
@@ -207,29 +228,49 @@ function drawCanvas2dFallback(
     canvas.height = backingH
   }
 
-  const taps = Math.min(7, strip.taps)
-  const rawWeights = Array.from({ length: taps }, (_, i) => motionBlurTapWeight(i, taps))
-  const weightSum = rawWeights.reduce((acc, w) => acc + w, 0) || 1
+  const [px, py, pw, ph] = normalizedPictureRect(video, bounds)
+  const taps = Math.max(3, Math.min(12, strip.taps))
 
   ctx.save()
   ctx.globalCompositeOperation = "source-over"
   ctx.globalAlpha = 1
   ctx.clearRect(0, 0, backingW, backingH)
-  ctx.globalCompositeOperation = "lighter"
   ctx.imageSmoothingEnabled = true
   ctx.imageSmoothingQuality = "medium"
 
+  let weightSum = 0
+  let drewAny = false
   for (let i = 0; i < taps; i++) {
     const t = (i + 0.5) / taps
-    const sx = (strip.start[0] + (strip.end[0] - strip.start[0]) * t) * video.videoWidth
-    const sy = (strip.start[1] + (strip.end[1] - strip.start[1]) * t) * video.videoHeight
-    const sw = (strip.start[2] + (strip.end[2] - strip.start[2]) * t) * video.videoWidth
-    const sh = (strip.start[3] + (strip.end[3] - strip.start[3]) * t) * video.videoHeight
-    ctx.globalAlpha = rawWeights[i] / weightSum
-    ctx.drawImage(video, sx, sy, sw, sh, 0, 0, backingW, backingH)
+    const cx = strip.start[0] + (strip.end[0] - strip.start[0]) * t
+    const cy = strip.start[1] + (strip.end[1] - strip.start[1]) * t
+    const cw = Math.max(0.0001, strip.start[2] + (strip.end[2] - strip.start[2]) * t)
+    const ch = Math.max(0.0001, strip.start[3] + (strip.end[3] - strip.start[3]) * t)
+
+    const ix0 = Math.max(cx, px)
+    const iy0 = Math.max(cy, py)
+    const ix1 = Math.min(cx + cw, px + pw)
+    const iy1 = Math.min(cy + ch, py + ph)
+    if (ix1 <= ix0 || iy1 <= iy0) continue
+
+    const w = motionBlurTapWeight(i, taps)
+    weightSum += w
+    // Cumulative source-over alpha (w_i / sum_{0..i} w) yields exact normalized linear weights.
+    ctx.globalAlpha = !drewAny ? 1 : w / weightSum
+    drewAny = true
+
+    const sx = ((ix0 - px) / Math.max(0.0001, pw)) * video.videoWidth
+    const sy = ((iy0 - py) / Math.max(0.0001, ph)) * video.videoHeight
+    const sw = ((ix1 - ix0) / Math.max(0.0001, pw)) * video.videoWidth
+    const sh = ((iy1 - iy0) / Math.max(0.0001, ph)) * video.videoHeight
+    const dx = ((ix0 - cx) / cw) * backingW
+    const dy = ((iy0 - cy) / ch) * backingH
+    const dw = ((ix1 - ix0) / cw) * backingW
+    const dh = ((iy1 - iy0) / ch) * backingH
+    ctx.drawImage(video, sx, sy, sw, sh, dx, dy, dw, dh)
   }
   ctx.restore()
-  return true
+  return drewAny
 }
 
 /**
@@ -252,102 +293,146 @@ export function ScreenMotionBlurOverlay({
 }: ScreenMotionBlurOverlayProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const pipelineRef = useRef<WebGlShutterPipeline | null>(null)
-  const webglFailedRef = useRef(false)
+  const webglFailuresRef = useRef(0)
+  const webglWarnedRef = useRef(false)
+  const wasEnabledRef = useRef(enabled)
+  const [renderBackend, setRenderBackend] = useState<RenderBackend>("webgl")
+
+  const isActive = strip !== null
+
+  const disposePipeline = useCallback(() => {
+    const pipe = pipelineRef.current
+    if (!pipe) return
+    pipe.cleanup?.()
+    const { gl } = pipe
+    gl.deleteTexture(pipe.texture)
+    gl.deleteBuffer(pipe.buffer)
+    gl.deleteProgram(pipe.program)
+    pipelineRef.current = null
+  }, [])
+
+  const switchToCanvas2d = useCallback(
+    (reason: string) => {
+      if (!webglWarnedRef.current) {
+        webglWarnedRef.current = true
+        console.warn(`Screen motion blur switching to Canvas2D fallback: ${reason}`)
+      }
+      disposePipeline()
+      setRenderBackend("canvas2d")
+    },
+    [disposePipeline],
+  )
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current
-    if (!canvas || !enabled || !strip) return
+    if (!canvas) return
+    if (!enabled || !strip) {
+      canvas.style.opacity = "0"
+      return
+    }
     const video = pickActiveVideo(surfaceRef.current)
     if (!video || video.readyState < 2 || video.videoWidth === 0 || video.videoHeight === 0) {
+      canvas.style.opacity = "0"
       return
     }
 
-    if (!webglFailedRef.current) {
-      if (!pipelineRef.current) {
-        pipelineRef.current = createPipeline(canvas)
-        if (!pipelineRef.current) webglFailedRef.current = true
+    if (renderBackend === "webgl") {
+      if (!pipelineRef.current || pipelineRef.current.canvas !== canvas) {
+        disposePipeline()
+        pipelineRef.current = createPipeline(canvas, () => switchToCanvas2d("WebGL context lost"))
+        if (!pipelineRef.current) {
+          switchToCanvas2d("WebGL context unavailable")
+          return
+        }
       }
       const pipe = pipelineRef.current
-      if (pipe) {
-        const { gl } = pipe
-        if (gl.isContextLost()) return
+      const { gl } = pipe
+      if (gl.isContextLost()) {
+        switchToCanvas2d("WebGL context lost")
+        return
+      }
 
-        // Cap preview backing store at 1920px on the long edge so 4K monitors
-        // maintain 60fps during multi-tap playback.
-        const dpr = Math.min(2, window.devicePixelRatio || 1)
-        const rawW = Math.max(2, Math.round(videoBounds.width * dpr))
-        const rawH = Math.max(2, Math.round(videoBounds.height * dpr))
-        const capScale = Math.min(1, 1920 / Math.max(rawW, rawH))
-        const backingW = Math.max(2, Math.round(rawW * capScale))
-        const backingH = Math.max(2, Math.round(rawH * capScale))
-        if (canvas.width !== backingW || canvas.height !== backingH) {
-          canvas.width = backingW
-          canvas.height = backingH
-        }
+      // Cap preview backing store at 1920px on the long edge so 4K monitors
+      // maintain 60fps during multi-tap playback.
+      const dpr = Math.min(2, window.devicePixelRatio || 1)
+      const rawW = Math.max(2, Math.round(videoBounds.width * dpr))
+      const rawH = Math.max(2, Math.round(videoBounds.height * dpr))
+      const capScale = Math.min(1, 1920 / Math.max(rawW, rawH))
+      const backingW = Math.max(2, Math.round(rawW * capScale))
+      const backingH = Math.max(2, Math.round(rawH * capScale))
+      if (canvas.width !== backingW || canvas.height !== backingH) {
+        canvas.width = backingW
+        canvas.height = backingH
+      }
 
-        const picRect = normalizedPictureRect(video, videoBounds)
-        try {
-          gl.viewport(0, 0, backingW, backingH)
-          gl.useProgram(pipe.program)
-          gl.activeTexture(gl.TEXTURE0)
-          gl.bindTexture(gl.TEXTURE_2D, pipe.texture)
-          gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 0)
-          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video)
-          gl.uniform1i(pipe.uVideo, 0)
-          gl.uniform4f(pipe.uBlurA, strip.start[0], strip.start[1], strip.start[2], strip.start[3])
-          gl.uniform4f(pipe.uBlurB, strip.end[0], strip.end[1], strip.end[2], strip.end[3])
-          gl.uniform1i(pipe.uTaps, Math.max(3, Math.min(24, strip.taps)))
-          gl.uniform4f(pipe.uPicRect, picRect[0], picRect[1], picRect[2], picRect[3])
-          gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
-          return
-        } catch {
-          // Cross-origin or transient video-upload failure — keep underlying video clean.
+      const picRect = normalizedPictureRect(video, videoBounds)
+      try {
+        gl.viewport(0, 0, backingW, backingH)
+        gl.clearColor(0, 0, 0, 0)
+        gl.clear(gl.COLOR_BUFFER_BIT)
+        gl.useProgram(pipe.program)
+        gl.activeTexture(gl.TEXTURE0)
+        gl.bindTexture(gl.TEXTURE_2D, pipe.texture)
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 0)
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video)
+        gl.uniform1i(pipe.uVideo, 0)
+        gl.uniform4f(pipe.uBlurA, strip.start[0], strip.start[1], strip.start[2], strip.start[3])
+        gl.uniform4f(pipe.uBlurB, strip.end[0], strip.end[1], strip.end[2], strip.end[3])
+        gl.uniform1i(pipe.uTaps, Math.max(3, Math.min(MAX_SHADER_TAPS, strip.taps)))
+        gl.uniform4f(pipe.uPicRect, picRect[0], picRect[1], picRect[2], picRect[3])
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
+
+        const glErr = typeof gl.getError === "function" ? gl.getError() : gl.NO_ERROR
+        if (glErr !== undefined && glErr !== gl.NO_ERROR) {
+          webglFailuresRef.current += 1
+          if (webglFailuresRef.current >= MAX_WEBGL_ERRORS) {
+            switchToCanvas2d(`WebGL error code ${glErr}`)
+          }
           return
         }
+        webglFailuresRef.current = 0
+        canvas.style.opacity = "1"
+        return
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        switchToCanvas2d(`video texture upload failed (${message})`)
+        return
       }
     }
 
     try {
-      drawCanvas2dFallback(canvas, video, strip, videoBounds)
+      const drew = drawCanvas2dFallback(canvas, video, strip, videoBounds)
+      canvas.style.opacity = drew ? "1" : "0"
     } catch {
-      // Ignore transient draw errors when media is switching slots.
+      canvas.style.opacity = "0"
     }
-  }, [enabled, strip, surfaceRef, videoBounds])
+  }, [enabled, strip, surfaceRef, videoBounds, renderBackend, disposePipeline, switchToCanvas2d])
 
   const drawRef = useRef(draw)
-  useEffect(() => {
+  useLayoutEffect(() => {
     drawRef.current = draw
     draw()
   }, [draw])
 
-  // Clean up WebGL objects on unmount or when Motion Blur is switched off.
+  // Reset backend to WebGL only when re-enabling after being disabled, and clean up GPU state.
   useEffect(() => {
+    if (enabled && !wasEnabledRef.current) {
+      webglFailuresRef.current = 0
+      webglWarnedRef.current = false
+      setRenderBackend("webgl")
+    }
+    wasEnabledRef.current = enabled
     if (!enabled) {
-      const pipe = pipelineRef.current
-      if (pipe) {
-        const { gl } = pipe
-        gl.deleteTexture(pipe.texture)
-        gl.deleteBuffer(pipe.buffer)
-        gl.deleteProgram(pipe.program)
-        pipelineRef.current = null
-      }
-      webglFailedRef.current = false
+      disposePipeline()
     }
     return () => {
-      const pipe = pipelineRef.current
-      if (pipe) {
-        const { gl } = pipe
-        gl.deleteTexture(pipe.texture)
-        gl.deleteBuffer(pipe.buffer)
-        gl.deleteProgram(pipe.program)
-        pipelineRef.current = null
-      }
+      disposePipeline()
     }
-  }, [enabled])
+  }, [enabled, disposePipeline])
 
-  // Stay in lockstep with video frames while playing or scrubbing.
+  // Stay in lockstep with video frames while playing, seeking, or swapping A/B slots.
   useEffect(() => {
-    if (!enabled) return
+    if (!enabled || !isActive) return
     const surface = surfaceRef.current
     const videos = surface ? Array.from(surface.querySelectorAll("video")) : []
     if (videos.length === 0) return
@@ -356,41 +441,45 @@ export function ScreenMotionBlurOverlay({
     for (const video of videos) {
       video.addEventListener("seeked", onFrame)
       video.addEventListener("loadeddata", onFrame)
+      video.addEventListener("canplay", onFrame)
+      video.addEventListener("playing", onFrame)
       video.addEventListener("timeupdate", onFrame)
     }
 
     let cancelled = false
-    let frameHandle = 0
-    const pump = () => {
+    let rafId = 0
+    const tick = () => {
       if (cancelled) return
-      onFrame()
-      const video = pickActiveVideo(surfaceRef.current)
-      if (video?.requestVideoFrameCallback) {
-        frameHandle = video.requestVideoFrameCallback(pump)
+      const active = pickActiveVideo(surfaceRef.current)
+      if (active && (!active.paused || active.seeking)) {
+        drawRef.current()
       }
+      rafId = window.requestAnimationFrame(tick)
     }
-    if (pickActiveVideo(surface)?.requestVideoFrameCallback) pump()
+    rafId = window.requestAnimationFrame(tick)
 
     return () => {
       cancelled = true
+      window.cancelAnimationFrame(rafId)
       for (const video of videos) {
         video.removeEventListener("seeked", onFrame)
         video.removeEventListener("loadeddata", onFrame)
+        video.removeEventListener("canplay", onFrame)
+        video.removeEventListener("playing", onFrame)
         video.removeEventListener("timeupdate", onFrame)
-        video.cancelVideoFrameCallback?.(frameHandle)
       }
     }
-  }, [enabled, surfaceRef])
+  }, [enabled, isActive, surfaceRef, videoBounds, renderBackend])
 
   // Zero DOM / GPU cost when Motion Blur is disabled or timeline has no zooms.
   if (!enabled) return null
 
-  const isActive = strip !== null
-
   return (
     <canvas
+      key={renderBackend}
       ref={canvasRef}
       aria-hidden
+      data-blur-backend={renderBackend}
       className="pointer-events-none absolute z-[2] overflow-hidden"
       style={{
         left: videoBounds.left,
@@ -399,6 +488,7 @@ export function ScreenMotionBlurOverlay({
         height: videoBounds.height,
         borderRadius,
         visibility: isActive ? "visible" : "hidden",
+        opacity: 0,
       }}
     />
   )

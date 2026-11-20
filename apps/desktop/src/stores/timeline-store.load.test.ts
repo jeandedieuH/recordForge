@@ -433,3 +433,80 @@ describe("timeline-store export", () => {
     expect(mocks.exportTimeline.mock.calls[0][0].plan.canvas?.width).toBe(1920)
   })
 })
+
+describe("timeline-store zoomPreviewActive lifecycle", () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mocks.saveProject.mockImplementation(async (project: recordForgeProject) => project)
+  })
+
+  it("preserves zoomPreviewActive while editing the selected zoom and resets it on deselect/delete/undo", () => {
+    const recording = fakeRecording("rec-1")
+    const project = fakeProject("rec-1")
+    const timeline = createTimelineFromRecording(
+      recording,
+      fakeMetadata(recording),
+      project.name,
+      project.id,
+    )
+    timeline.zoomSegments = [
+      {
+        id: "zoom-1",
+        startMs: 500,
+        durationMs: 2_000,
+        target: { x: 240, y: 135, width: 960, height: 540 },
+        scale: 1.5,
+        easing: "smooth",
+        transitionInMs: 450,
+        transitionOutMs: 450,
+        mode: "manual",
+        style: "frame",
+        enabled: true,
+        locked: false,
+      },
+    ]
+
+    useTimelineStore.setState({
+      project,
+      recording,
+      engine: createEngine(timeline),
+      missingAssets: [],
+      activeExportJob: null,
+      cursorTelemetry: null,
+      cursorEngine: null,
+      error: null,
+      savePromise: null,
+      zoomPreviewActive: false,
+    })
+
+    useTimelineStore.getState().setSelection({ kind: "zoom", segmentId: "zoom-1" })
+    useTimelineStore.getState().setZoomPreviewActive(true)
+    expect(useTimelineStore.getState().zoomPreviewActive).toBe(true)
+
+    // Updating the selected zoom segment preserves zoomPreviewActive.
+    const updated = useTimelineStore.getState().execute({
+      kind: "update-zoom-segment",
+      name: "Update zoom scale",
+      segmentId: "zoom-1",
+      scale: 2.0,
+    })
+    expect(updated).toBe(true)
+    expect(useTimelineStore.getState().zoomPreviewActive).toBe(true)
+
+    // Deleting the selected zoom segment clears selection and resets zoomPreviewActive.
+    const deleted = useTimelineStore.getState().execute({
+      kind: "delete-zoom-segment",
+      name: "Delete zoom",
+      segmentId: "zoom-1",
+    })
+    expect(deleted).toBe(true)
+    expect(useTimelineStore.getState().zoomPreviewActive).toBe(false)
+
+    // Undoing restores the zoom segment, then switching selection clears zoomPreviewActive.
+    useTimelineStore.getState().undo()
+    useTimelineStore.getState().setSelection({ kind: "zoom", segmentId: "zoom-1" })
+    useTimelineStore.getState().setZoomPreviewActive(true)
+    useTimelineStore.getState().setSelection(null)
+    expect(useTimelineStore.getState().zoomPreviewActive).toBe(false)
+  })
+})

@@ -12,7 +12,15 @@ import { resolveZoomTransform, type ZoomTransform } from "./composition"
 import { resolveFollowCursorTargetAtTime } from "./preview-composition"
 import { findTimelineClipAt } from "./time-mapping"
 
-/** Default cinema shutter applied when enabling Motion Blur (180° shutter). */
+/**
+ * Reference cinema exposure (ms) at `1.0` slider strength for 24+ fps
+ * timelines. Anchoring to 60 ms keeps 60 fps and 120 fps videos just as lush
+ * and readable as 24/30 fps instead of halving blur at higher frame rates,
+ * while lower frame rates (e.g. 15 fps GIFs) scale up to a full frame.
+ */
+export const MOTION_BLUR_REFERENCE_EXPOSURE_MS = 60
+
+/** Default cinema shutter applied when enabling Motion Blur (30 ms / 50%). */
 export const DEFAULT_MOTION_BLUR_SETTINGS: MotionBlurSettings = {
   enabled: true,
   cursor: 0.5,
@@ -26,41 +34,47 @@ export interface MotionBlurPreset {
   id: MotionBlurPresetId
   label: string
   shutterDegrees: number
+  exposureMs: number
   description: string
   settings: Pick<MotionBlurSettings, "cursor" | "zoom" | "pan">
 }
 
 /**
  * Cinema shutter presets ordered from crispest to strongest.
- * `0.5` = 180° shutter (the film standard: shutter open for half a frame).
+ * At 24+ fps, `0.5` evaluates a 30 ms exposure ("Natural") and `1.0` a 60 ms
+ * streak ("Dynamic"), matching Rust `exports::camera::motion_blur_shutter_base_ms`.
  */
 export const MOTION_BLUR_PRESETS: readonly MotionBlurPreset[] = [
   {
     id: "subtle",
     label: "Subtle",
     shutterDegrees: 90,
-    description: "Crisp 90° shutter with light motion polish",
+    exposureMs: 15,
+    description: "Crisp 15 ms exposure for subtle motion polish",
     settings: { cursor: 0.25, zoom: 0.25, pan: 0.25 },
   },
   {
     id: "natural",
     label: "Natural",
     shutterDegrees: 180,
-    description: "Balanced 180° cinema shutter",
+    exposureMs: 30,
+    description: "Balanced 30 ms cinema shutter",
     settings: { cursor: 0.5, zoom: 0.5, pan: 0.5 },
   },
   {
     id: "cinematic",
     label: "Cinematic",
     shutterDegrees: 270,
-    description: "Smooth 270° shutter for silky zooms and pans",
+    exposureMs: 45,
+    description: "Lush 45 ms shutter for silky zooms and pans",
     settings: { cursor: 0.75, zoom: 0.75, pan: 0.75 },
   },
   {
     id: "dynamic",
     label: "Dynamic",
     shutterDegrees: 360,
-    description: "Full-frame 360° streak for fast energy",
+    exposureMs: 60,
+    description: "Bold 60 ms full-energy motion streak",
     settings: { cursor: 1, zoom: 1, pan: 1 },
   },
 ] as const
@@ -70,7 +84,7 @@ export interface ScreenMotionBlurStrip {
   start: [number, number, number, number]
   /** Normalized `[x, y, w, h]` content-UV crop at shutter end. */
   end: [number, number, number, number]
-  /** Recommended shader tap count (3..24), sized from output screen-pixel sweep. */
+  /** Recommended shader tap count (3..32), sized from output screen-pixel sweep. */
   taps: number
   /** Worst-case viewport corner displacement in output display pixels. */
   sweepPx: number
@@ -99,15 +113,26 @@ export interface ResolveCursorMotionBlurOptions {
   isZoomFraming?: boolean
 }
 
-const GPU_MAX_BLUR_TAPS = 24
+const GPU_MAX_BLUR_TAPS = 32
 const MIN_SCREEN_SWEEP_PX = 0.75
 const CURSOR_PROBE_SAMPLES = 5
-const CURSOR_MAX_SAMPLES = 24
+const CURSOR_MAX_SAMPLES = 32
 const CURSOR_MIN_SWEEP_PX = 1.0
 const CURSOR_STEP_PX = 1.25
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value))
+}
+
+/** Full-strength (`1.0`) shutter exposure base in ms for a given canvas fps. */
+export function motionBlurShutterBaseMs(fps: number): number {
+  const safeFps = Math.max(1, fps || 30)
+  return Math.max(1000 / safeFps, MOTION_BLUR_REFERENCE_EXPOSURE_MS)
+}
+
+/** Exposure duration (ms) for a `0..1` channel strength at `fps`. */
+export function motionBlurShutterMs(strength: number, fps = 30): number {
+  return motionBlurShutterBaseMs(fps) * clamp(strength, 0, 1)
 }
 
 /** Return normalized MotionBlurSettings with missing fields defaulted. */
@@ -148,6 +173,11 @@ export function motionBlurMasterStrength(blur: MotionBlurSettings | undefined): 
 /** Effective cinema shutter angle in degrees (`0..360`). */
 export function effectiveShutterDegrees(blur: MotionBlurSettings | undefined): number {
   return Math.round(motionBlurMasterStrength(blur) * 360)
+}
+
+/** Effective cinema shutter exposure in milliseconds for the strongest active channel. */
+export function effectiveShutterMs(blur: MotionBlurSettings | undefined, fps = 30): number {
+  return Math.round(motionBlurShutterMs(motionBlurMasterStrength(blur), fps))
 }
 
 /**
@@ -243,9 +273,9 @@ export function resolveScreenMotionBlurStrip(
   if (shots.length === 0) return null
 
   const fps = Math.max(1, state.canvas.fps || 30)
-  const frameMs = 1000 / fps
-  const halfZoomMs = (frameMs * blur.zoom) / 2
-  const halfPanMs = (frameMs * blur.pan) / 2
+  const baseMs = motionBlurShutterBaseMs(fps)
+  const halfZoomMs = (baseMs * blur.zoom) / 2
+  const halfPanMs = (baseMs * blur.pan) / 2
 
   const cw = Math.max(1, state.canvas.width)
   const ch = Math.max(1, state.canvas.height)
@@ -334,9 +364,9 @@ function subframeZoomTransform(
   if (shots.length === 0) return baseTransform
 
   const fps = Math.max(1, state.canvas.fps || 30)
-  const frameMs = 1000 / fps
-  const halfZoomMs = (frameMs * blur.zoom) / 2
-  const halfPanMs = (frameMs * blur.pan) / 2
+  const baseMs = motionBlurShutterBaseMs(fps)
+  const halfZoomMs = (baseMs * blur.zoom) / 2
+  const halfPanMs = (baseMs * blur.pan) / 2
 
   if (Math.abs(halfZoomMs - halfPanMs) < 1e-6) {
     return resolveZoomAtTime(state, timeMs + u * halfZoomMs, cursorEngine)
@@ -399,7 +429,7 @@ export function resolveCursorMotionBlurSamples(
   const clipSpeed =
     screenClip && Number.isFinite(screenClip.speed) && screenClip.speed > 0 ? screenClip.speed : 1
   const fps = Math.max(1, state.canvas.fps || 30)
-  const frameSourceMs = (1000 / fps) * clipSpeed
+  const exposureSourceMs = motionBlurShutterBaseMs(fps) * clipSpeed
   const baseTransform = options.isZoomFraming
     ? null
     : resolveZoomAtTime(state, timeMs, cursorEngine)
@@ -438,7 +468,7 @@ export function resolveCursorMotionBlurSamples(
 
   const probePoints = cursorEngine.evaluateMotionSamples(
     sourceTimeMs,
-    frameSourceMs,
+    exposureSourceMs,
     blur.cursor,
     CURSOR_PROBE_SAMPLES,
     cursorSettings,
@@ -456,7 +486,7 @@ export function resolveCursorMotionBlurSamples(
 
   const resampled = cursorEngine.evaluateMotionSamples(
     sourceTimeMs,
-    frameSourceMs,
+    exposureSourceMs,
     blur.cursor,
     sampleCount,
     cursorSettings,
@@ -474,30 +504,37 @@ export function findMotionBlurPreviewTarget(
   currentTimeMs: number,
   cursorEngine?: CursorEngine | null,
 ): MotionBlurPreviewTarget | null {
+  const blur = normalizeMotionBlurSettings(state.canvas.motionBlur)
+  const anyChannel = blur.cursor > 0 || blur.zoom > 0 || blur.pan > 0
+  const allowScreen = !anyChannel || blur.zoom > 0 || blur.pan > 0
+  const allowCursor = !anyChannel || blur.cursor > 0
+
   const candidates: MotionBlurPreviewTarget[] = []
 
-  const shots = resolveCameraShots(state, cursorEngine)
-  for (const shot of shots) {
-    const transitionInMs = shot.transitionInMs ?? 0
-    const transitionOutMs = shot.transitionOutMs ?? 0
-    if (transitionInMs > 0) {
-      candidates.push({
-        timeMs: Math.round(shot.startMs + transitionInMs * 0.5),
-        source: "zoom",
-        label: "Zoom transition",
-      })
-    }
-    if (transitionOutMs > 0) {
-      candidates.push({
-        timeMs: Math.round(shot.startMs + shot.durationMs - transitionOutMs * 0.5),
-        source: "zoom",
-        label: "Zoom out",
-      })
+  if (allowScreen) {
+    const shots = resolveCameraShots(state, cursorEngine)
+    for (const shot of shots) {
+      const transitionInMs = shot.transitionInMs ?? 0
+      const transitionOutMs = shot.transitionOutMs ?? 0
+      if (transitionInMs > 0) {
+        candidates.push({
+          timeMs: Math.round(shot.startMs + transitionInMs * 0.5),
+          source: "zoom",
+          label: "Zoom transition",
+        })
+      }
+      if (transitionOutMs > 0) {
+        candidates.push({
+          timeMs: Math.round(shot.startMs + shot.durationMs - transitionOutMs * 0.5),
+          source: "zoom",
+          label: "Zoom out",
+        })
+      }
     }
   }
 
   // Also sample telemetry for the fastest cursor movement if available.
-  if (cursorEngine && cursorEngine.telemetry.events.length > 2) {
+  if (allowCursor && cursorEngine && cursorEngine.telemetry.events.length > 2) {
     const events = cursorEngine.telemetry.events
     const step = Math.max(1, Math.floor(events.length / 240))
     let bestSpeed = 0
@@ -506,10 +543,10 @@ export function findMotionBlurPreviewTarget(
       const prev = events[i - step]
       const curr = events[i]
       const dt = curr.tMs - prev.tMs
-      if (dt <= 0 || dt > 120) continue
+      if (dt <= 0 || dt > 200) continue
       const speed =
         (Math.hypot(curr.sourceX - prev.sourceX, curr.sourceY - prev.sourceY) / dt) * 1000
-      if (speed > bestSpeed && speed > 300) {
+      if (speed > bestSpeed && speed > 200) {
         bestSpeed = speed
         bestSourceMs = Math.round((prev.tMs + curr.tMs) * 0.5)
       }

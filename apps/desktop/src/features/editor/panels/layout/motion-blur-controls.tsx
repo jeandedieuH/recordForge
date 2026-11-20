@@ -5,10 +5,11 @@ import {
   DEFAULT_MOTION_BLUR_SETTINGS,
   MOTION_BLUR_PRESETS,
   detectMotionBlurPreset,
-  effectiveShutterDegrees,
+  effectiveShutterMs,
   findMotionBlurPreviewTarget,
   getManualZoomSegments,
   motionBlurMasterStrength,
+  motionBlurShutterMs,
   normalizeMotionBlurSettings,
   resolveCursorMotionBlurSamples,
   resolveScreenMotionBlurStrip,
@@ -35,7 +36,7 @@ const CHANNEL_ROWS = [
 
 /**
  * Cinema-shutter Motion Blur controls with 1-click presets, proportional master
- * strength, collapsible per-channel mix, and a "Jump to motion" preview helper.
+ * strength, collapsible per-channel mix, and a "Preview" motion jump helper.
  */
 export function MotionBlurControls({
   canvas,
@@ -50,18 +51,31 @@ export function MotionBlurControls({
   const timeline = useTimelineStore((state) => state.engine?.history.present)
   const cursorEngine = useTimelineStore((state) => state.cursorEngine)
   const seek = useTimelineStore((state) => state.seek)
+  const selection = useTimelineStore((state) => state.view.selection)
+  const zoomPreviewActive = useTimelineStore((state) => state.zoomPreviewActive)
+  const setZoomPreviewActive = useTimelineStore((state) => state.setZoomPreviewActive)
   const playheadMs = usePlayheadMs()
 
   const normalized = normalizeMotionBlurSettings(canvas.motionBlur)
   const isEnabled = normalized.enabled
   const activePreset = detectMotionBlurPreset(normalized)
-  const shutterDegrees = effectiveShutterDegrees(normalized)
+  const fps = Math.max(1, canvas.fps || 30)
+  const exposureMs = effectiveShutterMs(normalized, fps)
   const masterPercent = Math.round(motionBlurMasterStrength(normalized) * 100)
 
   // Auto-open the channel mix only when the user explicitly expands it or has
   // already customized unequal channels on a loaded project.
   const hasCustomMix = activePreset === null && isEnabled
   const [channelsOpen, setChannelsOpen] = useState(hasCustomMix)
+
+  const selectedZoomEnabled = Boolean(
+    timeline &&
+    selection?.kind === "zoom" &&
+    getManualZoomSegments(timeline).some(
+      (seg) => seg.id === selection.segmentId && seg.enabled !== false && seg.style !== "loupe",
+    ),
+  )
+  const isZoomFraming = selectedZoomEnabled && !zoomPreviewActive
 
   const zoomCount = useMemo(
     () =>
@@ -72,29 +86,49 @@ export function MotionBlurControls({
   )
   const hasCursor = (cursorEngine?.telemetry.events.length ?? 0) > 1
 
+  const hiddenScreenMotionAtPlayhead = useMemo(() => {
+    if (!timeline || !isEnabled || !isZoomFraming) return false
+    return (
+      resolveScreenMotionBlurStrip(
+        timeline,
+        playheadMs,
+        { width: timeline.canvas.width, height: timeline.canvas.height },
+        cursorEngine,
+      ) !== null
+    )
+  }, [timeline, isEnabled, isZoomFraming, playheadMs, cursorEngine])
+
   const isMovingNow = useMemo(() => {
     if (!timeline || !isEnabled) return false
-    const screenStrip = resolveScreenMotionBlurStrip(
-      timeline,
-      playheadMs,
-      { width: timeline.canvas.width, height: timeline.canvas.height },
-      cursorEngine,
-    )
-    if (screenStrip !== null) return true
+    if (!isZoomFraming) {
+      const screenStrip = resolveScreenMotionBlurStrip(
+        timeline,
+        playheadMs,
+        { width: timeline.canvas.width, height: timeline.canvas.height },
+        cursorEngine,
+      )
+      if (screenStrip !== null) return true
+    }
     if (cursorEngine) {
-      const samples = resolveCursorMotionBlurSamples(timeline, playheadMs, cursorEngine, {
-        width: timeline.canvas.width,
-        height: timeline.canvas.height,
-      })
+      const samples = resolveCursorMotionBlurSamples(
+        timeline,
+        playheadMs,
+        cursorEngine,
+        {
+          width: timeline.canvas.width,
+          height: timeline.canvas.height,
+        },
+        { isZoomFraming },
+      )
       if (samples.length > 1) return true
     }
     return false
-  }, [timeline, isEnabled, playheadMs, cursorEngine])
+  }, [timeline, isEnabled, isZoomFraming, playheadMs, cursorEngine])
 
   const previewTarget = useMemo(() => {
-    if (!timeline || !isEnabled || isMovingNow || variant === "compact") return null
+    if (!timeline || !isEnabled || (isMovingNow && !isZoomFraming)) return null
     return findMotionBlurPreviewTarget(timeline, playheadMs, cursorEngine)
-  }, [timeline, isEnabled, isMovingNow, variant, playheadMs, cursorEngine])
+  }, [timeline, isEnabled, isMovingNow, isZoomFraming, playheadMs, cursorEngine])
 
   function updateBlur(updates: Partial<MotionBlurSettings>) {
     onChange({
@@ -124,18 +158,32 @@ export function MotionBlurControls({
     updateBlur({ [key]: current > 0 ? 0 : fallback })
   }
 
+  function handlePreviewMotion() {
+    if (isZoomFraming) {
+      setZoomPreviewActive(true)
+      if (hiddenScreenMotionAtPlayhead) return
+    }
+    if (!isMovingNow && previewTarget) {
+      seek(previewTarget.timeMs)
+    }
+  }
+
   const contextSummary = useMemo(() => {
+    if (isZoomFraming) return "Zoom framing hides zoom blur"
     const parts: string[] = []
     if (hasCursor) parts.push("cursor")
     if (zoomCount > 0) parts.push(`${zoomCount} zoom${zoomCount === 1 ? "" : "s"}`)
     if (parts.length === 0) return "Add a zoom or record cursor movement to see motion blur."
     if (zoomCount === 0) return "Active on cursor moves. Add a zoom for camera blur."
     return `Active on ${parts.join(" & ")}.`
-  }, [hasCursor, zoomCount])
+  }, [isZoomFraming, hasCursor, zoomCount])
+
+  const showStatusBar = variant === "full" || isZoomFraming || previewTarget !== null
+  const showPreviewAction = isZoomFraming || previewTarget !== null
 
   return (
     <div className="flex flex-col gap-3 rounded-lg border border-border bg-surface-dim/50 p-3">
-      {/* Header row with explicit label association and live shutter readout */}
+      {/* Header row with explicit label association and live exposure readout */}
       <div className="flex items-center justify-between gap-2">
         <label
           htmlFor={toggleId}
@@ -149,9 +197,9 @@ export function MotionBlurControls({
           {isEnabled ? (
             <span
               className="rounded-sm bg-primary/10 px-1.5 py-0.5 font-mono text-[10px] font-medium text-primary"
-              title="Effective cinema shutter angle"
+              title="Effective frame-rate-independent cinema shutter exposure"
             >
-              {shutterDegrees}°
+              {exposureMs}ms
             </span>
           ) : null}
           <Switch
@@ -169,6 +217,7 @@ export function MotionBlurControls({
           <div className="grid grid-cols-4 gap-1" role="group" aria-label="Motion blur presets">
             {MOTION_BLUR_PRESETS.map((preset) => {
               const selected = activePreset === preset.id
+              const presetMs = Math.round(motionBlurShutterMs(preset.settings.zoom, fps))
               return (
                 <button
                   key={preset.id}
@@ -185,9 +234,7 @@ export function MotionBlurControls({
                 >
                   <span className="leading-tight">{preset.label}</span>
                   {variant === "full" ? (
-                    <span className="font-mono text-[9px] opacity-75">
-                      {preset.shutterDegrees}°
-                    </span>
+                    <span className="font-mono text-[9px] opacity-75">{presetMs}ms</span>
                   ) : null}
                 </button>
               )
@@ -209,26 +256,32 @@ export function MotionBlurControls({
                   onChange({ motionBlur: scaleMotionBlurStrength(normalized, value / 100) })
                 }
               />
+            </>
+          ) : null}
 
-              {/* Smart context + 1-click jump to motion when playhead is on a still frame */}
-              <div className="flex items-center justify-between gap-2 rounded-md border border-border/60 bg-surface/60 px-2.5 py-1.5">
-                <span className="text-[10px] leading-snug text-subtle-foreground">
-                  {isMovingNow ? "Live on current frame" : contextSummary}
-                </span>
-                {previewTarget ? (
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    className="h-6 shrink-0 gap-1 px-2 text-[10px] font-medium text-primary hover:bg-primary/10 hover:text-primary"
-                    onClick={() => seek(previewTarget.timeMs)}
-                  >
-                    <Play className="size-2.5 fill-current" aria-hidden />
-                    <span>Preview</span>
-                  </Button>
-                ) : null}
-              </div>
+          {/* Smart context + 1-click preview toggle / jump (shown in both full and compact modes) */}
+          {showStatusBar ? (
+            <div className="flex items-center justify-between gap-2 rounded-md border border-border/60 bg-surface/60 px-2.5 py-1.5">
+              <span className="text-[10px] leading-snug text-subtle-foreground">
+                {isMovingNow && !isZoomFraming ? "Live on current frame" : contextSummary}
+              </span>
+              {showPreviewAction ? (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 shrink-0 gap-1 px-2 text-[10px] font-medium text-primary hover:bg-primary/10 hover:text-primary"
+                  onClick={handlePreviewMotion}
+                >
+                  <Play className="size-2.5 fill-current" aria-hidden />
+                  <span>Preview</span>
+                </Button>
+              ) : null}
+            </div>
+          ) : null}
 
+          {variant === "full" ? (
+            <>
               {/* Collapsible per-channel mix */}
               <div className="flex flex-col gap-2 border-t border-border/60 pt-2">
                 <button
@@ -306,7 +359,7 @@ export function MotionBlurControls({
           <p id={descId} className="-mt-1 text-[10px] leading-relaxed text-subtle-foreground">
             {variant === "compact"
               ? "Applies to zoom transitions, pans, and cursor moves in preview and export."
-              : "50% matches a natural 180° cinema shutter (100% = full-frame 360°). Renders live in preview and matches both GPU and compatibility exports."}
+              : "50% matches a balanced 30 ms cinema shutter (100% = 60 ms), consistent at both 30 fps and 60 fps in preview and export."}
           </p>
         </div>
       ) : (

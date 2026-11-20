@@ -531,16 +531,19 @@ min(m_max, r)` and the composite pass maps uvs through a `plane_size` row, so
   canvas-resolution stream and sharpens with a mild luma `unsharp`, reporting
   `zoom-detail` and `zoom-sharpening` (ADR 020).
 - **Motion blur (`canvas.motionBlur`, Pro).** `{ enabled, cursor, zoom, pan }`
-  are shutter fractions of one frame (1 = a 180° shutter). The cursor is exact
-  on both renderers: `CursorEngine::evaluate_motion_samples` walks the same
-  spline at sub-frame times and `CursorRenderer` accumulates up to six equally
-  weighted ghost poses, chosen from the mapped sweep distance, widening the
-  cursor tile to the swept path. Zoom/pan blur: the compose loop evaluates the
-  crop at `t ± shutter/2` with the zoom and pan sliders weighting the size and
-  centre deltas, then the composite shader averages up to 16 taps along that
-  strip. The compatibility renderer reproduces the same sweep with up to
-  `COMPAT_MAX_BLUR_TAPS` (5) shifted `zoompan` branches averaged by `mix`, and
-  reports `motion-blur` only when a frame's sweep would exceed the cap. Hold
+  are shutter strength fractions (`0..1`) scaled against a cinema-calibrated
+  base window of `max(1000 / fps, 60)` ms (`0.5` = 30 ms across 24–120 fps,
+  `1` = 60 ms). The cursor is exact on both renderers:
+  `CursorEngine::evaluate_motion_samples` walks the same spline at sub-frame
+  times paired with `subframe_zoom_transform`, and `CursorRenderer` accumulates
+  up to 32 tapered poses linearly in premultiplied RGBA, widening the cursor tile
+  to the swept path. Zoom/pan blur evaluates symmetric crop bounds around
+  `t ± shutter/2` with independent zoom and pan sliders weighting scale and
+  centre deltas, then `composite.wgsl` integrates up to 32 (`GPU_MAX_BLUR_TAPS`)
+  tapered bilinear taps along that strip while bypassing RCAS sharpening. The
+  compatibility renderer reproduces the same sweep with up to
+  `COMPAT_MAX_BLUR_TAPS` (9) shifted `zoompan` branches averaged by `mix`, and
+  reports `motion-blur` only when a frame's sweep exceeds the tap cap. Hold
   and identity frames resolve to one tap, so blur costs nothing when nothing
   moves.
 - **Glass Loupe (`zoomSegments[].style: "loupe"`, Pro).** Loupe segments never
@@ -579,12 +582,13 @@ adjacent silence, merged into one `ripple-delete-ranges` command.
 **Authoring and preview.**
 
 - _Canvas Layout → Effects & Focus panel:_ a Zoom clarity select (`off | auto | strong`)
-  and a Pro Motion blur block with cinema shutter presets (`Subtle 90°`,
-  `Natural 180°`, `Cinematic 270°`, `Dynamic 360°`), a proportional Strength
-  slider, a collapsible per-source Channel mix (cursor / zoom / pan where 50%
-  is a 180° shutter and 100% is a 360° full-frame shutter), and a 1-click
-  Preview jump to the nearest motion frame. Both write `canvas.zoomSharpening` /
-  `canvas.motionBlur` through the ordinary `update-canvas` command.
+  and a Pro Motion blur block with cinema-calibrated exposure presets
+  (`Subtle 15 ms`, `Natural 30 ms`, `Cinematic 45 ms`, `Dynamic 60 ms`), an
+  effective-exposure `ms` badge, a proportional Strength slider, a collapsible
+  per-source Channel mix (`cursor` / `zoom` / `pan`), and a 1-click Preview jump
+  (that also unlocks zoom framing when inspecting a zoom transition). Both write
+  `canvas.zoomSharpening` / `canvas.motionBlur` through the ordinary
+  `update-canvas` command.
 - _Zoom inspector → Presentation:_ a Zoom frame / Glass Loupe toggle plus lens
   shape, size, ring width and glass rim controls. The lens always rides the
   cursor — a canvas drag writes a `loupe.offset` nudge — and Reset lens

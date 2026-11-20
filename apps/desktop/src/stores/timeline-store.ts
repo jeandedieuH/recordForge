@@ -181,6 +181,9 @@ interface TimelineStore {
   retryExportDelivery: (kind: JobDeliveryKind) => Promise<void>
   revealExport: () => Promise<void>
   setSelection: (selection: TimelineSelection | null) => void
+  /** Opts out of unzoomed zoom-framing mode so the monitor renders live zoom & motion blur. */
+  zoomPreviewActive: boolean
+  setZoomPreviewActive: (active: boolean) => void
 
   // Phase 2: set or clear the transient draft timeline and any validation error.
   setDraftTimeline: (draft: TimelineState | null, error?: AppError | null) => void
@@ -399,6 +402,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
   assetPaths: {},
   draftTimeline: null,
   draftError: null,
+  zoomPreviewActive: false,
   isListening: false,
   unlisten: null,
   previewProxyRequested: false,
@@ -431,6 +435,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       assetPaths: {},
       draftTimeline: null,
       draftError: null,
+      zoomPreviewActive: false,
       previewProxyRequested: false,
       projectRevision: 0,
       savingRevision: null,
@@ -629,6 +634,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
         },
         isLoading: false,
         error: null,
+        zoomPreviewActive: false,
         projectRevision: 0,
         savingRevision: null,
         pendingSaveRevision: null,
@@ -788,13 +794,19 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     const nextTimeline = result.value.history.present
     const nextProject = timelineToProject(nextTimeline, project)
     const duration = getTotalDuration(nextTimeline)
-    const view = get().view
+    const { view, zoomPreviewActive } = get()
     const nextSelection = reconcileSelection(view.selection, nextTimeline)
     set({
       engine: result.value,
       error: null,
       draftTimeline: null,
       draftError: null,
+      zoomPreviewActive:
+        nextSelection?.kind === "zoom" &&
+        view.selection?.kind === "zoom" &&
+        nextSelection.segmentId === view.selection.segmentId
+          ? zoomPreviewActive
+          : false,
       view: {
         ...view,
         durationMs: duration,
@@ -821,10 +833,16 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     const nextTimeline = result.value.history.present
     const nextProject = timelineToProject(nextTimeline, project)
     const duration = getTotalDuration(nextTimeline)
-    const view = get().view
+    const { view, zoomPreviewActive } = get()
     const nextSelection = reconcileSelection(view.selection, nextTimeline)
     set({
       engine: result.value,
+      zoomPreviewActive:
+        nextSelection?.kind === "zoom" &&
+        view.selection?.kind === "zoom" &&
+        nextSelection.segmentId === view.selection.segmentId
+          ? zoomPreviewActive
+          : false,
       view: {
         ...view,
         durationMs: duration,
@@ -849,10 +867,16 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     const nextTimeline = result.value.history.present
     const nextProject = timelineToProject(nextTimeline, project)
     const duration = getTotalDuration(nextTimeline)
-    const view = get().view
+    const { view, zoomPreviewActive } = get()
     const nextSelection = reconcileSelection(view.selection, nextTimeline)
     set({
       engine: result.value,
+      zoomPreviewActive:
+        nextSelection?.kind === "zoom" &&
+        view.selection?.kind === "zoom" &&
+        nextSelection.segmentId === view.selection.segmentId
+          ? zoomPreviewActive
+          : false,
       view: {
         ...view,
         durationMs: duration,
@@ -1447,8 +1471,19 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
   },
 
   setSelection: (selection) => {
-    const { view } = get()
-    set({ view: { ...view, selection } })
+    const { view, zoomPreviewActive } = get()
+    const prevZoomId = view.selection?.kind === "zoom" ? view.selection.segmentId : null
+    const nextZoomId = selection?.kind === "zoom" ? selection.segmentId : null
+    const nextZoomPreview =
+      selection?.kind === "zoom" && prevZoomId === nextZoomId ? zoomPreviewActive : false
+    set({
+      view: { ...view, selection },
+      zoomPreviewActive: nextZoomPreview,
+    })
+  },
+
+  setZoomPreviewActive: (active) => {
+    set({ zoomPreviewActive: active })
   },
 
   setDraftTimeline: (draft, error) => {
@@ -1705,6 +1740,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       assetPaths: {},
       isLoading: false,
       error: null,
+      zoomPreviewActive: false,
       isListening: false,
       unlisten: null,
       previewProxyRequested: false,

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import type { CursorAsset } from "@recordforge/cursor-core"
 import type { CursorSettings } from "@recordforge/contracts"
 import type { CursorMotionBlurSample } from "@recordforge/editor-core"
@@ -9,8 +9,10 @@ export interface CursorMotionBlurCanvasProps {
   cursorSettings: CursorSettings
   /** Scale excluding per-sample zoomScale (`settings.scale * sizeFactor * fitted.scale * clickScale`). */
   baseScale: number
-  /** Reference scale at the frame center, used to size the cached bitmap. */
-  centerScale: number
+  /** Zoom-independent cursor scale used to keep the cached raster stable across zoom transitions. */
+  unzoomedScale?: number
+  /** @deprecated Kept for backwards caller compatibility; prefer `unzoomedScale`. */
+  centerScale?: number
   opacity: number
   samples: readonly CursorMotionBlurSample[]
   containerWidth: number
@@ -30,10 +32,39 @@ interface CachedCursorBitmap {
   data: Uint8ClampedArray
 }
 
-// Module-level bounded LRU of rasterized cursor bitmaps so scrubbing/playback
-// never re-decodes the SVG data URL per frame.
+// Module-level bounded LRU of rasterized cursor bitmaps and in-flight decode deduplication.
 const BITMAP_CACHE_LIMIT = 24
 const bitmapCache = new Map<string, CachedCursorBitmap>()
+const pendingLoads = new Map<string, Promise<CachedCursorBitmap | null>>()
+
+/**
+ * Supersampled raster scale derived solely from the user's unzoomed cursor
+ * size (`>= 2x`) so live zoom transitions and clicks never invalidate the cache.
+ */
+export function cursorBitmapReferenceScale(unzoomedScale: number): number {
+  return Math.max(2, Math.min(4, Math.ceil(Math.max(0.5, unzoomedScale) * 2) / 2))
+}
+
+export function buildCursorBitmapCacheKey(
+  assetId: string,
+  cursorMarkup: string,
+  settings: CursorSettings,
+  refScale: number,
+  dpr: number,
+): string {
+  return [
+    assetId,
+    refScale.toFixed(2),
+    dpr.toFixed(2),
+    settings.shadowEnabled ? "1" : "0",
+    settings.shadowOffsetX,
+    settings.shadowOffsetY,
+    settings.shadowBlur,
+    settings.shadowOpacity,
+    settings.shadowColor,
+    cursorMarkup,
+  ].join("|")
+}
 
 function parseViewBox(viewBox: string): [number, number, number, number] {
   const parts = viewBox
@@ -86,7 +117,7 @@ function loadBitmap(
   asset: CursorAsset,
   cursorMarkup: string,
   settings: CursorSettings,
-  quantizedScale: number,
+  refScale: number,
   dpr: number,
 ): Promise<CachedCursorBitmap | null> {
   const existing = bitmapCache.get(key)
@@ -96,10 +127,13 @@ function loadBitmap(
     return Promise.resolve(existing)
   }
 
+  const inflight = pendingLoads.get(key)
+  if (inflight) return inflight
+
   const [vbX, vbY, vbW, vbH] = parseViewBox(asset.viewBox)
   const padVb = getShadowPadVb(asset, settings)
-  const scalePxX = (asset.width * quantizedScale * dpr) / vbW
-  const scalePxY = (asset.height * quantizedScale * dpr) / vbH
+  const scalePxX = (asset.width * refScale * dpr) / vbW
+  const scalePxY = (asset.height * refScale * dpr) / vbH
   const width = Math.max(2, Math.ceil((vbW + padVb * 2) * scalePxX))
   const height = Math.max(2, Math.ceil((vbH + padVb * 2) * scalePxY))
   const padPx = padVb * scalePxX
@@ -109,7 +143,7 @@ function loadBitmap(
   const svgText = buildCursorBitmapSvg(asset, cursorMarkup, settings, width, height, padVb)
   const dataUrl = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svgText)}`
 
-  return new Promise((resolve) => {
+  const promise = new Promise<CachedCursorBitmap | null>((resolve) => {
     const img = new Image()
     img.onload = () => {
       try {
@@ -131,7 +165,7 @@ function loadBitmap(
           padPx,
           hotspotX,
           hotspotY,
-          scale: quantizedScale,
+          scale: refScale,
           data: imageData.data,
         }
         bitmapCache.set(key, entry)
@@ -146,7 +180,28 @@ function loadBitmap(
     }
     img.onerror = () => resolve(null)
     img.src = dataUrl
+  }).finally(() => {
+    pendingLoads.delete(key)
   })
+
+  pendingLoads.set(key, promise)
+  return promise
+}
+
+/**
+ * Warm the raster bitmap cache while the cursor is stationary so the very first
+ * moving frame renders motion blur immediately without flashing sharp SVG.
+ */
+export function preloadCursorMotionBitmap(
+  asset: CursorAsset,
+  cursorMarkup: string,
+  cursorSettings: CursorSettings,
+  unzoomedScale: number,
+  dpr = typeof window !== "undefined" ? Math.min(2, window.devicePixelRatio || 1) : 1,
+): Promise<CachedCursorBitmap | null> {
+  const refScale = cursorBitmapReferenceScale(unzoomedScale)
+  const key = buildCursorBitmapCacheKey(asset.id, cursorMarkup, cursorSettings, refScale, dpr)
+  return loadBitmap(key, asset, cursorMarkup, cursorSettings, refScale, dpr)
 }
 
 /**
@@ -162,6 +217,7 @@ export function CursorMotionBlurCanvas({
   cursorMarkup,
   cursorSettings,
   baseScale,
+  unzoomedScale,
   centerScale,
   opacity,
   samples,
@@ -171,55 +227,37 @@ export function CursorMotionBlurCanvas({
 }: CursorMotionBlurCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const accumRef = useRef<Float32Array>(new Float32Array(0))
-  const [bitmap, setBitmap] = useState<CachedCursorBitmap | null>(null)
 
   const dpr = typeof window !== "undefined" ? Math.min(2, window.devicePixelRatio || 1) : 1
-  // Quantize bitmap scale to 5% bins so zooming smoothly reuses cached rasters.
-  const quantizedScale = Math.max(0.1, Math.round(centerScale * 20) / 20)
+  const refScale = cursorBitmapReferenceScale(unzoomedScale ?? centerScale ?? baseScale)
   const cacheKey = useMemo(
-    () =>
-      [
-        asset.id,
-        quantizedScale.toFixed(2),
-        dpr.toFixed(2),
-        cursorSettings.shadowEnabled ? "1" : "0",
-        cursorSettings.shadowOffsetX,
-        cursorSettings.shadowOffsetY,
-        cursorSettings.shadowBlur,
-        cursorSettings.shadowOpacity,
-        cursorSettings.shadowColor,
-        cursorMarkup,
-      ].join("|"),
-    [
-      asset.id,
-      quantizedScale,
-      dpr,
-      cursorSettings.shadowEnabled,
-      cursorSettings.shadowOffsetX,
-      cursorSettings.shadowOffsetY,
-      cursorSettings.shadowBlur,
-      cursorSettings.shadowOpacity,
-      cursorSettings.shadowColor,
-      cursorMarkup,
-    ],
+    () => buildCursorBitmapCacheKey(asset.id, cursorMarkup, cursorSettings, refScale, dpr),
+    [asset.id, cursorMarkup, cursorSettings, refScale, dpr],
   )
+  const syncCached = bitmapCache.get(cacheKey) ?? null
+  const [loadedBitmap, setLoadedBitmap] = useState<{
+    assetId: string
+    entry: CachedCursorBitmap
+  } | null>(() => (syncCached ? { assetId: asset.id, entry: syncCached } : null))
 
   useEffect(() => {
     const cached = bitmapCache.get(cacheKey)
     if (cached) {
-      setBitmap(cached)
+      setLoadedBitmap({ assetId: asset.id, entry: cached })
       return
     }
     let cancelled = false
-    void loadBitmap(cacheKey, asset, cursorMarkup, cursorSettings, quantizedScale, dpr).then(
-      (loaded) => {
-        if (!cancelled && loaded) setBitmap(loaded)
-      },
-    )
+    void loadBitmap(cacheKey, asset, cursorMarkup, cursorSettings, refScale, dpr).then((loaded) => {
+      if (!cancelled && loaded) setLoadedBitmap({ assetId: asset.id, entry: loaded })
+    })
     return () => {
       cancelled = true
     }
-  }, [cacheKey, asset, cursorMarkup, cursorSettings, quantizedScale, dpr])
+  }, [cacheKey, asset, cursorMarkup, cursorSettings, refScale, dpr])
+
+  // Prefer the exact synchronous cache hit; if still decoding a style update,
+  // hold the previous bitmap for the same asset so zoom/color changes never blink.
+  const bitmap = syncCached ?? (loadedBitmap?.assetId === asset.id ? loadedBitmap.entry : null)
 
   const layout = useMemo(() => {
     if (!bitmap || samples.length === 0) return null
@@ -233,10 +271,10 @@ export function CursorMotionBlurCanvas({
     for (const sample of samples) {
       const sampleScale = Math.max(0.05, baseScale * sample.zoomScale)
       const ratio = sampleScale / Math.max(0.05, bitmap.scale)
-      const x0 = Math.floor(sample.x * dpr - bitmap.hotspotX * ratio)
-      const y0 = Math.floor(sample.y * dpr - bitmap.hotspotY * ratio)
-      const x1 = x0 + Math.ceil(bitmap.width * ratio)
-      const y1 = y0 + Math.ceil(bitmap.height * ratio)
+      const x0 = Math.floor(sample.x * dpr - bitmap.hotspotX * ratio) - 1
+      const y0 = Math.floor(sample.y * dpr - bitmap.hotspotY * ratio) - 1
+      const x1 = x0 + Math.ceil(bitmap.width * ratio) + 2
+      const y1 = y0 + Math.ceil(bitmap.height * ratio) + 2
       if (x0 < minX) minX = x0
       if (y0 < minY) minY = y0
       if (x1 > maxX) maxX = x1
@@ -251,7 +289,7 @@ export function CursorMotionBlurCanvas({
     return { bx0, by0, bw: bx1 - bx0, bh: by1 - by0 }
   }, [bitmap, samples, baseScale, containerWidth, containerHeight, dpr])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const canvas = canvasRef.current
     if (!canvas || !bitmap || !layout) return
     const ctx = canvas.getContext("2d")
@@ -290,21 +328,69 @@ export function CursorMotionBlurCanvas({
       if (sx0 >= sx1 || sy0 >= sy1) continue
 
       const sameSize = drawW === rw && drawH === rh
-      for (let dy = sy0; dy < sy1; dy++) {
-        const srcY = sameSize ? dy : Math.min(rh - 1, Math.floor((dy * rh) / drawH))
-        const srcRow = srcY * rw
-        const dstRow = (y0 + dy - by0) * bw
-        for (let dx = sx0; dx < sx1; dx++) {
-          const srcX = sameSize ? dx : Math.min(rw - 1, Math.floor((dx * rw) / drawW))
-          const srcIdx = (srcRow + srcX) * 4
-          const srcA = src[srcIdx + 3]
-          if (srcA === 0) continue
-          const wa = (srcA / 255) * weight
-          const dstIdx = (dstRow + (x0 + dx - bx0)) * 4
-          accum[dstIdx] += src[srcIdx] * wa
-          accum[dstIdx + 1] += src[srcIdx + 1] * wa
-          accum[dstIdx + 2] += src[srcIdx + 2] * wa
-          accum[dstIdx + 3] += wa
+      if (sameSize) {
+        for (let dy = sy0; dy < sy1; dy++) {
+          const srcRow = dy * rw
+          const dstRow = (y0 + dy - by0) * bw
+          for (let dx = sx0; dx < sx1; dx++) {
+            const srcIdx = (srcRow + dx) * 4
+            const srcA = src[srcIdx + 3]
+            if (srcA === 0) continue
+            const wa = (srcA / 255) * weight
+            const dstIdx = (dstRow + (x0 + dx - bx0)) * 4
+            accum[dstIdx] += src[srcIdx] * wa
+            accum[dstIdx + 1] += src[srcIdx + 1] * wa
+            accum[dstIdx + 2] += src[srcIdx + 2] * wa
+            accum[dstIdx + 3] += wa
+          }
+        }
+      } else {
+        // Premultiplied bilinear sampling keeps scaled cursor edges crisp with zero dark fringe.
+        for (let dy = sy0; dy < sy1; dy++) {
+          const v = ((dy + 0.5) * rh) / drawH - 0.5
+          const iy = Math.floor(v)
+          const fy = v - iy
+          const yA = Math.max(0, Math.min(rh - 1, iy))
+          const yB = Math.max(0, Math.min(rh - 1, iy + 1))
+          const rowA = yA * rw
+          const rowB = yB * rw
+          const dstRow = (y0 + dy - by0) * bw
+          const wyA = 1 - fy
+          const wyB = fy
+
+          for (let dx = sx0; dx < sx1; dx++) {
+            const u = ((dx + 0.5) * rw) / drawW - 0.5
+            const ix = Math.floor(u)
+            const fx = u - ix
+            const xA = Math.max(0, Math.min(rw - 1, ix))
+            const xB = Math.max(0, Math.min(rw - 1, ix + 1))
+            const wxA = 1 - fx
+            const wxB = fx
+
+            const i00 = (rowA + xA) * 4
+            const i10 = (rowA + xB) * 4
+            const i01 = (rowB + xA) * 4
+            const i11 = (rowB + xB) * 4
+
+            const a00 = src[i00 + 3] * wxA * wyA
+            const a10 = src[i10 + 3] * wxB * wyA
+            const a01 = src[i01 + 3] * wxA * wyB
+            const a11 = src[i11 + 3] * wxB * wyB
+            const alphaSum = a00 + a10 + a01 + a11
+            if (alphaSum <= 0) continue
+
+            const scaleFactor = weight / 255
+            const dstIdx = (dstRow + (x0 + dx - bx0)) * 4
+            accum[dstIdx] +=
+              (src[i00] * a00 + src[i10] * a10 + src[i01] * a01 + src[i11] * a11) * scaleFactor
+            accum[dstIdx + 1] +=
+              (src[i00 + 1] * a00 + src[i10 + 1] * a10 + src[i01 + 1] * a01 + src[i11 + 1] * a11) *
+              scaleFactor
+            accum[dstIdx + 2] +=
+              (src[i00 + 2] * a00 + src[i10 + 2] * a10 + src[i01 + 2] * a01 + src[i11 + 2] * a11) *
+              scaleFactor
+            accum[dstIdx + 3] += alphaSum * scaleFactor
+          }
         }
       }
     }

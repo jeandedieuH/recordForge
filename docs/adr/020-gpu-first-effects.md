@@ -55,19 +55,19 @@ renders an honest, documented approximation.
 
 ### Effect table
 
-| Effect | GPU compositor | Compatibility renderer | Downgrade reported |
-| --- | --- | --- | --- |
-| Zoom detail plane (source-resolution crop) | Exact: the screen chain decodes at the plan's detail resolution (`D = content × min(m, r)`, never above the source) and the composite pass samples the real source pixels | Holds exact; animated transitions sample the post-scale stream | `zoom-detail` when a transition is post-scale |
-| Zoom sharpening (RCAS-style) | Exact | Mild luma `unsharp` | `zoom-sharpening` |
-| Motion blur — cursor | Exact (shared Rust rasterizer, up to 24 linearly accumulated shutter poses) | Exact (same rasterizer) | never |
-| Motion blur — zoom/pan | Exact (up to 24 tapered bilinear shader taps along continuous shutter strip) | Tapered `zoompan`+`mix` taps with independent zoom/pan shutter timing, capped at 7 | `motion-blur` only when the output-screen sweep exceeds the tap cap |
-| Glass Loupe | Exact (analytic SDF lens, glass rim, SDF shadow) | Lens rebuilt from `crop`/`geq`/`sendcmd`/`overlay`; the glass rim is approximated | `loupe-glass` only when the glass rim is on |
-| Camera colour / LUT | Exact (camera decode chain) | Exact (same FFmpeg chain) | never |
-| Camera cutout matte + background modes | Exact (camera decode chain) | Exact (same FFmpeg chain) | never |
-| Camera cutout silhouette shadow | Exact | Omitted | `cutout-shadow` |
-| Face-tracking crop | Exact (camera decode chain) | Exact | never |
-| Animated camera layouts | Exact | Exact (`eval=frame` expressions) | never |
-| Border styles (screen/camera) | Canvas SDF ring; camera plate | Static plates | `canvas-border` when a moving side-by-side layout outgrows the static plate |
+| Effect                                     | GPU compositor                                                                                                                                                            | Compatibility renderer                                                             | Downgrade reported                                                          |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| Zoom detail plane (source-resolution crop) | Exact: the screen chain decodes at the plan's detail resolution (`D = content × min(m, r)`, never above the source) and the composite pass samples the real source pixels | Holds exact; animated transitions sample the post-scale stream                     | `zoom-detail` when a transition is post-scale                               |
+| Zoom sharpening (RCAS-style)               | Exact                                                                                                                                                                     | Mild luma `unsharp`                                                                | `zoom-sharpening`                                                           |
+| Motion blur — cursor                       | Exact (shared Rust rasterizer, up to 32 linearly accumulated shutter poses)                                                                                               | Exact (same rasterizer)                                                            | never                                                                       |
+| Motion blur — zoom/pan                     | Exact (up to 32 tapered bilinear shader taps along continuous shutter strip)                                                                                              | Tapered `zoompan`+`mix` taps with independent zoom/pan shutter timing, capped at 9 | `motion-blur` only when the output-screen sweep exceeds the tap cap         |
+| Glass Loupe                                | Exact (analytic SDF lens, glass rim, SDF shadow)                                                                                                                          | Lens rebuilt from `crop`/`geq`/`sendcmd`/`overlay`; the glass rim is approximated  | `loupe-glass` only when the glass rim is on                                 |
+| Camera colour / LUT                        | Exact (camera decode chain)                                                                                                                                               | Exact (same FFmpeg chain)                                                          | never                                                                       |
+| Camera cutout matte + background modes     | Exact (camera decode chain)                                                                                                                                               | Exact (same FFmpeg chain)                                                          | never                                                                       |
+| Camera cutout silhouette shadow            | Exact                                                                                                                                                                     | Omitted                                                                            | `cutout-shadow`                                                             |
+| Face-tracking crop                         | Exact (camera decode chain)                                                                                                                                               | Exact                                                                              | never                                                                       |
+| Animated camera layouts                    | Exact                                                                                                                                                                     | Exact (`eval=frame` expressions)                                                   | never                                                                       |
+| Border styles (screen/camera)              | Canvas SDF ring; camera plate                                                                                                                                             | Static plates                                                                      | `canvas-border` when a moving side-by-side layout outgrows the static plate |
 
 The table is updated whenever an effect is added; an effect without a row may
 not ship.
@@ -83,18 +83,18 @@ not ship.
   `(D / content)²`. The plan analysis (`.exports/zoom_detail.rs`) reports which
   frame ranges need it and the RCAS strength; a plan without zoom keeps today's
   plane size and bypass.
-- **Motion blur cost.** Cursor blur integrates up to 24 tapered shutter poses
+- **Motion blur cost.** Cursor blur integrates up to 32 tapered shutter poses
   linearly in premultiplied RGBA inside the shared rasterizer (preserving 100%
   core opacity with zero Porter-Duff wash-out), synchronized with sub-frame zoom
   transforms when zoom/pan blur is also active; sub-pixel movement falls back to
-  one pose. Zoom/pan blur uses independent symmetric half-windows (`0.5` = 180°
-  cinema shutter, `1.0` = 360° full-frame shutter) and integrates up to 24
-  tapered hardware bilinear taps along a continuous normalized crop strip in
-  `composite.wgsl` (skipping RCAS sharpening on blurred frames); the
-  compatibility graph rebuilds the same sweep as shifted `zoompan` branches
-  blended by tapered `mix` weights, capped at 7 and keeping blurred ramp frames
-  out of `Hold` pieces. A plan with blur off takes the existing single-sample
-  path on both renderers, so the cost is zero.
+  one pose. Zoom/pan blur uses independent symmetric half-windows anchored to
+  `max(1000 / fps, 60)` ms (`0.5` = 30 ms Natural across 24–120 fps, `1.0` =
+  60 ms Dynamic) and integrates up to 32 tapered hardware bilinear taps along a
+  continuous normalized crop strip in `composite.wgsl` (skipping RCAS sharpening
+  on blurred frames); the compatibility graph rebuilds the same sweep as shifted
+  `zoompan` branches blended by tapered `mix` weights, capped at 9 and keeping
+  blurred ramp frames out of `Hold` pieces. A plan with blur off takes the
+  existing single-sample path on both renderers, so the cost is zero.
 - **Glass Loupe compat.** The compatibility graph has no cheap "magnify a region
   inside a masked lens" equivalent that also follows the cursor, so it
   synthesizes the lens from filters: `crop@loupe` samples the fitted screen

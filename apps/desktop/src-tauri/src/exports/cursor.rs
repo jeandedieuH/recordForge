@@ -67,7 +67,7 @@ pub struct RenderCanvas {
     pub cursor_settings: CursorSettings,
 }
 
-/// Per-motion-source shutter fractions (0 = off, 1 = a 180° shutter).
+/// Per-motion-source shutter strengths (`0` = off, `1` = 60 ms reference exposure).
 #[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", default, deny_unknown_fields)]
 pub struct RenderMotionBlur {
@@ -702,9 +702,9 @@ impl CursorRenderer {
         if zoom_shutter <= 0.0 && pan_shutter <= 0.0 {
             return *base;
         }
-        let frame_ms = 1000.0 / self.fps.max(1) as f64;
-        let half_zoom_ms = frame_ms * zoom_shutter / 2.0;
-        let half_pan_ms = frame_ms * pan_shutter / 2.0;
+        let base_ms = camera::motion_blur_shutter_base_ms(self.fps);
+        let half_zoom_ms = base_ms * zoom_shutter / 2.0;
+        let half_pan_ms = base_ms * pan_shutter / 2.0;
         if (half_zoom_ms - half_pan_ms).abs() < 1e-6 {
             return self.resolve_zoom_transform_at((output_ms + u * half_zoom_ms).max(0.0));
         }
@@ -754,9 +754,9 @@ impl CursorRenderer {
     ) -> Vec<CursorMotionSample> {
         /// Midpoint probes used to measure the curved shutter arc length.
         const PROBE: usize = 5;
-        /// Cap on accumulated shutter samples: 24 gives silky trails even on
-        /// fast across-screen flicks while reusing the bounded raster cache.
-        const MAX_SAMPLES: usize = 24;
+        /// Cap on accumulated shutter samples: 32 keeps wide 60 ms cinema trails
+        /// silky even on fast across-screen flicks while reusing the cache.
+        const MAX_SAMPLES: usize = 32;
         /// Minimum total canvas sweep (px) before motion blur engages.
         const MIN_SWEEP_PX: f64 = 1.0;
         /// Target spacing between consecutive shutter poses (px).
@@ -765,7 +765,8 @@ impl CursorRenderer {
         let Some(shutter) = self.cursor_blur_shutter() else {
             return Vec::new();
         };
-        let frame_source_ms = 1000.0 / self.fps as f64 * self.source_ms_per_output_ms(output_ms);
+        let exposure_source_ms =
+            camera::motion_blur_shutter_base_ms(self.fps) * self.source_ms_per_output_ms(output_ms);
         let map_samples = |samples: &[(f64, f64)]| -> Vec<CursorMotionSample> {
             let count = samples.len();
             let raw_weights: Vec<f64> = (0..count)
@@ -803,7 +804,7 @@ impl CursorRenderer {
             .expect("cursor engine")
             .evaluate_motion_samples(
                 source_time_ms,
-                frame_source_ms,
+                exposure_source_ms,
                 shutter,
                 PROBE,
                 &self.settings,
@@ -829,7 +830,7 @@ impl CursorRenderer {
             .expect("cursor engine")
             .evaluate_motion_samples(
                 source_time_ms,
-                frame_source_ms,
+                exposure_source_ms,
                 shutter,
                 samples,
                 &self.settings,
