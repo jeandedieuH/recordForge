@@ -111,8 +111,8 @@ const PRESET_SVGS: Record<CursorAssetId, Omit<CursorAsset, "id" | "label">> = {
     isCenterHotspot: false,
     svg: `<g transform="translate(0.5, 0.5)">
       <path d="M 8.5 2.0 C 7.4 2.0 6.5 2.9 6.5 4.0 L 6.5 11.0 C 5.8 10.6 4.9 10.6 4.2 11.1 C 3.4 11.7 3.2 12.7 3.6 13.6 L 5.4 16.8 C 6.8 19.2 9.2 20.5 12.0 20.5 L 13.5 20.5 C 16.8 20.5 19.2 18.4 19.2 15.2 L 19.2 12.0 C 19.2 11.0 18.2 10.2 17.2 10.2 C 16.8 10.2 16.4 10.3 16.1 10.6 C 15.7 9.8 14.9 9.2 13.9 9.2 C 13.5 9.2 13.1 9.3 12.8 9.5 C 12.5 8.7 11.7 8.2 10.7 8.2 L 9.5 8.2 L 9.5 4.0 C 9.5 2.9 8.6 2.0 8.5 2.0 Z" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linejoin="round" stroke-linecap="round" />
-      <path d="M 11.8 10.8 L 11.8 13.8" fill="none" stroke="{stroke}" stroke-width="1.3" stroke-linecap="round" stroke-opacity="0.85" />
-      <path d="M 15.0 11.5 L 15.0 14.5" fill="none" stroke="{stroke}" stroke-width="1.3" stroke-linecap="round" stroke-opacity="0.85" />
+      <path d="M 11.8 10.8 L 11.8 13.8" fill="none" stroke="{stroke}" stroke-width="1.3" stroke-linecap="round" stroke-opacity="0.85" opacity="{strokeOpacity}" />
+      <path d="M 15.0 11.5 L 15.0 14.5" fill="none" stroke="{stroke}" stroke-width="1.3" stroke-linecap="round" stroke-opacity="0.85" opacity="{strokeOpacity}" />
     </g>`,
   },
   // I-beam drawn as a single filled glyph: thin stem with horizontal serifs
@@ -156,8 +156,8 @@ const PRESET_SVGS: Record<CursorAssetId, Omit<CursorAsset, "id" | "label">> = {
       <path d="M 7.5 4.5 C 7.5 8.5 10.2 10.8 11.5 12 C 10.2 13.2 7.5 15.5 7.5 19.5 L 16.5 19.5 C 16.5 15.5 13.8 13.2 12.5 12 C 13.8 10.8 16.5 8.5 16.5 4.5 Z" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linejoin="round" />
       <line x1="6" y1="4" x2="18" y2="4" stroke="{stroke}" stroke-width="{Math.max(2, strokeWidth)}" stroke-opacity="{strokeOpacity}" stroke-linecap="round" />
       <line x1="6" y1="20" x2="18" y2="20" stroke="{stroke}" stroke-width="{Math.max(2, strokeWidth)}" stroke-opacity="{strokeOpacity}" stroke-linecap="round" />
-      <path d="M 9.5 18.5 C 9.5 17 11 16 12 16 C 13 16 14.5 17 14.5 18.5 Z" fill="{stroke}" fill-opacity="0.85" />
-      <line x1="12" y1="11" x2="12" y2="15.5" stroke="{stroke}" stroke-width="1.2" stroke-linecap="round" stroke-opacity="0.75" />
+      <path d="M 9.5 18.5 C 9.5 17 11 16 12 16 C 13 16 14.5 17 14.5 18.5 Z" fill="{stroke}" fill-opacity="0.85" opacity="{strokeOpacity}" />
+      <line x1="12" y1="11" x2="12" y2="15.5" stroke="{stroke}" stroke-width="1.2" stroke-linecap="round" stroke-opacity="0.75" opacity="{strokeOpacity}" />
     </g>`,
   },
   "shape-help": {
@@ -170,8 +170,8 @@ const PRESET_SVGS: Record<CursorAssetId, Omit<CursorAsset, "id" | "label">> = {
     svg: `<g transform="translate(0.5, 0.5)">
       <path d="M 3 3 L 3 16.5 L 6.8 13.5 L 9.5 19 L 12 17.8 L 9.3 12.4 L 14.5 12.4 Z" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linejoin="round" stroke-linecap="round" />
       <circle cx="16" cy="16" r="5.5" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" />
-      <path d="M 14.4 14.2 C 14.4 13.2 15.1 12.5 16 12.5 C 16.9 12.5 17.6 13.2 17.6 14 C 17.6 14.8 17 15.3 16.4 15.7 C 16 16 15.8 16.3 15.8 16.8" fill="none" stroke="{stroke}" stroke-width="1.3" stroke-linecap="round" />
-      <circle cx="15.8" cy="18.5" r="0.75" fill="{stroke}" />
+      <path d="M 14.4 14.2 C 14.4 13.2 15.1 12.5 16 12.5 C 16.9 12.5 17.6 13.2 17.6 14 C 17.6 14.8 17 15.3 16.4 15.7 C 16 16 15.8 16.3 15.8 16.8" fill="none" stroke="{stroke}" stroke-width="1.3" stroke-opacity="{strokeOpacity}" stroke-linecap="round" />
+      <circle cx="15.8" cy="18.5" r="0.75" fill="{stroke}" fill-opacity="{strokeOpacity}" />
     </g>`,
   },
   "shape-move": {
@@ -196,7 +196,7 @@ const PRESET_SVGS: Record<CursorAssetId, Omit<CursorAsset, "id" | "label">> = {
     svg: `<g transform="translate(0.5, 0.5)">
       <g transform="rotate(45 12 12)">
         <path d="M 2 12 L 6.5 7.5 L 6.5 10.5 L 17.5 10.5 L 17.5 7.5 L 22 12 L 17.5 16.5 L 17.5 13.5 L 6.5 13.5 L 6.5 16.5 Z" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linejoin="round" />
-        <line x1="12" y1="9" x2="12" y2="15" stroke="{stroke}" stroke-width="1.5" stroke-linecap="round" />
+        <line x1="12" y1="9" x2="12" y2="15" stroke="{stroke}" stroke-width="1.5" stroke-opacity="{strokeOpacity}" stroke-linecap="round" />
       </g>
     </g>`,
   },
@@ -210,7 +210,7 @@ const PRESET_SVGS: Record<CursorAssetId, Omit<CursorAsset, "id" | "label">> = {
     svg: `<g transform="translate(0.5, 0.5)">
       <g transform="rotate(-45 12 12)">
         <path d="M 2 12 L 6.5 7.5 L 6.5 10.5 L 17.5 10.5 L 17.5 7.5 L 22 12 L 17.5 16.5 L 17.5 13.5 L 6.5 13.5 L 6.5 16.5 Z" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linejoin="round" />
-        <line x1="12" y1="9" x2="12" y2="15" stroke="{stroke}" stroke-width="1.5" stroke-linecap="round" />
+        <line x1="12" y1="9" x2="12" y2="15" stroke="{stroke}" stroke-width="1.5" stroke-opacity="{strokeOpacity}" stroke-linecap="round" />
       </g>
     </g>`,
   },
@@ -223,7 +223,7 @@ const PRESET_SVGS: Record<CursorAssetId, Omit<CursorAsset, "id" | "label">> = {
     isCenterHotspot: false,
     svg: `<g transform="translate(0.5, 0.5)">
       <path d="M 2 12 L 6.5 7.5 L 6.5 10.5 L 17.5 10.5 L 17.5 7.5 L 22 12 L 17.5 16.5 L 17.5 13.5 L 6.5 13.5 L 6.5 16.5 Z" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linejoin="round" />
-      <line x1="12" y1="9" x2="12" y2="15" stroke="{stroke}" stroke-width="1.5" stroke-linecap="round" />
+      <line x1="12" y1="9" x2="12" y2="15" stroke="{stroke}" stroke-width="1.5" stroke-opacity="{strokeOpacity}" stroke-linecap="round" />
     </g>`,
   },
   "shape-resize-vertical": {
@@ -235,7 +235,7 @@ const PRESET_SVGS: Record<CursorAssetId, Omit<CursorAsset, "id" | "label">> = {
     isCenterHotspot: false,
     svg: `<g transform="translate(0.5, 0.5)">
       <path d="M 12 2 L 7.5 6.5 L 10.5 6.5 L 10.5 17.5 L 7.5 17.5 L 12 22 L 16.5 17.5 L 13.5 17.5 L 13.5 6.5 L 16.5 6.5 Z" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linejoin="round" />
-      <line x1="9" y1="12" x2="15" y2="12" stroke="{stroke}" stroke-width="1.5" stroke-linecap="round" />
+      <line x1="9" y1="12" x2="15" y2="12" stroke="{stroke}" stroke-width="1.5" stroke-opacity="{strokeOpacity}" stroke-linecap="round" />
     </g>`,
   },
   "shape-unavailable": {
@@ -263,10 +263,10 @@ const PRESET_SVGS: Record<CursorAssetId, Omit<CursorAsset, "id" | "label">> = {
     isCenterHotspot: false,
     svg: `<g transform="translate(0.5, 0.5)">
       <path d="M 5.2 8.9 C 6.2 8.0 7.5 8.3 8.1 9.3 L 9.2 7.5 C 9.6 6.3 10.0 5.6 10.8 5.5 C 11.6 5.4 12.0 6.4 12.0 7.8 C 12.1 6.4 12.4 5.0 13.3 4.9 C 14.1 4.8 14.6 5.8 14.6 7.3 C 14.7 6.1 15.1 5.1 15.9 5.2 C 16.7 5.3 17.1 6.4 17.0 7.8 C 17.5 7.5 18.1 7.9 18.2 8.6 C 18.5 9.7 18.5 11.0 18.5 12.4 L 18.5 18.2 C 18.5 20.1 17.0 21.5 15.2 21.5 L 10.4 21.5 C 8.6 21.5 7.1 20.1 7.1 18.2 L 7.1 13.8 C 6.4 12.9 5.5 12.1 5.0 10.9 C 4.6 10.0 4.7 9.3 5.2 8.9 Z" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linejoin="round" stroke-linecap="round" />
-      <path d="M 12.0 7.9 C 11.9 8.9 11.8 9.9 11.8 10.8" fill="none" stroke="{stroke}" stroke-width="1.3" stroke-linecap="round" stroke-opacity="0.85" />
-      <path d="M 14.6 7.4 C 14.5 8.4 14.5 9.4 14.5 10.4" fill="none" stroke="{stroke}" stroke-width="1.3" stroke-linecap="round" stroke-opacity="0.85" />
-      <path d="M 17.0 7.9 C 17.0 8.9 17.1 9.9 17.1 10.8" fill="none" stroke="{stroke}" stroke-width="1.3" stroke-linecap="round" stroke-opacity="0.85" />
-      <path d="M 8.3 10.0 C 7.9 11.0 7.7 12.0 7.8 13.0" fill="none" stroke="{stroke}" stroke-width="1.3" stroke-linecap="round" stroke-opacity="0.85" />
+      <path d="M 12.0 7.9 C 11.9 8.9 11.8 9.9 11.8 10.8" fill="none" stroke="{stroke}" stroke-width="1.3" stroke-linecap="round" stroke-opacity="0.85" opacity="{strokeOpacity}" />
+      <path d="M 14.6 7.4 C 14.5 8.4 14.5 9.4 14.5 10.4" fill="none" stroke="{stroke}" stroke-width="1.3" stroke-linecap="round" stroke-opacity="0.85" opacity="{strokeOpacity}" />
+      <path d="M 17.0 7.9 C 17.0 8.9 17.1 9.9 17.1 10.8" fill="none" stroke="{stroke}" stroke-width="1.3" stroke-linecap="round" stroke-opacity="0.85" opacity="{strokeOpacity}" />
+      <path d="M 8.3 10.0 C 7.9 11.0 7.7 12.0 7.8 13.0" fill="none" stroke="{stroke}" stroke-width="1.3" stroke-linecap="round" stroke-opacity="0.85" opacity="{strokeOpacity}" />
     </g>`,
   },
   // Closed "grabbing" fist: same rounded palm but knuckles only (fingers
@@ -281,9 +281,9 @@ const PRESET_SVGS: Record<CursorAssetId, Omit<CursorAsset, "id" | "label">> = {
     isCenterHotspot: false,
     svg: `<g transform="translate(0.5, 0.5)">
       <path d="M 7.2 14.2 C 6.3 13.3 6.2 12.0 7.0 11.2 C 8.0 10.0 9.4 10.1 10.0 11.0 C 10.1 9.7 10.5 8.7 11.5 8.6 C 12.4 8.5 12.8 9.3 12.8 10.1 C 13.0 9.1 13.5 8.3 14.4 8.4 C 15.3 8.5 15.7 9.3 15.6 10.2 C 16.0 9.5 16.7 9.1 17.4 9.5 C 18.2 9.9 18.5 10.9 18.5 11.9 L 18.5 17.5 C 18.5 19.7 17.0 21.2 14.9 21.2 L 10.8 21.2 C 8.9 21.2 7.4 19.7 7.4 17.5 L 7.4 15.8 C 6.9 15.3 6.8 14.7 7.2 14.2 Z" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linejoin="round" stroke-linecap="round" />
-      <path d="M 12.8 10.3 C 12.7 11.1 12.6 11.9 12.7 12.7" fill="none" stroke="{stroke}" stroke-width="1.3" stroke-linecap="round" stroke-opacity="0.85" />
-      <path d="M 15.6 10.4 C 15.5 11.2 15.5 12.0 15.6 12.8" fill="none" stroke="{stroke}" stroke-width="1.3" stroke-linecap="round" stroke-opacity="0.85" />
-      <path d="M 9.8 11.4 C 9.0 12.3 8.6 13.3 8.7 14.3" fill="none" stroke="{stroke}" stroke-width="1.3" stroke-linecap="round" stroke-opacity="0.85" />
+      <path d="M 12.8 10.3 C 12.7 11.1 12.6 11.9 12.7 12.7" fill="none" stroke="{stroke}" stroke-width="1.3" stroke-linecap="round" stroke-opacity="0.85" opacity="{strokeOpacity}" />
+      <path d="M 15.6 10.4 C 15.5 11.2 15.5 12.0 15.6 12.8" fill="none" stroke="{stroke}" stroke-width="1.3" stroke-linecap="round" stroke-opacity="0.85" opacity="{strokeOpacity}" />
+      <path d="M 9.8 11.4 C 9.0 12.3 8.6 13.3 8.7 14.3" fill="none" stroke="{stroke}" stroke-width="1.3" stroke-linecap="round" stroke-opacity="0.85" opacity="{strokeOpacity}" />
     </g>`,
   },
   "shape-zoom-in": {
@@ -296,8 +296,8 @@ const PRESET_SVGS: Record<CursorAssetId, Omit<CursorAsset, "id" | "label">> = {
     svg: `<g transform="translate(0.5, 0.5)">
       <circle cx="10" cy="10" r="6.5" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" />
       <line x1="14.8" y1="14.8" x2="20.5" y2="20.5" stroke="{stroke}" stroke-width="{Math.max(2, strokeWidth)}" stroke-opacity="{strokeOpacity}" stroke-linecap="round" />
-      <line x1="7.5" y1="10" x2="12.5" y2="10" stroke="{stroke}" stroke-width="1.5" stroke-linecap="round" />
-      <line x1="10" y1="7.5" x2="10" y2="12.5" stroke="{stroke}" stroke-width="1.5" stroke-linecap="round" />
+      <line x1="7.5" y1="10" x2="12.5" y2="10" stroke="{stroke}" stroke-width="1.5" stroke-opacity="{strokeOpacity}" stroke-linecap="round" />
+      <line x1="10" y1="7.5" x2="10" y2="12.5" stroke="{stroke}" stroke-width="1.5" stroke-opacity="{strokeOpacity}" stroke-linecap="round" />
     </g>`,
   },
   "shape-zoom-out": {
@@ -310,7 +310,7 @@ const PRESET_SVGS: Record<CursorAssetId, Omit<CursorAsset, "id" | "label">> = {
     svg: `<g transform="translate(0.5, 0.5)">
       <circle cx="10" cy="10" r="6.5" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" />
       <line x1="14.8" y1="14.8" x2="20.5" y2="20.5" stroke="{stroke}" stroke-width="{Math.max(2, strokeWidth)}" stroke-opacity="{strokeOpacity}" stroke-linecap="round" />
-      <line x1="7.5" y1="10" x2="12.5" y2="10" stroke="{stroke}" stroke-width="1.5" stroke-linecap="round" />
+      <line x1="7.5" y1="10" x2="12.5" y2="10" stroke="{stroke}" stroke-width="1.5" stroke-opacity="{strokeOpacity}" stroke-linecap="round" />
     </g>`,
   },
   "shape-copy": {
@@ -323,8 +323,8 @@ const PRESET_SVGS: Record<CursorAssetId, Omit<CursorAsset, "id" | "label">> = {
     svg: `<g transform="translate(0.5, 0.5)">
       <path d="M 3 3 L 3 16.5 L 6.8 13.5 L 9.5 19 L 12 17.8 L 9.3 12.4 L 14.5 12.4 Z" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linejoin="round" stroke-linecap="round" />
       <rect x="12" y="12" width="9" height="9" rx="2" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" />
-      <line x1="14" y1="16.5" x2="19" y2="16.5" stroke="{stroke}" stroke-width="1.5" stroke-linecap="round" />
-      <line x1="16.5" y1="14" x2="16.5" y2="19" stroke="{stroke}" stroke-width="1.5" stroke-linecap="round" />
+      <line x1="14" y1="16.5" x2="19" y2="16.5" stroke="{stroke}" stroke-width="1.5" stroke-opacity="{strokeOpacity}" stroke-linecap="round" />
+      <line x1="16.5" y1="14" x2="16.5" y2="19" stroke="{stroke}" stroke-width="1.5" stroke-opacity="{strokeOpacity}" stroke-linecap="round" />
     </g>`,
   },
   "shape-progress": {
@@ -337,8 +337,8 @@ const PRESET_SVGS: Record<CursorAssetId, Omit<CursorAsset, "id" | "label">> = {
     svg: `<g transform="translate(0.5, 0.5)">
       <path d="M 3 3 L 3 16.5 L 6.8 13.5 L 9.5 19 L 12 17.8 L 9.3 12.4 L 14.5 12.4 Z" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linejoin="round" stroke-linecap="round" />
       <circle cx="16.5" cy="16.5" r="4.5" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" />
-      <line x1="16.5" y1="13.5" x2="16.5" y2="16.5" stroke="{stroke}" stroke-width="1.2" stroke-linecap="round" />
-      <line x1="16.5" y1="16.5" x2="19" y2="16.5" stroke="{stroke}" stroke-width="1.2" stroke-linecap="round" />
+      <line x1="16.5" y1="13.5" x2="16.5" y2="16.5" stroke="{stroke}" stroke-width="1.2" stroke-opacity="{strokeOpacity}" stroke-linecap="round" />
+      <line x1="16.5" y1="16.5" x2="19" y2="16.5" stroke="{stroke}" stroke-width="1.2" stroke-opacity="{strokeOpacity}" stroke-linecap="round" />
     </g>`,
   },
   "shape-cell": {
@@ -453,9 +453,9 @@ const PRESET_SVGS: Record<CursorAssetId, Omit<CursorAsset, "id" | "label">> = {
     svg: `<g transform="translate(0.5, 0.5)">
       <path d="M 3 3 L 3 16.5 L 6.8 13.5 L 9.5 19 L 12 17.8 L 9.3 12.4 L 14.5 12.4 Z" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linejoin="round" stroke-linecap="round" />
       <rect x="12.5" y="13.5" width="9" height="8" rx="1.8" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" />
-      <line x1="14.5" y1="16" x2="19.5" y2="16" stroke="{stroke}" stroke-width="1.2" stroke-linecap="round" />
-      <line x1="14.5" y1="18" x2="19.5" y2="18" stroke="{stroke}" stroke-width="1.2" stroke-linecap="round" />
-      <line x1="14.5" y1="20" x2="19.5" y2="20" stroke="{stroke}" stroke-width="1.2" stroke-linecap="round" />
+      <line x1="14.5" y1="16" x2="19.5" y2="16" stroke="{stroke}" stroke-width="1.2" stroke-opacity="{strokeOpacity}" stroke-linecap="round" />
+      <line x1="14.5" y1="18" x2="19.5" y2="18" stroke="{stroke}" stroke-width="1.2" stroke-opacity="{strokeOpacity}" stroke-linecap="round" />
+      <line x1="14.5" y1="20" x2="19.5" y2="20" stroke="{stroke}" stroke-width="1.2" stroke-opacity="{strokeOpacity}" stroke-linecap="round" />
     </g>`,
   },
   // Alias/shortcut link: pointer arrow plus a circular badge carrying a
@@ -470,7 +470,7 @@ const PRESET_SVGS: Record<CursorAssetId, Omit<CursorAsset, "id" | "label">> = {
     svg: `<g transform="translate(0.5, 0.5)">
       <path d="M 3 3 L 3 16.5 L 6.8 13.5 L 9.5 19 L 12 17.8 L 9.3 12.4 L 14.5 12.4 Z" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linejoin="round" stroke-linecap="round" />
       <circle cx="16.5" cy="16.5" r="5" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" />
-      <path d="M 15.4 14.5 L 18.5 14.5 L 18.5 17.6 M 14.3 18.7 L 18.3 14.7" fill="none" stroke="{stroke}" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+      <path d="M 15.4 14.5 L 18.5 14.5 L 18.5 17.6 M 14.3 18.7 L 18.3 14.7" fill="none" stroke="{stroke}" stroke-width="1.4" stroke-opacity="{strokeOpacity}" stroke-linecap="round" stroke-linejoin="round" />
     </g>`,
   },
   // Alternate-select / up arrow (Windows IDC_UPARROW, X11 `center_ptr`): a slim
@@ -497,8 +497,8 @@ const PRESET_SVGS: Record<CursorAssetId, Omit<CursorAsset, "id" | "label">> = {
     isCenterHotspot: false,
     svg: `<g transform="translate(0.5, 0.5)">
       <path d="M 3.4 3.4 L 5.0 8.6 L 15.9 19.5 L 19.5 15.9 L 8.6 5.0 Z" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linejoin="round" stroke-linecap="round" />
-      <path d="M 3.4 3.4 L 6.6 4.3 L 4.3 6.6 Z" fill="{stroke}" fill-opacity="0.9" />
-      <line x1="14.2" y1="17.8" x2="17.8" y2="14.2" stroke="{stroke}" stroke-width="1.2" stroke-linecap="round" stroke-opacity="0.75" />
+      <path d="M 3.4 3.4 L 6.6 4.3 L 4.3 6.6 Z" fill="{stroke}" fill-opacity="0.9" opacity="{strokeOpacity}" />
+      <line x1="14.2" y1="17.8" x2="17.8" y2="14.2" stroke="{stroke}" stroke-width="1.2" stroke-linecap="round" stroke-opacity="0.75" opacity="{strokeOpacity}" />
     </g>`,
   },
   // Location-select pushpin (Windows IDC_PIN): rounded head with a tapered
@@ -513,7 +513,7 @@ const PRESET_SVGS: Record<CursorAssetId, Omit<CursorAsset, "id" | "label">> = {
     svg: `<g transform="translate(0.5, 0.5)">
       <path d="M 12 3.2 C 8.9 3.2 6.4 5.7 6.4 8.8 C 6.4 10.9 7.5 12.7 9.2 13.7 L 9.2 16.2 L 14.8 16.2 L 14.8 13.7 C 16.5 12.7 17.6 10.9 17.6 8.8 C 17.6 5.7 15.1 3.2 12 3.2 Z" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linejoin="round" />
       <path d="M 11.0 16.2 L 12.0 21.2 L 13.0 16.2 Z" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linejoin="round" />
-      <circle cx="12" cy="8.8" r="2.2" fill="{stroke}" fill-opacity="0.9" />
+      <circle cx="12" cy="8.8" r="2.2" fill="{stroke}" fill-opacity="0.9" opacity="{strokeOpacity}" />
     </g>`,
   },
   // Person select (Windows IDC_PERSON): head-and-shoulders silhouette.
@@ -795,7 +795,7 @@ export function renderCursorAssetSvg(
     fill: props.fill ?? "#3b82f6",
     fillOpacity: props.fillOpacity ?? 1,
     stroke: props.stroke ?? "#ffffff",
-    strokeWidth: props.strokeWidth ?? 2,
+    strokeWidth: props.strokeWidth ?? 1,
     strokeOpacity: props.strokeOpacity ?? 1,
   }
 

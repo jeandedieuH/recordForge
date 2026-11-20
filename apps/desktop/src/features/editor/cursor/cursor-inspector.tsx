@@ -324,11 +324,11 @@ function BasicCursorSettings({
               preset={styleMeta.id}
               isPreview
               className="size-7"
-              fillColor={settings.fillColor ?? "#3b82f6"}
-              fillOpacity={settings.fillOpacity ?? 1}
-              strokeColor={settings.strokeColor ?? "#ffffff"}
-              strokeWidth={settings.strokeWidth ?? 2}
-              strokeOpacity={settings.strokeOpacity ?? 1}
+              fillColor={settings.fillColor ?? defaultCursorSettings.fillColor}
+              fillOpacity={settings.fillOpacity ?? defaultCursorSettings.fillOpacity}
+              strokeColor={settings.strokeColor ?? defaultCursorSettings.strokeColor}
+              strokeWidth={settings.strokeWidth ?? defaultCursorSettings.strokeWidth}
+              strokeOpacity={settings.strokeOpacity ?? defaultCursorSettings.strokeOpacity}
             />
           </div>
           <div className="min-w-0">
@@ -396,7 +396,7 @@ function BasicCursorSettings({
               <ColorPicker
                 aria-label="Fill color"
                 size="sm"
-                value={settings.fillColor ?? "#3b82f6"}
+                value={settings.fillColor ?? defaultCursorSettings.fillColor}
                 onChange={(fillColor) => onChange({ fillColor })}
                 className="w-full"
                 triggerClassName="w-full justify-between"
@@ -407,7 +407,7 @@ function BasicCursorSettings({
               <ColorPicker
                 aria-label="Stroke color"
                 size="sm"
-                value={settings.strokeColor ?? "#ffffff"}
+                value={settings.strokeColor ?? defaultCursorSettings.strokeColor}
                 onChange={(strokeColor) => onChange({ strokeColor })}
                 className="w-full"
                 triggerClassName="w-full justify-between"
@@ -609,10 +609,13 @@ interface AdvancedCursorSettingsProps {
   onChange: (updated: Partial<CursorSettings>) => void
 }
 
-function AdvancedCursorSettings({ settings, onChange }: AdvancedCursorSettingsProps) {
+export function AdvancedCursorSettings({ settings, onChange }: AdvancedCursorSettingsProps) {
   // smoothFactor is an EMA alpha: 1 follows raw input, lower values are
   // smoother. The slider exposes it as "strength" so higher = smoother.
   const smoothingStrength = 1 - (settings.smoothFactor ?? 0.25)
+  const strokeWidth = settings.strokeWidth ?? defaultCursorSettings.strokeWidth
+  const fillOpacity = settings.fillOpacity ?? defaultCursorSettings.fillOpacity
+  const strokeOpacity = settings.strokeOpacity ?? defaultCursorSettings.strokeOpacity
 
   return (
     <div className="space-y-4">
@@ -622,10 +625,10 @@ function AdvancedCursorSettings({ settings, onChange }: AdvancedCursorSettingsPr
         <div className="space-y-1.5 pt-1">
           <div className="flex justify-between text-[11px]">
             <span>Stroke Width</span>
-            <span className="font-mono">{settings.strokeWidth ?? 2}px</span>
+            <span className="font-mono">{strokeWidth.toFixed(1)}px</span>
           </div>
           <DebouncedSlider
-            value={[settings.strokeWidth ?? 2]}
+            value={[strokeWidth]}
             min={0}
             max={8}
             step={0.5}
@@ -636,15 +639,31 @@ function AdvancedCursorSettings({ settings, onChange }: AdvancedCursorSettingsPr
 
         <div className="space-y-1.5">
           <div className="flex justify-between text-[11px]">
-            <span>Cursor opacity</span>
-            <span className="font-mono">{Math.round((settings.fillOpacity ?? 1) * 100)}%</span>
+            <span>Stroke opacity</span>
+            <span className="font-mono">{Math.round(strokeOpacity * 100)}%</span>
           </div>
           <DebouncedSlider
-            value={[settings.fillOpacity ?? 1]}
+            value={[strokeOpacity]}
             min={0}
             max={1}
             step={0.05}
-            onValueCommit={([val]) => onChange({ fillOpacity: val })}
+            onValueCommit={([val]) => onChange({ strokeOpacity: val })}
+            aria-label="Stroke opacity"
+          />
+        </div>
+
+        <div className="space-y-1.5">
+          <div className="flex justify-between text-[11px]">
+            <span>Cursor opacity</span>
+            <span className="font-mono">{Math.round(fillOpacity * 100)}%</span>
+          </div>
+          <DebouncedSlider
+            value={[fillOpacity]}
+            min={0}
+            max={1}
+            step={0.05}
+            // Update both fill and stroke opacity so fading the cursor does not leave an opaque outline.
+            onValueCommit={([val]) => onChange({ fillOpacity: val, strokeOpacity: val })}
             aria-label="Cursor opacity"
           />
         </div>
@@ -839,7 +858,7 @@ function AdvancedCursorSettings({ settings, onChange }: AdvancedCursorSettingsPr
  * (they ship into the exported video), so explicit values are intentional —
  * they mirror the DPI-consistent recommendedCursorSettings defaults.
  */
-const CURSOR_THEMES: {
+export const CURSOR_THEMES: {
   id: "light" | "dark" | "accent"
   label: string
   fillColor: string
@@ -848,5 +867,5 @@ const CURSOR_THEMES: {
 }[] = [
   { id: "light", label: "Light", fillColor: "#ffffff", strokeColor: "#111111", strokeWidth: 1.5 },
   { id: "dark", label: "Dark", fillColor: "#111111", strokeColor: "#ffffff", strokeWidth: 1.5 },
-  { id: "accent", label: "Accent", fillColor: "#3b82f6", strokeColor: "#ffffff", strokeWidth: 2 },
+  { id: "accent", label: "Accent", fillColor: "#3b82f6", strokeColor: "#ffffff", strokeWidth: 1.5 },
 ]

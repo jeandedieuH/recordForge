@@ -20,11 +20,11 @@ interface StylePreset {
 
 const STYLES: StylePreset[] = [
   // Classic product defaults (blue fill / white outline) on light + dark.
-  { name: "blue/light", fill: "#3b82f6", stroke: "#ffffff", strokeWidth: 2, bg: "#f4f4f5" },
-  { name: "blue/dark", fill: "#3b82f6", stroke: "#ffffff", strokeWidth: 2, bg: "#18181b" },
+  { name: "blue/light", fill: "#3b82f6", stroke: "#ffffff", strokeWidth: 1.5, bg: "#f4f4f5" },
+  { name: "blue/dark", fill: "#3b82f6", stroke: "#ffffff", strokeWidth: 1.5, bg: "#18181b" },
   // Recommended dpi-model style (white fill / dark outline) on light + dark.
-  { name: "mono/light", fill: "#ffffff", stroke: "#111111", strokeWidth: 1.5, bg: "#f4f4f5" },
-  { name: "mono/dark", fill: "#ffffff", stroke: "#111111", strokeWidth: 1.5, bg: "#18181b" },
+  { name: "mono/light", fill: "#ffffff", stroke: "#111111", strokeWidth: 1.0, bg: "#f4f4f5" },
+  { name: "mono/dark", fill: "#ffffff", stroke: "#111111", strokeWidth: 1.0, bg: "#18181b" },
 ]
 
 const SIZES = [24, 48, 96]

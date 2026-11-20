@@ -755,7 +755,7 @@ pub fn create_project(
                 "fillColor": "#3b82f6",
                 "fillOpacity": 1.0,
                 "strokeColor": "#ffffff",
-                "strokeWidth": 2.0,
+                "strokeWidth": 1.0,
                 "strokeOpacity": 1.0,
                 "shadowEnabled": true,
                 "shadowColor": "#000000",

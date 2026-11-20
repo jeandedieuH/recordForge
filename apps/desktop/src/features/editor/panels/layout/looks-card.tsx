@@ -6,6 +6,7 @@ import {
   type LookValues,
 } from "@recordforge/editor-core"
 import type { TimelineState } from "@recordforge/contracts"
+import { defaultCursorSettings } from "@recordforge/contracts"
 import { Button, Input, Skeleton, Switch, cn, useToast } from "@recordforge/ui"
 import { MousePointer2, Save, Sparkles, User } from "lucide-react"
 import { useTimelineStore } from "../../../../stores/timeline-store"
@@ -341,7 +342,7 @@ function LookSwatch({
             fill: cursor.fillColor ?? FALLBACK_CURSOR_FILL,
             stroke: cursor.strokeColor ?? FALLBACK_CURSOR_STROKE,
           }}
-          strokeWidth={1.5}
+          strokeWidth={Math.min(1.5, cursor.strokeWidth ?? defaultCursorSettings.strokeWidth)}
         />
         {/* Camera bubble */}
         <span

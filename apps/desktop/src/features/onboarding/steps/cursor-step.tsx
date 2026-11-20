@@ -215,7 +215,7 @@ export function CursorStep() {
                 fillColor={activeColor}
                 fillOpacity={1}
                 strokeColor="#ffffff"
-                strokeWidth={2}
+                strokeWidth={defaultCursorSettings.strokeWidth}
                 strokeOpacity={1}
                 className="relative z-10"
               />

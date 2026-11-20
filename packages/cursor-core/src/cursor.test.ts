@@ -351,6 +351,23 @@ describe("cursor-core", () => {
       expect(rendered).toContain("#000000")
       // Ensure no raw text nodes that break headless usvg rasterizers
       expect(rendered).not.toContain("<text")
+
+      // Default strokeWidth is 1.0px when omitted
+      const defaulted = renderCursorAssetSvg(asset, {})
+      expect(defaulted).toContain('stroke-width="1"')
+
+      // Zero strokeOpacity propagates to inner stroke/accent primitives
+      const zeroStroke = renderCursorAssetSvg(asset, { strokeOpacity: 0 })
+      expect(zeroStroke).not.toContain("{strokeOpacity}")
+      for (const match of zeroStroke.matchAll(/<(?:path|line|circle|rect)\b[^>]*>/g)) {
+        const tag = match[0]
+        if (tag.includes('stroke="#ffffff"') && !tag.includes('opacity="0"')) {
+          expect(tag).toContain('stroke-opacity="0"')
+        }
+        if (tag.includes('fill="#ffffff"') && !tag.includes('opacity="0"')) {
+          expect(tag).toContain('fill-opacity="0"')
+        }
+      }
     }
   })
 

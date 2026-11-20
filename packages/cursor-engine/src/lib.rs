@@ -477,7 +477,7 @@ impl Default for CursorSettings {
             fill_color: "#3b82f6".into(),
             fill_opacity: 1.0,
             stroke_color: "#ffffff".into(),
-            stroke_width: 2.0,
+            stroke_width: 1.0,
             stroke_opacity: 1.0,
             shadow_enabled: true,
             shadow_color: "#000000".into(),
@@ -3146,5 +3146,10 @@ mod tests {
             assert_eq!(packed[idx * 2], *x);
             assert_eq!(packed[idx * 2 + 1], *y);
         }
+    }
+
+    #[test]
+    fn default_cursor_stroke_width_is_one_px() {
+        assert_eq!(CursorSettings::default().stroke_width, 1.0);
     }
 }

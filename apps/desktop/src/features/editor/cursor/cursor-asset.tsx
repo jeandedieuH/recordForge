@@ -27,7 +27,7 @@ export function RenderCursorPreset({
   fillColor = "#3b82f6",
   fillOpacity = 1,
   strokeColor = "#ffffff",
-  strokeWidth = 2,
+  strokeWidth = 1,
   strokeOpacity = 1,
   className,
 }: CursorAssetSvgProps) {

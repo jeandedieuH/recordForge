@@ -1,13 +1,19 @@
 import { describe, expect, it } from "vitest"
-import { cursorTelemetryFileSchema, defaultCursorSettings } from "./cursor"
+import {
+  cursorTelemetryFileSchema,
+  defaultCursorSettings,
+  recommendedCursorSettings,
+} from "./cursor"
 import { cursorEffectClipSchema } from "./timeline"
 
 describe("cursor contracts", () => {
-  it("keeps the custom cursor enabled by default", () => {
+  it("keeps the custom cursor enabled by default with 1.0px stroke", () => {
     expect(defaultCursorSettings.preset).toBe("recorded-system")
     expect(defaultCursorSettings.hideNativeCursor).toBe(true)
     expect(defaultCursorSettings.shapeMode).toBe("optimized")
     expect(defaultCursorSettings.clickPressAnimation).toBe(true)
+    expect(defaultCursorSettings.strokeWidth).toBe(1.0)
+    expect(recommendedCursorSettings.strokeWidth).toBe(1.0)
   })
 
   it("accepts telemetry emitted by the Rust tracker", () => {
